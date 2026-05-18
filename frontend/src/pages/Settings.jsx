@@ -4,10 +4,11 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { PageHeader, Card } from "@/components/erp/Primitives";
-import { Save, Copy, ShieldCheck, ShieldOff } from "lucide-react";
+import { Save, Copy, ShieldCheck, ShieldOff, Plus, Trash2, RefreshCw, Star, ExternalLink, Inbox } from "lucide-react";
 import { toast } from "sonner";
 
 export default function Settings() {
@@ -51,12 +52,11 @@ export default function Settings() {
 
   return (
     <div data-testid="settings-page">
-      <PageHeader overline="Administration" title="Settings & Integrations" subtitle="Configure company details, Twilio WhatsApp, Resend email, Indiamart, TradeIndia, and your 2FA." />
+      <PageHeader overline="Administration" title="Settings & Integrations" subtitle="Connect email mailboxes (Gmail/Outlook/Yahoo), Twilio WhatsApp, Indiamart/TradeIndia, and manage 2FA." />
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList className="rounded-sm bg-slate-100 mb-4 flex-wrap h-auto">
           <TabsTrigger value="company" className="rounded-sm" data-testid="tab-company">Company</TabsTrigger>
-          <TabsTrigger value="google" className="rounded-sm" data-testid="tab-google">Gmail + Drive</TabsTrigger>
-          <TabsTrigger value="outlook" className="rounded-sm" data-testid="tab-outlook">Outlook (Microsoft)</TabsTrigger>
+          <TabsTrigger value="email" className="rounded-sm" data-testid="tab-email">Email Accounts</TabsTrigger>
           <TabsTrigger value="twilio" className="rounded-sm" data-testid="tab-twilio">Twilio WhatsApp</TabsTrigger>
           <TabsTrigger value="indiamart" className="rounded-sm" data-testid="tab-indiamart">Indiamart</TabsTrigger>
           <TabsTrigger value="tradeindia" className="rounded-sm" data-testid="tab-tradeindia">TradeIndia</TabsTrigger>
@@ -76,36 +76,8 @@ export default function Settings() {
           </Card>
         </TabsContent>
 
-        <TabsContent value="google">
-          <Card className="p-6">
-            <p className="text-sm text-slate-600 mb-3">Configure OAuth in <a className="text-red-600 underline" target="_blank" rel="noreferrer" href="https://console.cloud.google.com/apis/credentials">Google Cloud Console</a>. Enable <strong>Drive API</strong> and <strong>Gmail API</strong>. Add this Redirect URI: <code className="bg-slate-100 px-1 text-xs">{`${window.location.origin}/api/integrations/google/callback`}</code></p>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <Fld label="Google Client ID"><Input value={s.google_client_id || ""} onChange={e=>setF("google_client_id", e.target.value)} className="rounded-sm font-mono-tech" data-testid="g-client-id" /></Fld>
-              <Fld label="Google Client Secret"><Input type="password" value={s.google_client_secret || ""} onChange={e=>setF("google_client_secret", e.target.value)} className="rounded-sm font-mono-tech" data-testid="g-client-secret" /></Fld>
-              <Fld label="Redirect URI"><Input value={s.google_redirect_uri || `${window.location.origin}/api/integrations/google/callback`} onChange={e=>setF("google_redirect_uri", e.target.value)} className="rounded-sm font-mono-tech" data-testid="g-redirect" /></Fld>
-              <Fld label="Drive folder ID (optional, for backups)"><Input value={s.google_drive_folder_id || ""} onChange={e=>setF("google_drive_folder_id", e.target.value)} className="rounded-sm font-mono-tech" placeholder="root if blank" /></Fld>
-            </div>
-            <div className="mt-4 flex gap-2 items-center">
-              <Button onClick={save} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="save-google"><Save className="h-4 w-4 mr-1" /> Save</Button>
-              <GoogleConnectBlock />
-            </div>
-          </Card>
-        </TabsContent>
-
-        <TabsContent value="outlook">
-          <Card className="p-6">
-            <p className="text-sm text-slate-600 mb-3">Register an app in <a className="text-red-600 underline" target="_blank" rel="noreferrer" href="https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade">Microsoft Entra (Azure Portal)</a> → New registration → add platform "Web" with this Redirect URI: <code className="bg-slate-100 px-1 text-xs">{`${window.location.origin}/api/integrations/microsoft/callback`}</code>. Under API permissions add <strong>Mail.Send, Mail.Read, User.Read, offline_access</strong> (delegated) and grant admin consent. Create a Client Secret under "Certificates & secrets".</p>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <Fld label="Microsoft Client (Application) ID"><Input value={s.microsoft_client_id || ""} onChange={e=>setF("microsoft_client_id", e.target.value)} className="rounded-sm font-mono-tech" data-testid="ms-client-id" /></Fld>
-              <Fld label="Microsoft Client Secret"><Input type="password" value={s.microsoft_client_secret || ""} onChange={e=>setF("microsoft_client_secret", e.target.value)} className="rounded-sm font-mono-tech" data-testid="ms-client-secret" /></Fld>
-              <Fld label="Tenant (default 'common' for any account)"><Input value={s.microsoft_tenant || "common"} onChange={e=>setF("microsoft_tenant", e.target.value)} className="rounded-sm font-mono-tech" /></Fld>
-              <Fld label="Redirect URI"><Input value={s.microsoft_redirect_uri || `${window.location.origin}/api/integrations/microsoft/callback`} onChange={e=>setF("microsoft_redirect_uri", e.target.value)} className="rounded-sm font-mono-tech" data-testid="ms-redirect" /></Fld>
-            </div>
-            <div className="mt-4 flex gap-2 items-center">
-              <Button onClick={save} className="rounded-sm bg-red-600 hover:bg-red-700"><Save className="h-4 w-4 mr-1" /> Save</Button>
-              <OutlookConnectBlock />
-            </div>
-          </Card>
+        <TabsContent value="email">
+          <EmailAccountsPanel />
         </TabsContent>
 
         <TabsContent value="twilio">
@@ -200,31 +172,201 @@ const Fld = ({ label, children }) => (
   <div><Label className="text-xs uppercase tracking-wider text-slate-600">{label}</Label><div className="mt-1.5">{children}</div></div>
 );
 
-function GoogleConnectBlock() {
-  const [status, setStatus] = useState(null);
-  const load = async () => { try { const r = await api.get("/integrations/google/status"); setStatus(r.data); } catch (e) {} };
+function EmailAccountsPanel() {
+  const [accounts, setAccounts] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [addOpen, setAddOpen] = useState(false);
+  const [inboxAcct, setInboxAcct] = useState(null);
+
+  const load = async () => {
+    setLoading(true);
+    try { const r = await api.get("/email/accounts"); setAccounts(r.data || []); }
+    catch (e) { toast.error("Failed to load email accounts"); }
+    finally { setLoading(false); }
+  };
   useEffect(() => { load(); }, []);
-  const connect = async () => {
-    try {
-      const r = await api.get("/integrations/google/auth-url");
-      window.location.href = r.data.auth_url;
-    } catch (e) { toast.error(e?.response?.data?.detail || "Save OAuth config first"); }
+
+  const remove = async (a) => {
+    if (!window.confirm(`Disconnect ${a.email}? You can re-add it any time.`)) return;
+    try { await api.delete(`/email/accounts/${a.id}`); toast.success("Disconnected"); load(); }
+    catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
   };
-  const disconnect = async () => {
-    if (!window.confirm("Disconnect your Google account?")) return;
-    await api.post("/integrations/google/disconnect"); load(); toast.success("Disconnected");
+  const test = async (a) => {
+    try { const r = await api.post(`/email/accounts/${a.id}/test`); toast[r.data?.ok ? "success" : "error"](r.data?.ok ? "Connection OK" : (r.data?.error || "Failed")); load(); }
+    catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
   };
-  if (!status) return null;
-  return status.connected ? (
-    <div className="flex items-center gap-3 text-sm">
-      <span className="inline-flex items-center gap-1 text-emerald-700"><ShieldCheck className="h-4 w-4" /> Connected as <code className="font-mono-tech">{status.email}</code></span>
-      <Button onClick={disconnect} variant="outline" className="rounded-sm border-red-300 text-red-700 hover:bg-red-50" data-testid="disconnect-google">Disconnect</Button>
+  const makeDefault = async (a) => {
+    try { await api.post(`/email/accounts/${a.id}/default`); toast.success(`Default → ${a.email}`); load(); }
+    catch (e) { toast.error("Failed"); }
+  };
+
+  return (
+    <div className="space-y-4" data-testid="email-accounts-panel">
+      <Card className="p-6">
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div>
+            <h3 className="font-display text-lg font-semibold">Connected email mailboxes</h3>
+            <p className="text-sm text-slate-600 mt-1 max-w-2xl">Connect your own Gmail / Outlook / Yahoo or a central company mailbox (e.g. sales@denplex.co). Each user can connect multiple accounts. The default account is used when sending quotations & invoices.</p>
+          </div>
+          <Button onClick={() => setAddOpen(true)} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="add-email-account"><Plus className="h-4 w-4 mr-1" /> Add account</Button>
+        </div>
+
+        <div className="mt-5 border border-slate-200">
+          {loading ? (
+            <div className="p-4 text-sm text-slate-500">Loading…</div>
+          ) : accounts.length === 0 ? (
+            <div className="p-6 text-sm text-slate-500 text-center">No mailboxes connected yet. Click <strong>Add account</strong> to connect your first Gmail.</div>
+          ) : (
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-600">
+                  <th className="px-3 py-2">Email</th><th className="px-3 py-2">Provider</th><th className="px-3 py-2">Default</th><th className="px-3 py-2">Last test</th><th className="px-3 py-2 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {accounts.map(a => (
+                  <tr key={a.id} className="border-t border-slate-100 hover:bg-slate-50" data-testid={`email-acct-row-${a.email}`}>
+                    <td className="px-3 py-2 font-mono-tech">{a.email}</td>
+                    <td className="px-3 py-2">{a.label}</td>
+                    <td className="px-3 py-2">
+                      {a.is_default ? (
+                        <span className="inline-flex items-center gap-1 text-emerald-700 text-xs"><Star className="h-3 w-3 fill-emerald-700" /> Default</span>
+                      ) : (
+                        <Button size="sm" variant="outline" className="rounded-sm h-7 text-xs" onClick={()=>makeDefault(a)} data-testid={`make-default-${a.email}`}>Set default</Button>
+                      )}
+                    </td>
+                    <td className="px-3 py-2 text-xs">
+                      {a.last_test_ok
+                        ? <span className="text-emerald-700">OK · {(a.last_test_at || "").slice(0,16).replace("T"," ")}</span>
+                        : <span className="text-red-600" title={a.last_test_error}>Failed</span>}
+                    </td>
+                    <td className="px-3 py-2 text-right whitespace-nowrap">
+                      <Button size="icon" variant="ghost" className="h-8 w-8" onClick={()=>test(a)} title="Re-test"><RefreshCw className="h-4 w-4 text-slate-700" /></Button>
+                      <Button size="icon" variant="ghost" className="h-8 w-8" onClick={()=>setInboxAcct(a)} title="View inbox" data-testid={`view-inbox-${a.email}`}><Inbox className="h-4 w-4 text-slate-700" /></Button>
+                      <Button size="icon" variant="ghost" className="h-8 w-8" onClick={()=>remove(a)} title="Disconnect" data-testid={`remove-${a.email}`}><Trash2 className="h-4 w-4 text-red-600" /></Button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </Card>
+
+      <Card className="p-6 bg-slate-50/60 border-dashed">
+        <h4 className="font-display text-base font-semibold mb-2">How to get a Gmail App Password (≈ 45 sec)</h4>
+        <ol className="text-sm text-slate-700 space-y-1.5 list-decimal pl-5">
+          <li>Make sure <strong>2-Step Verification</strong> is ON: <a className="text-red-600 underline inline-flex items-center gap-1" target="_blank" rel="noreferrer" href="https://myaccount.google.com/signinoptions/two-step-verification">myaccount.google.com/signinoptions/two-step-verification <ExternalLink className="h-3 w-3" /></a></li>
+          <li>Open the App Passwords page: <a className="text-red-600 underline inline-flex items-center gap-1" target="_blank" rel="noreferrer" href="https://myaccount.google.com/apppasswords">myaccount.google.com/apppasswords <ExternalLink className="h-3 w-3" /></a></li>
+          <li>Type a name like <em>Denplex ERP</em> and click <strong>Create</strong>. Google shows a 16-character password in 4 groups of 4.</li>
+          <li>Copy it (spaces don't matter — we strip them), then click <strong>Add account</strong> above and paste it.</li>
+        </ol>
+        <p className="text-xs text-slate-500 mt-3">Your password is encrypted at rest and only used to connect to Google's servers. No Google Cloud Console / Client ID setup required. Works for any number of Gmail or Workspace accounts.</p>
+      </Card>
+
+      <AddEmailAccountDialog open={addOpen} onClose={()=>setAddOpen(false)} onSaved={load} />
+      <InboxDialog account={inboxAcct} onClose={()=>setInboxAcct(null)} />
     </div>
-  ) : (
-    <Button onClick={connect} className="rounded-sm bg-black hover:bg-slate-800" data-testid="connect-google">Connect Google account</Button>
   );
 }
 
+function AddEmailAccountDialog({ open, onClose, onSaved }) {
+  const [email, setEmail] = useState("");
+  const [pw, setPw] = useState("");
+  const [label, setLabel] = useState("");
+  const [isDefault, setIsDefault] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => { if (open) { setEmail(""); setPw(""); setLabel(""); setIsDefault(false); } }, [open]);
+
+  const submit = async () => {
+    if (!email || !pw) { toast.error("Email and App Password are required"); return; }
+    setSaving(true);
+    try {
+      const r = await api.post("/email/accounts", { email, app_password: pw, label, is_default: isDefault });
+      toast.success(`Connected ${r.data.email}`);
+      if (r.data.imap_warning) toast.warning(r.data.imap_warning);
+      onSaved && onSaved();
+      onClose();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Failed");
+    } finally { setSaving(false); }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={(v)=>{ if (!v) onClose(); }}>
+      <DialogContent className="rounded-sm max-w-md" data-testid="add-email-dialog">
+        <DialogHeader><DialogTitle className="font-display">Connect a Gmail / mailbox</DialogTitle></DialogHeader>
+        <div className="space-y-3">
+          <Fld label="Email address">
+            <Input value={email} onChange={e=>setEmail(e.target.value)} placeholder="you@gmail.com or sales@denplex.co" className="rounded-sm" data-testid="email-input" autoComplete="email" />
+          </Fld>
+          <Fld label="App Password (16 characters)">
+            <Input value={pw} onChange={e=>setPw(e.target.value)} placeholder="abcd efgh ijkl mnop" className="rounded-sm font-mono-tech" data-testid="app-password-input" autoComplete="off" />
+          </Fld>
+          <Fld label="Label (optional)">
+            <Input value={label} onChange={e=>setLabel(e.target.value)} placeholder="e.g. Sales mailbox" className="rounded-sm" />
+          </Fld>
+          <div className="flex items-center gap-2">
+            <Switch checked={isDefault} onCheckedChange={setIsDefault} id="is-default" data-testid="is-default-switch" />
+            <Label htmlFor="is-default" className="text-sm">Use as default sender</Label>
+          </div>
+          <p className="text-xs text-slate-500">Don't have an App Password? <a className="text-red-600 underline" target="_blank" rel="noreferrer" href="https://myaccount.google.com/apppasswords">Generate one in 30 seconds</a> — make sure 2-Step Verification is ON first.</p>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" className="rounded-sm" onClick={onClose}>Cancel</Button>
+          <Button onClick={submit} disabled={saving} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="save-email-account">{saving ? "Connecting…" : "Connect"}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function InboxDialog({ account, onClose }) {
+  const [msgs, setMsgs] = useState([]);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!account) { setMsgs([]); return; }
+    let alive = true;
+    setLoading(true);
+    api.get(`/email/accounts/${account.id}/inbox?max=25`)
+      .then(r => { if (alive) setMsgs(r.data?.messages || []); })
+      .catch(e => { toast.error(e?.response?.data?.detail || "Failed to load inbox"); })
+      .finally(()=> { if (alive) setLoading(false); });
+    return () => { alive = false; };
+  }, [account]);
+
+  return (
+    <Dialog open={!!account} onOpenChange={(v)=>{ if (!v) onClose(); }}>
+      <DialogContent className="rounded-sm max-w-3xl" data-testid="inbox-dialog">
+        <DialogHeader>
+          <DialogTitle className="font-display">Inbox — {account?.email}</DialogTitle>
+        </DialogHeader>
+        <div className="max-h-[70vh] overflow-y-auto -mx-6 px-6">
+          {loading ? (
+            <div className="text-sm text-slate-500 py-6">Loading…</div>
+          ) : msgs.length === 0 ? (
+            <div className="text-sm text-slate-500 py-6">No recent messages.</div>
+          ) : (
+            <ul className="divide-y divide-slate-100">
+              {msgs.map((m, i) => (
+                <li key={i} className="py-3" data-testid={`inbox-row-${i}`}>
+                  <div className="flex items-baseline justify-between gap-3">
+                    <div className="font-medium text-slate-900 truncate">{m.from_name || m.from_email}</div>
+                    <div className="text-xs text-slate-500 shrink-0">{(m.date || "").slice(0, 16).replace("T", " ")}</div>
+                  </div>
+                  <div className="text-sm text-slate-700 truncate">{m.subject || "(no subject)"}</div>
+                  <div className="text-xs text-slate-500 mt-0.5 line-clamp-2">{m.snippet}</div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
 
 function ChangePasswordForm() {
   const [cur, setCur] = useState("");
@@ -252,29 +394,5 @@ function ChangePasswordForm() {
         <Button type="submit" disabled={loading} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="save-password">{loading ? "Saving..." : "Change password"}</Button>
       </div>
     </form>
-  );
-}
-
-
-function OutlookConnectBlock() {
-  const [status, setStatus] = useState(null);
-  const load = async () => { try { const r = await api.get("/integrations/microsoft/status"); setStatus(r.data); } catch (e) {} };
-  useEffect(() => { load(); }, []);
-  const connect = async () => {
-    try { const r = await api.get("/integrations/microsoft/auth-url"); window.location.href = r.data.auth_url; }
-    catch (e) { toast.error(e?.response?.data?.detail || "Save Microsoft OAuth config first"); }
-  };
-  const disconnect = async () => {
-    if (!window.confirm("Disconnect your Outlook account?")) return;
-    await api.post("/integrations/microsoft/disconnect"); load(); toast.success("Disconnected");
-  };
-  if (!status) return null;
-  return status.connected ? (
-    <div className="flex items-center gap-3 text-sm">
-      <span className="inline-flex items-center gap-1 text-emerald-700"><ShieldCheck className="h-4 w-4" /> Connected as <code className="font-mono-tech">{status.email}</code></span>
-      <Button onClick={disconnect} variant="outline" className="rounded-sm border-red-300 text-red-700 hover:bg-red-50" data-testid="disconnect-outlook">Disconnect</Button>
-    </div>
-  ) : (
-    <Button onClick={connect} className="rounded-sm bg-black hover:bg-slate-800" data-testid="connect-outlook">Connect Outlook account</Button>
   );
 }

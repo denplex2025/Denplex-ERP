@@ -29,18 +29,16 @@ from reportlab.lib.units import mm
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from twilio.rest import Client as TwilioClient
 from twilio.base.exceptions import TwilioRestException
-import resend as resend_sdk
-from google.oauth2.credentials import Credentials as GCreds
-from google_auth_oauthlib.flow import Flow as GFlow
-from google.auth.transport.requests import Request as GRequest
-from googleapiclient.discovery import build as gbuild
-from googleapiclient.http import MediaInMemoryUpload
 from email.message import EmailMessage
+from email.utils import parseaddr, parsedate_to_datetime
+from email.header import decode_header
 import smtplib
 import imaplib
 import email as emaillib
 import re
 import ssl
+import hashlib
+from cryptography.fernet import Fernet, InvalidToken
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -1134,14 +1132,6 @@ class IntegrationSettingsIn(BaseModel):
     twilio_whatsapp_from: Optional[str] = ""
     indiamart_crm_key: Optional[str] = ""
     tradeindia_webhook_secret: Optional[str] = ""
-    google_client_id: Optional[str] = ""
-    google_client_secret: Optional[str] = ""
-    google_redirect_uri: Optional[str] = ""
-    google_drive_folder_id: Optional[str] = ""
-    microsoft_client_id: Optional[str] = ""
-    microsoft_client_secret: Optional[str] = ""
-    microsoft_redirect_uri: Optional[str] = ""
-    microsoft_tenant: Optional[str] = "common"
     company_name: Optional[str] = "Denplex Engineering Company"
     company_gstin: Optional[str] = ""
     company_state: Optional[str] = ""
@@ -1574,189 +1564,231 @@ async def totp_status(user=Depends(get_current_user)):
 
 
 
-# ================ Google OAuth (Drive + Gmail) ================
-GOOGLE_SCOPES = [
-    "https://www.googleapis.com/auth/drive.file",
-    "https://www.googleapis.com/auth/gmail.send",
-    "https://www.googleapis.com/auth/gmail.readonly",
-    "https://www.googleapis.com/auth/userinfo.email",
-    "openid",
-]
+# ================ Email Accounts (Gmail App Password — SMTP + IMAP) ================
+# No OAuth: users connect each Gmail/Workspace mailbox by providing the email + a
+# Google "App Password" (16 chars). Same flow works for Outlook/Yahoo via SMTP/IMAP.
 
-def _google_client_cfg(cid: str, csec: str, redirect: str) -> Dict[str, Any]:
-    return {
-        "web": {
-            "client_id": cid,
-            "client_secret": csec,
-            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-            "token_uri": "https://oauth2.googleapis.com/token",
-            "redirect_uris": [redirect],
-        }
-    }
+# Per-user-encrypted secrets use a Fernet key derived from JWT_SECRET so they survive
+# restarts without an extra env var. If you ever need to rotate, change JWT_SECRET and
+# users will be asked to reconnect their mailboxes.
+def _email_fernet() -> Fernet:
+    digest = hashlib.sha256((JWT_SECRET or "denplex-erp").encode("utf-8")).digest()
+    return Fernet(base64.urlsafe_b64encode(digest))
 
-async def _user_google_creds(user_id: str) -> GCreds:
-    u = await db.users.find_one({"id": user_id}, {"_id": 0})
-    g = (u or {}).get("google") or {}
-    if not g.get("refresh_token"):
-        raise HTTPException(400, "Google account not connected. Open Settings → Google.")
-    cfg = await get_setting("integrations")
-    creds = GCreds(
-        token=g.get("access_token"),
-        refresh_token=g.get("refresh_token"),
-        token_uri="https://oauth2.googleapis.com/token",
-        client_id=cfg.get("google_client_id"),
-        client_secret=cfg.get("google_client_secret"),
-        scopes=GOOGLE_SCOPES,
-    )
-    if not creds.valid:
-        await asyncio.to_thread(creds.refresh, GRequest())
-        await db.users.update_one(
-            {"id": user_id},
-            {"$set": {"google.access_token": creds.token, "google.token_expiry": (creds.expiry.isoformat() if creds.expiry else "")}},
-        )
-    return creds
+def _enc(plain: str) -> str:
+    if plain is None:
+        plain = ""
+    return _email_fernet().encrypt(plain.encode("utf-8")).decode("utf-8")
 
-@api.get("/integrations/google/auth-url")
-async def google_auth_url(user=Depends(get_current_user)):
-    cfg = await get_setting("integrations")
-    cid = cfg.get("google_client_id"); csec = cfg.get("google_client_secret"); redirect = cfg.get("google_redirect_uri")
-    if not (cid and csec and redirect):
-        raise HTTPException(400, "Google OAuth not configured. Admin must set Client ID, Secret, Redirect URI in Settings.")
-    flow = GFlow.from_client_config(_google_client_cfg(cid, csec, redirect), scopes=GOOGLE_SCOPES, redirect_uri=redirect)
-    state = secrets.token_urlsafe(24)
-    await db.oauth_states.replace_one(
-        {"_id": state},
-        {"_id": state, "user_id": user["id"], "created_at": now_iso()},
-        upsert=True,
-    )
-    url, _ = flow.authorization_url(access_type="offline", include_granted_scopes="true", prompt="consent", state=state)
-    return {"auth_url": url}
-
-@api.get("/integrations/google/callback")
-async def google_callback(code: str = Query(...), state: str = Query(...)):
-    st = await db.oauth_states.find_one({"_id": state}, {"_id": 0})
-    if not st:
-        raise HTTPException(400, "Invalid state")
-    await db.oauth_states.delete_one({"_id": state})
-    cfg = await get_setting("integrations")
-    cid = cfg.get("google_client_id"); csec = cfg.get("google_client_secret"); redirect = cfg.get("google_redirect_uri")
-    flow = GFlow.from_client_config(_google_client_cfg(cid, csec, redirect), scopes=GOOGLE_SCOPES, redirect_uri=redirect)
+def _dec(token: str) -> str:
+    if not token:
+        return ""
     try:
-        await asyncio.to_thread(flow.fetch_token, code=code)
-    except Exception as e:
-        raise HTTPException(400, f"Token exchange failed: {e}")
-    creds = flow.credentials
-    # Get user info
-    g_email = ""
-    try:
-        svc = gbuild("oauth2", "v2", credentials=creds, cache_discovery=False)
-        info = await asyncio.to_thread(lambda: svc.userinfo().get().execute())
-        g_email = info.get("email", "")
-    except Exception:
-        pass
-    await db.users.update_one(
-        {"id": st["user_id"]},
-        {"$set": {"google": {
-            "email": g_email,
-            "access_token": creds.token,
-            "refresh_token": creds.refresh_token,
-            "token_expiry": (creds.expiry.isoformat() if creds.expiry else ""),
-            "scopes": list(creds.scopes or []),
-            "connected_at": now_iso(),
-        }}},
-    )
-    await write_audit("system", "google_connected", "user", st["user_id"], {"email": g_email})
-    # redirect to frontend settings
-    from fastapi.responses import RedirectResponse
-    public_base = "/"
-    return RedirectResponse(url=f"{public_base}app/settings?google=connected")
+        return _email_fernet().decrypt(token.encode("utf-8")).decode("utf-8")
+    except (InvalidToken, ValueError):
+        return ""
 
-@api.get("/integrations/google/status")
-async def google_status(user=Depends(get_current_user)):
-    u = await db.users.find_one({"id": user["id"]}, {"_id": 0})
-    g = (u or {}).get("google") or {}
-    return {"connected": bool(g.get("refresh_token")), "email": g.get("email", ""), "connected_at": g.get("connected_at", "")}
+# Common provider presets (autodetected from email domain)
+EMAIL_PROVIDERS = {
+    "gmail.com":      {"smtp_host": "smtp.gmail.com",      "smtp_port": 465, "imap_host": "imap.gmail.com",      "imap_port": 993, "label": "Gmail"},
+    "googlemail.com": {"smtp_host": "smtp.gmail.com",      "smtp_port": 465, "imap_host": "imap.gmail.com",      "imap_port": 993, "label": "Gmail"},
+    "outlook.com":    {"smtp_host": "smtp.office365.com",  "smtp_port": 587, "imap_host": "outlook.office365.com","imap_port": 993, "label": "Outlook"},
+    "hotmail.com":    {"smtp_host": "smtp.office365.com",  "smtp_port": 587, "imap_host": "outlook.office365.com","imap_port": 993, "label": "Outlook"},
+    "live.com":       {"smtp_host": "smtp.office365.com",  "smtp_port": 587, "imap_host": "outlook.office365.com","imap_port": 993, "label": "Outlook"},
+    "yahoo.com":      {"smtp_host": "smtp.mail.yahoo.com", "smtp_port": 465, "imap_host": "imap.mail.yahoo.com",  "imap_port": 993, "label": "Yahoo"},
+    "zoho.com":       {"smtp_host": "smtp.zoho.com",       "smtp_port": 465, "imap_host": "imap.zoho.com",       "imap_port": 993, "label": "Zoho"},
+}
+DEFAULT_PROVIDER = {"smtp_host": "smtp.gmail.com", "smtp_port": 465, "imap_host": "imap.gmail.com", "imap_port": 993, "label": "Gmail"}
 
-@api.post("/integrations/google/disconnect")
-async def google_disconnect(user=Depends(get_current_user)):
-    await db.users.update_one({"id": user["id"]}, {"$unset": {"google": ""}})
-    await write_audit(user["name"], "google_disconnected", "user", user["id"])
-    return {"ok": True}
+def _autodetect(email_addr: str) -> Dict[str, Any]:
+    dom = (email_addr or "").lower().split("@")[-1]
+    return EMAIL_PROVIDERS.get(dom, DEFAULT_PROVIDER)
 
-# ---------- Drive upload ----------
-class DriveUploadIn(BaseModel):
-    filename: str
-    mime: str = "application/pdf"
-    file_base64: str  # data URL or plain base64
-    parent_folder_id: Optional[str] = ""
+class EmailAccountIn(BaseModel):
+    email: EmailStr
+    app_password: str
+    label: Optional[str] = ""
+    is_default: bool = False
+    # Optional manual overrides (rarely needed; autodetected from domain)
+    smtp_host: Optional[str] = ""
+    smtp_port: Optional[int] = 0
+    imap_host: Optional[str] = ""
+    imap_port: Optional[int] = 0
 
-@api.post("/integrations/google/drive/upload")
-async def drive_upload(payload: DriveUploadIn, user=Depends(get_current_user)):
-    creds = await _user_google_creds(user["id"])
-    svc = gbuild("drive", "v3", credentials=creds, cache_discovery=False)
-    b64 = payload.file_base64
-    if b64.startswith("data:") and "," in b64:
-        b64 = b64.split(",", 1)[1]
-    raw = base64.b64decode(b64)
-    cfg = await get_setting("integrations")
-    parent = payload.parent_folder_id or cfg.get("google_drive_folder_id") or None
-    body = {"name": payload.filename}
-    if parent: body["parents"] = [parent]
-    media = MediaInMemoryUpload(raw, mimetype=payload.mime, resumable=False)
-    try:
-        f = await asyncio.to_thread(lambda: svc.files().create(body=body, media_body=media, fields="id,name,webViewLink").execute())
-    except Exception as e:
-        raise HTTPException(502, f"Drive upload failed: {e}")
-    await write_audit(user["name"], "drive_upload", "file", f.get("id"), {"name": payload.filename})
-    return f
-
-@api.post("/integrations/google/drive/backup-doc/{kind}/{doc_id}")
-async def drive_backup_doc(kind: str, doc_id: str, user=Depends(get_current_user)):
-    # Validate Google credentials first so a misconfigured user gets the clearer error.
-    await _user_google_creds(user["id"])
-    coll_map = {"invoices": db.invoices, "quotations": db.quotations, "purchase-orders": db.purchase_orders}
-    coll = coll_map.get(kind)
-    if coll is None:
-        raise HTTPException(400, "Invalid kind")
-    d = await coll.find_one({"id": doc_id}, {"_id": 0})
-    if not d:
-        raise HTTPException(404, "Not found")
-    company = await get_setting("integrations")
-    if kind == "invoices":
-        pdf = _build_doc_pdf("Tax Invoice", d.get("code", ""), "Bill To", d.get("customer_name", ""), str(d.get("date", ""))[:10],
-                             d.get("lines", []), {"subtotal": d.get("subtotal", 0), "total": d.get("total", 0)},
-                             gst_breakup={"cgst": d.get("cgst", 0), "sgst": d.get("sgst", 0), "igst": d.get("igst", 0)},
-                             company=company, notes=d.get("notes", ""))
-    elif kind == "quotations":
-        pdf = _build_doc_pdf("Quotation", d.get("code", ""), "To", d.get("customer_name", ""), str(d.get("date", ""))[:10],
-                             d.get("lines", []), {"subtotal": d.get("subtotal", 0), "gst_total": d.get("gst_total", 0), "total": d.get("total", 0)},
-                             company=company, notes=d.get("notes", ""))
-    else:
-        pdf = _build_doc_pdf("Purchase Order", d.get("code", ""), "Supplier", d.get("supplier_name", ""), str(d.get("date", ""))[:10],
-                             d.get("lines", []), {"subtotal": d.get("subtotal", 0), "gst_total": d.get("gst_total", 0), "total": d.get("total", 0)},
-                             company=company, notes=d.get("notes", ""))
-    b64 = base64.b64encode(pdf).decode()
-    return await drive_upload(DriveUploadIn(filename=f"{d.get('code','doc')}.pdf", mime="application/pdf", file_base64=b64), user)
-
-# ---------- Gmail send ----------
-class GmailSendIn(BaseModel):
+class EmailSendIn(BaseModel):
     to: List[EmailStr]
     subject: str
     html: str
+    cc: Optional[List[EmailStr]] = None
+    bcc: Optional[List[EmailStr]] = None
     attachment_base64: Optional[str] = ""
     attachment_filename: Optional[str] = ""
     attachment_mime: Optional[str] = "application/pdf"
+    account_id: Optional[str] = ""  # if blank uses default account
 
-@api.post("/integrations/google/gmail/send")
-async def gmail_send(payload: GmailSendIn, user=Depends(get_current_user)):
-    creds = await _user_google_creds(user["id"])
-    svc = gbuild("gmail", "v1", credentials=creds, cache_discovery=False)
+def _account_public(a: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "id": a.get("id"),
+        "email": a.get("email"),
+        "label": a.get("label") or _autodetect(a.get("email", "")).get("label"),
+        "smtp_host": a.get("smtp_host"),
+        "smtp_port": a.get("smtp_port"),
+        "imap_host": a.get("imap_host"),
+        "imap_port": a.get("imap_port"),
+        "is_default": bool(a.get("is_default")),
+        "last_test_at": a.get("last_test_at", ""),
+        "last_test_ok": bool(a.get("last_test_ok", False)),
+        "last_test_error": a.get("last_test_error", ""),
+        "created_at": a.get("created_at", ""),
+    }
+
+def _smtp_test(smtp_host: str, smtp_port: int, email_addr: str, password: str) -> None:
+    """Raise on any failure. Uses SSL on 465, STARTTLS otherwise."""
+    ctx = ssl.create_default_context()
+    if int(smtp_port) == 465:
+        with smtplib.SMTP_SSL(smtp_host, int(smtp_port), context=ctx, timeout=20) as s:
+            s.login(email_addr, password)
+    else:
+        with smtplib.SMTP(smtp_host, int(smtp_port), timeout=20) as s:
+            s.ehlo()
+            s.starttls(context=ctx)
+            s.ehlo()
+            s.login(email_addr, password)
+
+def _imap_open(imap_host: str, imap_port: int, email_addr: str, password: str) -> imaplib.IMAP4_SSL:
+    m = imaplib.IMAP4_SSL(imap_host, int(imap_port))
+    m.login(email_addr, password)
+    return m
+
+async def _record_test(user_id: str, acct_id: str, ok: bool, err: str = ""):
+    await db.email_accounts.update_one(
+        {"id": acct_id, "user_id": user_id},
+        {"$set": {"last_test_at": now_iso(), "last_test_ok": bool(ok), "last_test_error": (err or "")[:300]}},
+    )
+
+@api.post("/email/accounts")
+async def add_email_account(payload: EmailAccountIn, user=Depends(get_current_user)):
+    preset = _autodetect(payload.email)
+    smtp_host = (payload.smtp_host or preset["smtp_host"]).strip()
+    smtp_port = int(payload.smtp_port or preset["smtp_port"]) 
+    imap_host = (payload.imap_host or preset["imap_host"]).strip()
+    imap_port = int(payload.imap_port or preset["imap_port"]) 
+    pw = (payload.app_password or "").strip().replace(" ", "")  # Google shows spaces in groups of 4
+    if not pw:
+        raise HTTPException(400, "App password required")
+    # Test SMTP login synchronously before persisting (fail fast with a helpful message)
+    try:
+        await asyncio.to_thread(_smtp_test, smtp_host, smtp_port, str(payload.email), pw)
+    except smtplib.SMTPAuthenticationError as e:
+        raise HTTPException(400, f"SMTP login failed. Make sure 2-Step Verification is ON in your Google Account, then create an App Password and paste it here (no spaces). ({e.smtp_code})")
+    except Exception as e:
+        raise HTTPException(400, f"SMTP test failed: {e}")
+    # Quick IMAP test (non-fatal — if IMAP is blocked we'll still allow sending)
+    imap_err = ""
+    try:
+        m = await asyncio.to_thread(_imap_open, imap_host, imap_port, str(payload.email), pw)
+        await asyncio.to_thread(m.logout)
+    except Exception as e:
+        imap_err = f"IMAP (inbox read) failed: {e}"
+    # If this is the user's first account or marked default, clear others
+    if payload.is_default:
+        await db.email_accounts.update_many({"user_id": user["id"]}, {"$set": {"is_default": False}})
+    has_any = await db.email_accounts.find_one({"user_id": user["id"]})
+    doc = {
+        "id": new_id(),
+        "user_id": user["id"],
+        "email": str(payload.email).lower(),
+        "label": payload.label or _autodetect(str(payload.email))["label"],
+        "encrypted_password": _enc(pw),
+        "smtp_host": smtp_host, "smtp_port": smtp_port,
+        "imap_host": imap_host, "imap_port": imap_port,
+        "is_default": bool(payload.is_default) or (has_any is None),
+        "created_at": now_iso(),
+        "last_test_at": now_iso(),
+        "last_test_ok": True,
+        "last_test_error": imap_err,
+    }
+    await db.email_accounts.insert_one(doc)
+    await write_audit(user["name"], "email_account_added", "email_account", doc["id"], {"email": doc["email"]})
+    return {**_account_public(doc), "imap_warning": (imap_err or None)}
+
+@api.get("/email/accounts")
+async def list_email_accounts(user=Depends(get_current_user)):
+    rows = await db.email_accounts.find({"user_id": user["id"]}, {"_id": 0}).sort("created_at", 1).to_list(50)
+    return [_account_public(r) for r in rows]
+
+@api.delete("/email/accounts/{acct_id}")
+async def delete_email_account(acct_id: str, user=Depends(get_current_user)):
+    a = await db.email_accounts.find_one({"id": acct_id, "user_id": user["id"]})
+    if not a:
+        raise HTTPException(404, "Not found")
+    await db.email_accounts.delete_one({"id": acct_id, "user_id": user["id"]})
+    # If we removed the default, promote the next one
+    if a.get("is_default"):
+        nxt = await db.email_accounts.find_one({"user_id": user["id"]})
+        if nxt:
+            await db.email_accounts.update_one({"id": nxt["id"]}, {"$set": {"is_default": True}})
+    await write_audit(user["name"], "email_account_removed", "email_account", acct_id, {"email": a.get("email")})
+    return {"ok": True}
+
+@api.post("/email/accounts/{acct_id}/default")
+async def set_default_email(acct_id: str, user=Depends(get_current_user)):
+    a = await db.email_accounts.find_one({"id": acct_id, "user_id": user["id"]})
+    if not a:
+        raise HTTPException(404, "Not found")
+    await db.email_accounts.update_many({"user_id": user["id"]}, {"$set": {"is_default": False}})
+    await db.email_accounts.update_one({"id": acct_id, "user_id": user["id"]}, {"$set": {"is_default": True}})
+    return {"ok": True}
+
+@api.post("/email/accounts/{acct_id}/test")
+async def test_email_account(acct_id: str, user=Depends(get_current_user)):
+    a = await db.email_accounts.find_one({"id": acct_id, "user_id": user["id"]})
+    if not a:
+        raise HTTPException(404, "Not found")
+    pw = _dec(a.get("encrypted_password", ""))
+    err = ""
+    ok = True
+    try:
+        await asyncio.to_thread(_smtp_test, a["smtp_host"], a["smtp_port"], a["email"], pw)
+    except Exception as e:
+        ok = False
+        err = f"SMTP: {e}"
+    if ok:
+        try:
+            m = await asyncio.to_thread(_imap_open, a["imap_host"], a["imap_port"], a["email"], pw)
+            await asyncio.to_thread(m.logout)
+        except Exception as e:
+            err = f"IMAP: {e}"  # don't flip ok; send still works
+    await _record_test(user["id"], acct_id, ok, err)
+    return {"ok": ok, "error": err}
+
+async def _pick_account(user_id: str, account_id: str = "") -> Dict[str, Any]:
+    if account_id:
+        a = await db.email_accounts.find_one({"id": account_id, "user_id": user_id})
+        if not a:
+            raise HTTPException(404, "Email account not found")
+        return a
+    a = await db.email_accounts.find_one({"user_id": user_id, "is_default": True})
+    if a:
+        return a
+    a = await db.email_accounts.find_one({"user_id": user_id})
+    if not a:
+        raise HTTPException(400, "No email account connected. Open Settings → Email Accounts and add one.")
+    return a
+
+@api.post("/email/send")
+async def email_send(payload: EmailSendIn, user=Depends(get_current_user)):
+    a = await _pick_account(user["id"], payload.account_id or "")
+    pw = _dec(a.get("encrypted_password", ""))
     msg = EmailMessage()
-    msg["To"] = ", ".join([str(e) for e in payload.to])
     u = await db.users.find_one({"id": user["id"]}, {"_id": 0}) or {}
-    msg["From"] = (u.get("google") or {}).get("email") or u.get("email", "")
+    from_name = u.get("name") or "Denplex ERP"
+    msg["From"] = f'{from_name} <{a["email"]}>'
+    msg["To"] = ", ".join([str(e) for e in payload.to])
+    if payload.cc: msg["Cc"] = ", ".join([str(e) for e in payload.cc])
+    if payload.bcc: msg["Bcc"] = ", ".join([str(e) for e in payload.bcc])
     msg["Subject"] = payload.subject
-    msg.set_content("(HTML email)")
+    msg.set_content("This email contains HTML content. Please use an HTML-capable client.")
     msg.add_alternative(payload.html, subtype="html")
     if payload.attachment_base64 and payload.attachment_filename:
         b64 = payload.attachment_base64
@@ -1765,233 +1797,162 @@ async def gmail_send(payload: GmailSendIn, user=Depends(get_current_user)):
         raw = base64.b64decode(b64)
         maintype, _, subtype = (payload.attachment_mime or "application/octet-stream").partition("/")
         msg.add_attachment(raw, maintype=maintype, subtype=subtype, filename=payload.attachment_filename)
-    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-    try:
-        sent = await asyncio.to_thread(lambda: svc.users().messages().send(userId="me", body={"raw": raw}).execute())
-    except Exception as e:
-        raise HTTPException(502, f"Gmail send failed: {e}")
-    await write_audit(user["name"], "gmail_send", "email", sent.get("id"), {"to": payload.to, "subject": payload.subject})
-    return {"id": sent.get("id"), "ok": True}
-
-@api.post("/integrations/google/gmail/sync-leads")
-async def gmail_sync_leads(user=Depends(get_current_user)):
-    creds = await _user_google_creds(user["id"])
-    svc = gbuild("gmail", "v1", credentials=creds, cache_discovery=False)
-    try:
-        resp = await asyncio.to_thread(lambda: svc.users().messages().list(userId="me", labelIds=["INBOX"], maxResults=25).execute())
-    except Exception as e:
-        raise HTTPException(502, f"Gmail fetch failed: {e}")
-    added = 0
-    for m in resp.get("messages", []) or []:
-        try:
-            full = await asyncio.to_thread(lambda mid=m["id"]: svc.users().messages().get(userId="me", id=mid, format="metadata", metadataHeaders=["From", "Subject"]).execute())
-        except Exception:
-            continue
-        ext_id = full.get("id")
-        if await db.leads.find_one({"external_id": ext_id}):
-            continue
-        headers = {h["name"].lower(): h["value"] for h in (full.get("payload", {}).get("headers", []) or [])}
-        frm = headers.get("from", "")
-        subj = headers.get("subject", "")
-        snippet = full.get("snippet", "")
-        # parse name + email
-        m1 = re.match(r"\s*\"?([^\"<]+?)\"?\s*<([^>]+)>", frm)
-        if m1:
-            name, em = m1.group(1).strip(), m1.group(2).strip()
+    rcpts: List[str] = [str(e) for e in payload.to] + [str(e) for e in (payload.cc or [])] + [str(e) for e in (payload.bcc or [])]
+    def _do_send():
+        ctx = ssl.create_default_context()
+        if int(a["smtp_port"]) == 465:
+            with smtplib.SMTP_SSL(a["smtp_host"], int(a["smtp_port"]), context=ctx, timeout=30) as s:
+                s.login(a["email"], pw)
+                s.send_message(msg, from_addr=a["email"], to_addrs=rcpts)
         else:
-            name, em = (frm or "").split("@")[0], (frm or "")
-        # filter promotional: skip noreply / no-reply
-        if "noreply" in em.lower() or "no-reply" in em.lower():
+            with smtplib.SMTP(a["smtp_host"], int(a["smtp_port"]), timeout=30) as s:
+                s.ehlo(); s.starttls(context=ctx); s.ehlo()
+                s.login(a["email"], pw)
+                s.send_message(msg, from_addr=a["email"], to_addrs=rcpts)
+    try:
+        await asyncio.to_thread(_do_send)
+    except smtplib.SMTPAuthenticationError as e:
+        raise HTTPException(502, f"Login rejected by mail server. Your App Password may have expired. Regenerate in Google Account → Security → App Passwords. ({e.smtp_code})")
+    except Exception as e:
+        raise HTTPException(502, f"Email send failed: {e}")
+    await write_audit(user["name"], "email_send", "email", None, {"from": a["email"], "to": payload.to, "subject": payload.subject})
+    return {"ok": True, "from": a["email"]}
+
+def _decode_header_str(value: str) -> str:
+    if not value:
+        return ""
+    parts = decode_header(value)
+    out = []
+    for txt, enc in parts:
+        if isinstance(txt, bytes):
+            try:
+                out.append(txt.decode(enc or "utf-8", errors="replace"))
+            except Exception:
+                out.append(txt.decode("utf-8", errors="replace"))
+        else:
+            out.append(txt)
+    return "".join(out)
+
+def _fetch_inbox(host: str, port: int, email_addr: str, password: str, max_n: int) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    m = imaplib.IMAP4_SSL(host, int(port))
+    try:
+        m.login(email_addr, password)
+        m.select("INBOX", readonly=True)
+        typ, data = m.search(None, "ALL")
+        if typ != "OK" or not data or not data[0]:
+            return out
+        ids = data[0].split()
+        recent = ids[-int(max_n):][::-1]
+        for mid in recent:
+            typ, msg_data = m.fetch(mid, "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)] BODY.PEEK[TEXT]<0.500>)")
+            if typ != "OK" or not msg_data:
+                continue
+            headers = ""
+            snippet = ""
+            for part in msg_data:
+                if isinstance(part, tuple) and len(part) >= 2:
+                    chunk = part[1].decode("utf-8", errors="replace") if isinstance(part[1], (bytes, bytearray)) else str(part[1])
+                    if "FROM" in (part[0].decode(errors="replace") if isinstance(part[0], (bytes, bytearray)) else str(part[0])).upper():
+                        headers = chunk
+                    else:
+                        snippet = chunk
+            msg = emaillib.message_from_string(headers or "")
+            frm_raw = _decode_header_str(msg.get("From", ""))
+            subj = _decode_header_str(msg.get("Subject", ""))
+            date_s = msg.get("Date", "")
+            try:
+                date_iso = parsedate_to_datetime(date_s).isoformat() if date_s else ""
+            except Exception:
+                date_iso = ""
+            name, em_addr = parseaddr(frm_raw)
+            # Clean snippet
+            snippet_clean = re.sub(r"\s+", " ", snippet).strip()[:240]
+            out.append({
+                "uid": mid.decode("utf-8", errors="replace") if isinstance(mid, (bytes, bytearray)) else str(mid),
+                "from_name": name or (em_addr.split("@")[0] if em_addr else ""),
+                "from_email": em_addr or "",
+                "subject": subj,
+                "date": date_iso,
+                "snippet": snippet_clean,
+            })
+    finally:
+        try:
+            m.close()
+        except Exception:
+            pass
+        try:
+            m.logout()
+        except Exception:
+            pass
+    return out
+
+@api.get("/email/accounts/{acct_id}/inbox")
+async def email_inbox(acct_id: str, max: int = 25, user=Depends(get_current_user)):
+    a = await db.email_accounts.find_one({"id": acct_id, "user_id": user["id"]})
+    if not a:
+        raise HTTPException(404, "Not found")
+    pw = _dec(a.get("encrypted_password", ""))
+    try:
+        msgs = await asyncio.to_thread(_fetch_inbox, a["imap_host"], a["imap_port"], a["email"], pw, max)
+    except Exception as e:
+        raise HTTPException(502, f"Inbox fetch failed: {e}")
+    return {"account": a["email"], "messages": msgs}
+
+async def _sync_one_account(user_id: str, a: Dict[str, Any], max_n: int = 25) -> Dict[str, int]:
+    pw = _dec(a.get("encrypted_password", ""))
+    try:
+        msgs = await asyncio.to_thread(_fetch_inbox, a["imap_host"], a["imap_port"], a["email"], pw, max_n)
+    except Exception:
+        return {"added": 0, "scanned": 0}
+    added = 0
+    for m in msgs:
+        em_addr = (m.get("from_email") or "").lower()
+        if not em_addr:
+            continue
+        if "noreply" in em_addr or "no-reply" in em_addr or "mailer-daemon" in em_addr:
+            continue
+        ext = f"{a['email']}::{m.get('uid')}"
+        if await db.leads.find_one({"external_id": ext}):
             continue
         await db.leads.insert_one({
             "id": new_id(),
-            "external_id": ext_id,
-            "name": name or "Unknown",
+            "external_id": ext,
+            "name": m.get("from_name") or em_addr.split("@")[0],
             "company": "",
             "phone": "",
-            "email": em,
-            "source": "gmail",
-            "requirement": subj or snippet[:200],
+            "email": em_addr,
+            "source": "email",
+            "requirement": m.get("subject", "") or m.get("snippet", "")[:160],
             "status": "new",
-            "notes": snippet[:500],
+            "notes": (m.get("snippet", "") or "")[:500],
             "created_at": now_iso(),
         })
         added += 1
-    await write_audit(user["name"], "gmail_sync_leads", "leads", None, {"added": added, "scanned": len(resp.get("messages", []) or [])})
-    return {"added": added, "scanned": len(resp.get("messages", []) or [])}
-
-
-
-# ================ Microsoft (Outlook) OAuth ================
-MS_SCOPES = ["offline_access", "User.Read", "Mail.Send", "Mail.Read"]
-
-def _ms_authority(tenant: str) -> str:
-    return f"https://login.microsoftonline.com/{(tenant or 'common').strip() or 'common'}"
-
-async def _ms_save_tokens(user_id: str, tok: Dict[str, Any], email: str = ""):
-    expires_at = (datetime.now(timezone.utc) + timedelta(seconds=int(tok.get("expires_in", 3600)) - 60)).isoformat()
-    payload = {
-        "microsoft.access_token": tok.get("access_token"),
-        "microsoft.token_expiry": expires_at,
-        "microsoft.scopes": tok.get("scope", ""),
-        "microsoft.connected_at": now_iso(),
-    }
-    if tok.get("refresh_token"):
-        payload["microsoft.refresh_token"] = tok["refresh_token"]
-    if email:
-        payload["microsoft.email"] = email
-    await db.users.update_one({"id": user_id}, {"$set": payload})
-
-async def _ms_get_access(user_id: str) -> str:
-    u = await db.users.find_one({"id": user_id}, {"_id": 0}) or {}
-    ms = (u.get("microsoft") or {})
-    if not ms.get("refresh_token"):
-        raise HTTPException(400, "Outlook (Microsoft) not connected. Open Settings → Outlook.")
-    # check expiry
-    try:
-        exp = datetime.fromisoformat(ms.get("token_expiry", "").replace("Z", "+00:00"))
-    except Exception:
-        exp = datetime.now(timezone.utc) - timedelta(seconds=1)
-    if datetime.now(timezone.utc) < exp and ms.get("access_token"):
-        return ms["access_token"]
-    cfg = await get_setting("integrations")
-    cid = cfg.get("microsoft_client_id"); csec = cfg.get("microsoft_client_secret"); tenant = cfg.get("microsoft_tenant") or "common"
-    if not (cid and csec):
-        raise HTTPException(400, "Microsoft OAuth not configured")
-    async with httpx.AsyncClient(timeout=30) as cli:
-        r = await cli.post(f"{_ms_authority(tenant)}/oauth2/v2.0/token", data={
-            "client_id": cid, "client_secret": csec, "grant_type": "refresh_token",
-            "refresh_token": ms["refresh_token"], "scope": " ".join(MS_SCOPES),
-        })
-    if r.status_code != 200:
-        raise HTTPException(502, f"Microsoft refresh failed: {r.text[:200]}")
-    tok = r.json()
-    await _ms_save_tokens(user_id, tok)
-    return tok["access_token"]
-
-@api.get("/integrations/microsoft/auth-url")
-async def ms_auth_url(user=Depends(get_current_user)):
-    cfg = await get_setting("integrations")
-    cid = cfg.get("microsoft_client_id"); redirect = cfg.get("microsoft_redirect_uri"); tenant = cfg.get("microsoft_tenant") or "common"
-    if not (cid and redirect):
-        raise HTTPException(400, "Microsoft OAuth not configured. Admin must set Client ID, (Secret), Redirect URI in Settings.")
-    state = secrets.token_urlsafe(24)
-    await db.oauth_states.replace_one({"_id": state}, {"_id": state, "user_id": user["id"], "provider": "microsoft", "created_at": now_iso()}, upsert=True)
-    from urllib.parse import urlencode
-    params = {
-        "client_id": cid, "response_type": "code", "redirect_uri": redirect,
-        "response_mode": "query", "scope": " ".join(MS_SCOPES), "state": state, "prompt": "consent",
-    }
-    return {"auth_url": f"{_ms_authority(tenant)}/oauth2/v2.0/authorize?{urlencode(params)}"}
-
-@api.get("/integrations/microsoft/callback")
-async def ms_callback(code: str = Query(...), state: str = Query(...)):
-    st = await db.oauth_states.find_one({"_id": state}, {"_id": 0})
-    if not st or st.get("provider") != "microsoft":
-        raise HTTPException(400, "Invalid state")
-    await db.oauth_states.delete_one({"_id": state})
-    cfg = await get_setting("integrations")
-    cid = cfg.get("microsoft_client_id"); csec = cfg.get("microsoft_client_secret"); redirect = cfg.get("microsoft_redirect_uri"); tenant = cfg.get("microsoft_tenant") or "common"
-    async with httpx.AsyncClient(timeout=30) as cli:
-        r = await cli.post(f"{_ms_authority(tenant)}/oauth2/v2.0/token", data={
-            "client_id": cid, "client_secret": csec, "grant_type": "authorization_code",
-            "code": code, "redirect_uri": redirect, "scope": " ".join(MS_SCOPES),
-        })
-    if r.status_code != 200:
-        raise HTTPException(400, f"Token exchange failed: {r.text[:200]}")
-    tok = r.json()
-    # get user email
-    email = ""
-    try:
-        async with httpx.AsyncClient(timeout=20) as cli:
-            mr = await cli.get("https://graph.microsoft.com/v1.0/me", headers={"Authorization": f"Bearer {tok['access_token']}"})
-        if mr.status_code == 200:
-            mi = mr.json()
-            email = mi.get("mail") or mi.get("userPrincipalName") or ""
-    except Exception:
-        pass
-    await _ms_save_tokens(st["user_id"], tok, email)
-    await write_audit("system", "microsoft_connected", "user", st["user_id"], {"email": email})
-    from fastapi.responses import RedirectResponse
-    return RedirectResponse(url="/app/settings?outlook=connected")
-
-@api.get("/integrations/microsoft/status")
-async def ms_status(user=Depends(get_current_user)):
-    u = await db.users.find_one({"id": user["id"]}, {"_id": 0}) or {}
-    ms = u.get("microsoft") or {}
-    return {"connected": bool(ms.get("refresh_token")), "email": ms.get("email", ""), "connected_at": ms.get("connected_at", "")}
-
-@api.post("/integrations/microsoft/disconnect")
-async def ms_disconnect(user=Depends(get_current_user)):
-    await db.users.update_one({"id": user["id"]}, {"$unset": {"microsoft": ""}})
-    await write_audit(user["name"], "microsoft_disconnected", "user", user["id"])
-    return {"ok": True}
-
-class MsMailSendIn(BaseModel):
-    to: List[EmailStr]
-    subject: str
-    html: str
-    attachment_base64: Optional[str] = ""
-    attachment_filename: Optional[str] = ""
-    attachment_mime: Optional[str] = "application/pdf"
-
-@api.post("/integrations/microsoft/mail/send")
-async def ms_mail_send(payload: MsMailSendIn, user=Depends(get_current_user)):
-    access = await _ms_get_access(user["id"])
-    body: Dict[str, Any] = {
-        "message": {
-            "subject": payload.subject,
-            "body": {"contentType": "HTML", "content": payload.html},
-            "toRecipients": [{"emailAddress": {"address": str(e)}} for e in payload.to],
-        },
-        "saveToSentItems": True,
-    }
-    if payload.attachment_base64 and payload.attachment_filename:
-        b64 = payload.attachment_base64
-        if b64.startswith("data:") and "," in b64:
-            b64 = b64.split(",", 1)[1]
-        body["message"]["attachments"] = [{
-            "@odata.type": "#microsoft.graph.fileAttachment",
-            "name": payload.attachment_filename,
-            "contentType": payload.attachment_mime or "application/octet-stream",
-            "contentBytes": b64,
-        }]
-    async with httpx.AsyncClient(timeout=45) as cli:
-        r = await cli.post("https://graph.microsoft.com/v1.0/me/sendMail",
-                           headers={"Authorization": f"Bearer {access}", "Content-Type": "application/json"},
-                           json=body)
-    if r.status_code not in (200, 202):
-        raise HTTPException(502, f"Outlook send failed: {r.text[:200]}")
-    await write_audit(user["name"], "outlook_send", "email", None, {"to": payload.to, "subject": payload.subject})
-    return {"ok": True}
-
-@api.post("/integrations/microsoft/mail/sync-leads")
-async def ms_sync_leads(user=Depends(get_current_user)):
-    access = await _ms_get_access(user["id"])
-    async with httpx.AsyncClient(timeout=30) as cli:
-        r = await cli.get("https://graph.microsoft.com/v1.0/me/mailFolders/Inbox/messages?$top=25&$select=id,subject,from,bodyPreview,receivedDateTime",
-                          headers={"Authorization": f"Bearer {access}"})
-    if r.status_code != 200:
-        raise HTTPException(502, f"Outlook fetch failed: {r.text[:200]}")
-    msgs = r.json().get("value", []) or []
-    added = 0
-    for m in msgs:
-        ext_id = m.get("id")
-        if not ext_id or await db.leads.find_one({"external_id": ext_id}):
-            continue
-        frm = (m.get("from") or {}).get("emailAddress") or {}
-        em = frm.get("address", ""); name = frm.get("name", "") or em.split("@")[0]
-        if not em or "noreply" in em.lower() or "no-reply" in em.lower():
-            continue
-        await db.leads.insert_one({
-            "id": new_id(), "external_id": ext_id, "name": name or "Unknown",
-            "company": "", "phone": "", "email": em, "source": "outlook",
-            "requirement": m.get("subject", ""), "status": "new",
-            "notes": (m.get("bodyPreview", "") or "")[:500], "created_at": now_iso(),
-        })
-        added += 1
-    await write_audit(user["name"], "outlook_sync_leads", "leads", None, {"added": added, "scanned": len(msgs)})
     return {"added": added, "scanned": len(msgs)}
+
+@api.post("/email/accounts/{acct_id}/sync-leads")
+async def email_sync_one(acct_id: str, max: int = 25, user=Depends(get_current_user)):
+    a = await db.email_accounts.find_one({"id": acct_id, "user_id": user["id"]})
+    if not a:
+        raise HTTPException(404, "Not found")
+    res = await _sync_one_account(user["id"], a, max)
+    await write_audit(user["name"], "email_sync_leads", "leads", None, {"account": a["email"], **res})
+    return {"account": a["email"], **res}
+
+@api.post("/email/sync-leads")
+async def email_sync_all(max: int = 25, user=Depends(get_current_user)):
+    accts = await db.email_accounts.find({"user_id": user["id"]}, {"_id": 0}).to_list(50)
+    if not accts:
+        raise HTTPException(400, "No email accounts connected.")
+    total_added = 0; total_scanned = 0; per = []
+    for a in accts:
+        res = await _sync_one_account(user["id"], a, max)
+        per.append({"account": a["email"], **res})
+        total_added += res["added"]; total_scanned += res["scanned"]
+    await write_audit(user["name"], "email_sync_leads_all", "leads", None, {"added": total_added, "scanned": total_scanned})
+    return {"added": total_added, "scanned": total_scanned, "per_account": per}
+
 
 
 # ---------------- Seed ----------------

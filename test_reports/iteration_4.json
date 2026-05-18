@@ -1,0 +1,59 @@
+{
+  "summary": "Backend testing of the Resend/OAuth removal + new Gmail-App-Password email-account stack. 25/25 pytest tests passed against the public REACT_APP_BACKEND_URL. All old Google/Microsoft OAuth endpoints return 404, IntegrationSettingsIn silently drops legacy google_*/microsoft_* fields, new /api/email/* endpoints behave correctly for unauth, 404 (nonexistent id), and 400 (no account / bad SMTP creds) paths. Provider autodetection confirmed for @gmail.com and @outlook.com (real SMTP 535 rejection from respective servers, proving the right smtp_host is used).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "POST /api/email/accounts",
+        "issue": "When SMTP login fails for a non-Gmail provider (e.g. @outlook.com / @yahoo.com), the 400 detail still says 'Make sure 2-Step Verification is ON in your Google Account, then create an App Password and paste it here'. The hint is Gmail-specific and misleading for Outlook/Yahoo users. Suggest branching the message on _autodetect(email)['label'] (Outlook → 'Microsoft account → Security → App passwords', Yahoo → 'Yahoo Account Security → Generate app password')."
+      },
+      {
+        "endpoint": "POST /api/email/accounts",
+        "issue": "Real SMTP login is attempted synchronously inside the request (timeout=20s). On a slow upstream or transient Google outage this can block a request slot. Acceptable for now but consider a short-circuit if the password isn't 16 chars (basic shape check) before hitting the network — saves a round-trip on obvious typos."
+      },
+      {
+        "endpoint": "POST /api/email/send",
+        "issue": "smtplib.SMTPAuthenticationError is mapped to 502 with a message that again assumes Google (\"Regenerate in Google Account → Security → App Passwords\"). Same Gmail-only-copy issue as above."
+      },
+      {
+        "endpoint": "GET /api/email/accounts/{id}/inbox",
+        "issue": "Any IMAP exception bubbles up verbatim in the 502 detail (e.g. \"Inbox fetch failed: ...\") which may include raw server banner strings. Low severity but consider sanitising/truncating."
+      },
+      {
+        "endpoint": "POST /api/email/sync-leads (per-account loop)",
+        "issue": "Accounts are processed sequentially with asyncio.to_thread (one IMAP login per account, blocking up to 25 messages each). For users with multiple mailboxes this is O(N) latency. Consider asyncio.gather across accounts."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_email_accounts.py",
+    "/app/test_reports/pytest/email_accounts_results.xml"
+  ],
+  "action_items": [
+    "Provider-aware error copy in POST /api/email/accounts and POST /api/email/send (currently always says 'Google Account', confusing for Outlook/Yahoo users)."
+  ],
+  "critical_code_review_comments": [
+    "server.py is now ~2088 lines — recommend splitting into routers (auth, accounting, manufacturing, integrations_email, integrations_indiamart, pdf) to stay under ~700 lines per file.",
+    "_email_fernet derives a Fernet key from JWT_SECRET via SHA-256 → urlsafe_b64encode — fine for survival across restarts, but documented side-effect is that rotating JWT_SECRET invalidates every stored encrypted_password. Consider a dedicated EMAIL_ENC_KEY env so JWT rotation doesn't break mailboxes.",
+    "POST /email/accounts persists the IMAP failure in last_test_error but still returns 200; UI must surface imap_warning. Confirm frontend reads/shows this field.",
+    "EmailAccountIn allows free-text smtp_host/smtp_port/imap_host/imap_port overrides without validation — a hostile authenticated user could attempt SMTP to arbitrary internal hosts (SSRF surface). Consider allow-listing or at least logging/auditing manual-override values.",
+    "_pick_account → 'is_default' lookup uses find_one with no tiebreaker; if two docs were ever marked is_default=true the choice is non-deterministic. Add a unique partial index { user_id:1, is_default:1 } where is_default=true, or always update_many({...},{is_default:false}) before setting new default (already done in add/set_default, good).",
+    "Inbox parser uses BODY.PEEK[TEXT]<0.500> to grab a snippet — this only handles plain-text MIME parts; HTML-only messages will produce HTML-tag-soup snippets. Strip HTML tags before truncating to 240 chars.",
+    "_sync_one_account.external_id is 'email::uid' but IMAP UIDs aren't guaranteed stable across mailbox rebuilds — duplicates possible after a re-index. Consider including Message-ID header instead."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_email_accounts.py (new)"
+  ],
+  "success_rate": {"backend": "100%", "frontend": "skipped"},
+  "test_credentials": "admin@denplex.co / Shivganesh4$ (from /app/memory/test_credentials.md).",
+  "seed_data_creation": "None. Tests verified only error-paths; no email accounts were persisted (bad creds rejected before insert). /api/settings/integrations was PUT with the clean (no-legacy-keys) shape to confirm Pydantic dropping — this also self-heals any stale google_client_id in the settings doc as a side-effect (intentional per problem statement).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Run: REACT_APP_BACKEND_URL=<url> pytest /app/backend/tests/test_email_accounts.py -v --junitxml=/app/test_reports/pytest/email_accounts_results.xml. All 25 tests pass in ~7s. Coverage: (a) 10 removed OAuth endpoints return 404 (5 GET + 5 POST). (b) /api/settings/integrations admin GET works, PUT drops legacy google_*/microsoft_* keys (verified by GET after PUT). (c) POST /api/email/accounts with bad gmail creds → 400 with 'App Password'/'SMTP' in detail (SMTP 535 from smtp.gmail.com). (d) POST with @outlook.com & bad creds → 400 (SMTP 535 from smtp.office365.com — autodetect confirmed). (e) GET /api/email/accounts returns []. (f) Nonexistent acct_id → 404 for DELETE, /test, /default, /inbox, /sync-leads. (g) /email/send with no account → 400 'No email account connected'. (h) /email/sync-leads with no accounts → 400 'No email accounts connected'. (i) Unauth POST/GET /api/email/accounts → 403. Provider autodetect verified by inspecting real SMTP server response codes via curl. Existing test file /app/backend/tests/test_denplex_integrations.py still references the OLD removed endpoints — it WILL fail if re-run and should be retired or updated by main agent.",
+  "rca of the issue": "N/A — no failures. One UX nit found: SMTP-auth error messages are Gmail-specific even when the account is @outlook.com or @yahoo.com; non-blocking but worth fixing for UX."
+}

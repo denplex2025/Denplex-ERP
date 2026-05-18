@@ -41,16 +41,13 @@ export default function Leads() {
     } catch (e) { toast.error(e?.response?.data?.detail || "Sync failed"); }
     finally { setSyncing(false); }
   };
-  const syncGmail = async () => {
+  const syncEmail = async () => {
     setSyncing(true);
-    try { const r = await api.post("/integrations/google/gmail/sync-leads"); toast.success(`Gmail: ${r.data.added} new leads from ${r.data.scanned} emails`); setTick(t => t + 1); }
-    catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
-    finally { setSyncing(false); }
-  };
-  const syncImap = async () => {
-    setSyncing(true);
-    try { const r = await api.post("/integrations/imap/sync-leads"); toast.success(`IMAP: ${r.data.added} new leads from ${r.data.scanned} emails`); setTick(t => t + 1); }
-    catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
+    try {
+      const r = await api.post("/email/sync-leads");
+      toast.success(`Email: ${r.data.added} new leads from ${r.data.scanned} messages across ${r.data.per_account?.length || 0} mailbox(es)`);
+      setTick(t => t + 1);
+    } catch (e) { toast.error(e?.response?.data?.detail || "Connect a mailbox in Settings → Email Accounts first"); }
     finally { setSyncing(false); }
   };
   return (
@@ -59,7 +56,7 @@ export default function Leads() {
       testid="leads-page"
       overline="Sales"
       title="Leads"
-      subtitle="Capture inquiries from B2B sites, your Gmail inbox, IMAP mailboxes, website forms — and contact them directly via WhatsApp."
+      subtitle="Capture inquiries from Indiamart, your connected mailboxes (Gmail/Outlook), TradeIndia webhooks, and website forms — and reach them via WhatsApp."
       endpoint="/leads"
       fields={fields}
       columns={cols}
@@ -71,11 +68,8 @@ export default function Leads() {
           <Button onClick={sync} disabled={syncing} variant="outline" className="rounded-sm border-slate-300" data-testid="indiamart-sync">
             <RefreshCw className={`h-4 w-4 mr-1 ${syncing ? "animate-spin" : ""}`} /> Indiamart
           </Button>
-          <Button onClick={syncGmail} disabled={syncing} variant="outline" className="rounded-sm border-slate-300" data-testid="gmail-sync">
-            <RefreshCw className={`h-4 w-4 mr-1 ${syncing ? "animate-spin" : ""}`} /> Gmail
-          </Button>
-          <Button onClick={syncImap} disabled={syncing} variant="outline" className="rounded-sm border-slate-300" data-testid="imap-sync">
-            <RefreshCw className={`h-4 w-4 mr-1 ${syncing ? "animate-spin" : ""}`} /> IMAP
+          <Button onClick={syncEmail} disabled={syncing} variant="outline" className="rounded-sm border-slate-300" data-testid="email-sync">
+            <RefreshCw className={`h-4 w-4 mr-1 ${syncing ? "animate-spin" : ""}`} /> Sync Email
           </Button>
         </>
       }
