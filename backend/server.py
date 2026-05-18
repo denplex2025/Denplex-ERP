@@ -508,6 +508,21 @@ async def login(payload: LoginIn):
 async def me(user=Depends(get_current_user)):
     return user
 
+class ChangePwIn(BaseModel):
+    current_password: str
+    new_password: str
+
+@api.post("/auth/change-password")
+async def change_password(payload: ChangePwIn, user=Depends(get_current_user)):
+    if len(payload.new_password) < 8:
+        raise HTTPException(400, "New password must be at least 8 characters")
+    u = await db.users.find_one({"id": user["id"]})
+    if not u or not verify_password(payload.current_password, u["password"]):
+        raise HTTPException(401, "Current password is incorrect")
+    await db.users.update_one({"id": user["id"]}, {"$set": {"password": hash_password(payload.new_password)}})
+    await write_audit(user["name"], "password_changed", "user", user["id"])
+    return {"ok": True}
+
 @api.get("/users")
 async def list_users(user=Depends(require_roles("admin"))):
     return await db.users.find({}, {"_id": 0, "password": 0, "totp_secret": 0}).to_list(500)

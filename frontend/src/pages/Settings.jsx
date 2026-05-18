@@ -61,7 +61,7 @@ export default function Settings() {
           <TabsTrigger value="resend" className="rounded-sm" data-testid="tab-resend">Resend Email</TabsTrigger>
           <TabsTrigger value="indiamart" className="rounded-sm" data-testid="tab-indiamart">Indiamart</TabsTrigger>
           <TabsTrigger value="tradeindia" className="rounded-sm" data-testid="tab-tradeindia">TradeIndia</TabsTrigger>
-          <TabsTrigger value="2fa" className="rounded-sm" data-testid="tab-2fa">2FA</TabsTrigger>
+          <TabsTrigger value="2fa" className="rounded-sm" data-testid="tab-2fa">Security & 2FA</TabsTrigger>
         </TabsList>
 
         <TabsContent value="company">
@@ -149,6 +149,11 @@ export default function Settings() {
         </TabsContent>
 
         <TabsContent value="2fa">
+          <Card className="p-6 mb-4">
+            <h3 className="font-display text-lg font-semibold mb-2">Change password</h3>
+            <p className="text-sm text-slate-600 mb-4">Strongly recommended for the seeded owner account.</p>
+            <ChangePasswordForm />
+          </Card>
           <Card className="p-6">
             <h3 className="font-display text-lg font-semibold mb-2">Two-factor authentication (TOTP)</h3>
             <p className="text-sm text-slate-600 mb-4">Use Google Authenticator, Authy, or any TOTP app. Once enabled, you'll be asked for a 6-digit code on every login.</p>
@@ -253,3 +258,33 @@ function EmailAccountTab() {
     </Card>
   );
 }
+
+function ChangePasswordForm() {
+  const [cur, setCur] = useState("");
+  const [nw, setNw] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [loading, setLoading] = useState(false);
+  const submit = async (e) => {
+    e.preventDefault();
+    if (nw !== confirm) { toast.error("New passwords don't match"); return; }
+    if (nw.length < 8) { toast.error("Min 8 characters"); return; }
+    setLoading(true);
+    try {
+      await api.post("/auth/change-password", { current_password: cur, new_password: nw });
+      toast.success("Password changed");
+      setCur(""); setNw(""); setConfirm("");
+    } catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
+    finally { setLoading(false); }
+  };
+  return (
+    <form onSubmit={submit} className="grid grid-cols-1 md:grid-cols-3 gap-3 max-w-3xl" data-testid="change-password-form">
+      <Fld label="Current password"><Input type="password" value={cur} onChange={e=>setCur(e.target.value)} required className="rounded-sm" data-testid="cur-pw" /></Fld>
+      <Fld label="New password"><Input type="password" value={nw} onChange={e=>setNw(e.target.value)} required className="rounded-sm" data-testid="new-pw" /></Fld>
+      <Fld label="Confirm new password"><Input type="password" value={confirm} onChange={e=>setConfirm(e.target.value)} required className="rounded-sm" data-testid="confirm-pw" /></Fld>
+      <div className="md:col-span-3">
+        <Button type="submit" disabled={loading} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="save-password">{loading ? "Saving..." : "Change password"}</Button>
+      </div>
+    </form>
+  );
+}
+
