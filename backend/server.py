@@ -1656,6 +1656,8 @@ async def drive_upload(payload: DriveUploadIn, user=Depends(get_current_user)):
 
 @api.post("/integrations/google/drive/backup-doc/{kind}/{doc_id}")
 async def drive_backup_doc(kind: str, doc_id: str, user=Depends(get_current_user)):
+    # Validate Google credentials first so a misconfigured user gets the clearer error.
+    await _user_google_creds(user["id"])
     coll_map = {"invoices": db.invoices, "quotations": db.quotations, "purchase-orders": db.purchase_orders}
     coll = coll_map.get(kind)
     if coll is None:
@@ -1695,8 +1697,8 @@ async def gmail_send(payload: GmailSendIn, user=Depends(get_current_user)):
     svc = gbuild("gmail", "v1", credentials=creds, cache_discovery=False)
     msg = EmailMessage()
     msg["To"] = ", ".join([str(e) for e in payload.to])
-    u = await db.users.find_one({"id": user["id"]}, {"_id": 0})
-    msg["From"] = ((u or {}).get("google", {}).get("email")) or u.get("email", "")
+    u = await db.users.find_one({"id": user["id"]}, {"_id": 0}) or {}
+    msg["From"] = (u.get("google") or {}).get("email") or u.get("email", "")
     msg["Subject"] = payload.subject
     msg.set_content("(HTML email)")
     msg.add_alternative(payload.html, subtype="html")

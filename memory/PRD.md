@@ -49,7 +49,7 @@ Modules requested: Manufacturing, BOM, Work Orders, Job Cards, Inventory, CRM, Q
 - ISO 9001 Document revisions: rev_no tracking + rev history viewer
 - SolidWorks file URL/path field on BOM
 
-### P2 (added in same session)
+### P2 (Twilio/Resend/PDF/B2B/GSTR/2FA/Audit)
 - **Twilio WhatsApp Business** — outbound /api/whatsapp/send (creds stored in DB via Settings UI)
 - **Resend email** — /api/email/send with PDF attachment support
 - **PDF generation** (reportlab) — /api/invoices/{id}/pdf, /api/quotations/{id}/pdf, /api/purchase-orders/{id}/pdf
@@ -59,7 +59,18 @@ Modules requested: Manufacturing, BOM, Work Orders, Job Cards, Inventory, CRM, Q
 - **2FA TOTP** — pyotp Google Authenticator compatible (setup/enable/disable/login flow)
 - **Audit log** — captures sends, 2FA changes, integration imports
 - **Admin Settings page** with Twilio + Resend + Indiamart + TradeIndia + Company GSTIN/address
-- **Per-row buttons on quotations/POs/invoices**: Download PDF, Email PDF (Resend), WhatsApp (web + Twilio)
+- **In-app PDF preview** (iframe) + quick download/email actions on every doc row
+
+### P3 (Denplex rebrand + Google + IMAP/SMTP)
+- **Denplex ERP rebrand** — red (#DC2626) + black (#0A0A0A) theme, Denplex logo in nav/login/portal/landing, favicon, page title
+- **Branded PDF letterhead** — Denplex logo top-left, red+black header band, "DENPLEX ENGINEERING COMPANY" tagline, red total bar, "Yours faithfully / Authorised Signatory · Managing Partner" footer
+- **Google OAuth (Drive + Gmail)** — per-user OAuth, /api/integrations/google/{auth-url,callback,status,disconnect}
+- **Drive backup** — /api/integrations/google/drive/upload + /backup-doc/{kind}/{id} for invoices/quotations/POs
+- **Gmail send** — /api/integrations/google/gmail/send (user's mailbox → ends up in their Sent folder, customer replies go to them)
+- **Gmail lead sync** — /api/integrations/google/gmail/sync-leads scans inbox, auto-creates leads, dedupes by message_id
+- **Generic IMAP/SMTP** — /api/integrations/email-account (per-user, password hidden in GET), /api/integrations/smtp/send, /api/integrations/imap/sync-leads
+- **Settings page tabs**: Company, Google (Drive+Gmail), Email Account (IMAP/SMTP), Twilio, Resend, Indiamart, TradeIndia, 2FA
+- **Per-row send buttons** (8 channels): Preview · Download · Gmail · SMTP · Resend · Drive backup · WhatsApp web · Twilio WhatsApp
 
 ## Backlog
 ### P2 (deferred)
