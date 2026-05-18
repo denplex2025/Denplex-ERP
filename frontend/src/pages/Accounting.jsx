@@ -63,7 +63,7 @@ export default function Accounting() {
             <div className="flex flex-wrap items-end gap-3">
               <div><Label className="text-xs uppercase">From</Label><Input type="date" value={from} onChange={e=>setFrom(e.target.value)} className="rounded-sm mt-1.5" /></div>
               <div><Label className="text-xs uppercase">To</Label><Input type="date" value={to} onChange={e=>setTo(e.target.value)} className="rounded-sm mt-1.5" /></div>
-              <Button onClick={loadReport} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="run-gst-report"><FileSpreadsheet className="h-4 w-4 mr-1" /> Run report</Button>
+              <Button onClick={loadReport} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="run-gst-report"><FileSpreadsheet className="h-4 w-4 mr-1" /> Run report</Button>
               <Button onClick={()=>downloadGstr("gstr1")} variant="outline" className="rounded-sm" data-testid="download-gstr1"><FileSpreadsheet className="h-4 w-4 mr-1" /> GSTR-1 CSV</Button>
               <Button onClick={()=>downloadGstr("gstr3b")} variant="outline" className="rounded-sm" data-testid="download-gstr3b"><FileSpreadsheet className="h-4 w-4 mr-1" /> GSTR-3B CSV</Button>
             </div>
@@ -73,7 +73,7 @@ export default function Accounting() {
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 <Stat label="Output Taxable" value={inr(report.output.taxable)} />
                 <Stat label="Output GST" value={inr(report.output.total_gst)} accent="text-emerald-700" />
-                <Stat label="Input GST" value={inr(report.input.total_gst)} accent="text-blue-700" />
+                <Stat label="Input GST" value={inr(report.input.total_gst)} accent="text-red-600" />
                 <Stat label="Net Liability" value={inr(report.net_liability)} accent={report.net_liability >= 0 ? "text-red-700" : "text-emerald-700"} />
               </div>
               <Card className="mt-6">
@@ -98,7 +98,7 @@ export default function Accounting() {
 
         <TabsContent value="expenses">
           <div className="flex justify-end mb-3">
-            <Button onClick={()=>setOpen(true)} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="new-expense"><Plus className="h-4 w-4 mr-1" /> New Expense</Button>
+            <Button onClick={()=>setOpen(true)} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="new-expense"><Plus className="h-4 w-4 mr-1" /> New Expense</Button>
           </div>
           <Card>
             {expenses.length === 0 ? <Empty label="No expenses logged." /> : (
@@ -153,7 +153,7 @@ export default function Accounting() {
           </div>
           <DialogFooter>
             <Button variant="outline" className="rounded-sm" onClick={()=>setOpen(false)}>Cancel</Button>
-            <Button onClick={save} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="save-expense">Save</Button>
+            <Button onClick={save} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="save-expense">Save</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

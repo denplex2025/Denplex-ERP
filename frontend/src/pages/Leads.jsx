@@ -41,13 +41,25 @@ export default function Leads() {
     } catch (e) { toast.error(e?.response?.data?.detail || "Sync failed"); }
     finally { setSyncing(false); }
   };
+  const syncGmail = async () => {
+    setSyncing(true);
+    try { const r = await api.post("/integrations/google/gmail/sync-leads"); toast.success(`Gmail: ${r.data.added} new leads from ${r.data.scanned} emails`); setTick(t => t + 1); }
+    catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
+    finally { setSyncing(false); }
+  };
+  const syncImap = async () => {
+    setSyncing(true);
+    try { const r = await api.post("/integrations/imap/sync-leads"); toast.success(`IMAP: ${r.data.added} new leads from ${r.data.scanned} emails`); setTick(t => t + 1); }
+    catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
+    finally { setSyncing(false); }
+  };
   return (
     <CrudPage
       key={tick}
       testid="leads-page"
       overline="Sales"
       title="Leads"
-      subtitle="Capture inquiries from B2B sites, website forms, referrals. Click the WhatsApp icon to contact instantly."
+      subtitle="Capture inquiries from B2B sites, your Gmail inbox, IMAP mailboxes, website forms — and contact them directly via WhatsApp."
       endpoint="/leads"
       fields={fields}
       columns={cols}
@@ -55,9 +67,17 @@ export default function Leads() {
       whatsappField="phone"
       emptyLabel="No leads yet. Click 'New' to add your first."
       extraTopActions={
-        <Button onClick={sync} disabled={syncing} variant="outline" className="rounded-sm border-slate-300" data-testid="indiamart-sync">
-          <RefreshCw className={`h-4 w-4 mr-1 ${syncing ? "animate-spin" : ""}`} /> Sync Indiamart
-        </Button>
+        <>
+          <Button onClick={sync} disabled={syncing} variant="outline" className="rounded-sm border-slate-300" data-testid="indiamart-sync">
+            <RefreshCw className={`h-4 w-4 mr-1 ${syncing ? "animate-spin" : ""}`} /> Indiamart
+          </Button>
+          <Button onClick={syncGmail} disabled={syncing} variant="outline" className="rounded-sm border-slate-300" data-testid="gmail-sync">
+            <RefreshCw className={`h-4 w-4 mr-1 ${syncing ? "animate-spin" : ""}`} /> Gmail
+          </Button>
+          <Button onClick={syncImap} disabled={syncing} variant="outline" className="rounded-sm border-slate-300" data-testid="imap-sync">
+            <RefreshCw className={`h-4 w-4 mr-1 ${syncing ? "animate-spin" : ""}`} /> IMAP
+          </Button>
+        </>
       }
     />
   );

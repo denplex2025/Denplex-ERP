@@ -44,7 +44,7 @@ export default function QC() {
       <PageHeader
         overline="Quality" title="QC Reports"
         subtitle="Inspections linked to work orders and customers — searchable forever."
-        actions={<Button onClick={()=>{setForm({result:"pass",photos:[],inspection_date:new Date().toISOString().slice(0,10)}); setOpen(true);}} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="new-qc"><Plus className="h-4 w-4 mr-1" /> New QC</Button>}
+        actions={<Button onClick={()=>{setForm({result:"pass",photos:[],inspection_date:new Date().toISOString().slice(0,10)}); setOpen(true);}} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="new-qc"><Plus className="h-4 w-4 mr-1" /> New QC</Button>}
       />
       <Card>
         {items.length === 0 ? <Empty label="No QC reports yet." /> : (
@@ -107,7 +107,7 @@ export default function QC() {
           </div>
           <DialogFooter>
             <Button variant="outline" className="rounded-sm" onClick={()=>setOpen(false)}>Cancel</Button>
-            <Button onClick={save} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="save-qc">Save</Button>
+            <Button onClick={save} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="save-qc">Save</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

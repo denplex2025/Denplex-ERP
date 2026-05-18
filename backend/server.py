@@ -30,6 +30,17 @@ from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, 
 from twilio.rest import Client as TwilioClient
 from twilio.base.exceptions import TwilioRestException
 import resend as resend_sdk
+from google.oauth2.credentials import Credentials as GCreds
+from google_auth_oauthlib.flow import Flow as GFlow
+from google.auth.transport.requests import Request as GRequest
+from googleapiclient.discovery import build as gbuild
+from googleapiclient.http import MediaInMemoryUpload
+from email.message import EmailMessage
+import smtplib
+import imaplib
+import email as emaillib
+import re
+import ssl
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -1045,10 +1056,15 @@ class IntegrationSettingsIn(BaseModel):
     resend_from_email: Optional[str] = ""
     indiamart_crm_key: Optional[str] = ""
     tradeindia_webhook_secret: Optional[str] = ""
-    company_name: Optional[str] = "Precision Engineering Works"
+    google_client_id: Optional[str] = ""
+    google_client_secret: Optional[str] = ""
+    google_redirect_uri: Optional[str] = ""
+    google_drive_folder_id: Optional[str] = ""
+    company_name: Optional[str] = "Denplex Engineering Company"
     company_gstin: Optional[str] = ""
     company_state: Optional[str] = ""
     company_address: Optional[str] = ""
+    company_tagline: Optional[str] = "Precision Engineered Solutions"
 
 @api.get("/settings/integrations")
 async def get_integrations(user=Depends(require_roles("admin"))):
@@ -1165,37 +1181,61 @@ def _money(n) -> str:
 def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, date_s: str,
                    lines: List[Dict[str, Any]], totals: Dict[str, float], gst_breakup: Optional[Dict[str, float]] = None,
                    company: Optional[Dict[str, Any]] = None, notes: str = "") -> bytes:
+    from reportlab.platypus import Image as RLImage
     buf = io.BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=A4, rightMargin=18*mm, leftMargin=18*mm, topMargin=18*mm, bottomMargin=18*mm)
+    doc = SimpleDocTemplate(buf, pagesize=A4, rightMargin=15*mm, leftMargin=15*mm, topMargin=14*mm, bottomMargin=14*mm)
     styles = getSampleStyleSheet()
-    h_style = ParagraphStyle("h", parent=styles["Heading1"], fontSize=18, textColor=colors.HexColor("#0F172A"), spaceAfter=2)
-    sub_style = ParagraphStyle("sub", parent=styles["Normal"], fontSize=9, textColor=colors.HexColor("#475569"))
-    small = ParagraphStyle("sm", parent=styles["Normal"], fontSize=9, textColor=colors.HexColor("#0F172A"))
-    label = ParagraphStyle("lbl", parent=styles["Normal"], fontSize=8, textColor=colors.HexColor("#64748B"), spaceAfter=0)
-    flow = []
+    RED = colors.HexColor("#DC2626")
+    BLACK = colors.HexColor("#0A0A0A")
+    GREY = colors.HexColor("#475569")
+    h_style = ParagraphStyle("h", parent=styles["Heading1"], fontSize=18, textColor=BLACK, spaceAfter=2)
+    title_style = ParagraphStyle("ttl", parent=styles["Heading1"], fontSize=22, textColor=RED, leading=24, alignment=2, spaceAfter=0)
+    sub_style = ParagraphStyle("sub", parent=styles["Normal"], fontSize=9, textColor=GREY)
+    small = ParagraphStyle("sm", parent=styles["Normal"], fontSize=9, textColor=BLACK)
     company = company or {}
-    # Header band
-    flow.append(Paragraph(f"<b>{company.get('company_name','Precision Engineering Works')}</b>", styles["Heading2"]))
-    if company.get("company_address"): flow.append(Paragraph(company["company_address"], sub_style))
-    if company.get("company_gstin"): flow.append(Paragraph(f"GSTIN: {company['company_gstin']}", sub_style))
+    flow = []
+    # Header band: logo left, title right
+    logo_path = str(ROOT_DIR / "logo.png")
+    try:
+        logo = RLImage(logo_path, width=28*mm, height=24*mm)
+    except Exception:
+        logo = Paragraph("<b>DENPLEX</b>", h_style)
+    company_block = [
+        Paragraph(f"<b><font color='#0A0A0A'>{company.get('company_name','Denplex Engineering Company').upper()}</font></b>", small),
+    ]
+    if company.get("company_tagline"):
+        company_block.append(Paragraph(f"<font color='#DC2626'>{company['company_tagline']}</font>", sub_style))
+    if company.get("company_address"):
+        company_block.append(Paragraph(company["company_address"], sub_style))
+    if company.get("company_gstin"):
+        company_block.append(Paragraph(f"GSTIN: <b>{company['company_gstin']}</b>", sub_style))
+    title_block = [Paragraph(title.upper(), title_style),
+                   Paragraph(f"<b>{code}</b>", ParagraphStyle('c', parent=small, alignment=2, fontSize=11)),
+                   Paragraph(f"Date: {date_s}", ParagraphStyle('d', parent=sub_style, alignment=2))]
+    header_tbl = Table([[logo, company_block, title_block]], colWidths=[32*mm, 90*mm, 58*mm])
+    header_tbl.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LINEBELOW", (0, 0), (-1, -1), 1.5, RED),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+    ]))
+    flow.append(header_tbl)
     flow.append(Spacer(1, 6*mm))
-    flow.append(Paragraph(f"{title}", h_style))
-    flow.append(Paragraph(f"<b>{code}</b> &nbsp;&nbsp; Date: {date_s}", small))
-    flow.append(Spacer(1, 4*mm))
-    flow.append(Paragraph(f"{party_label}: <b>{party_name}</b>", small))
-    flow.append(Spacer(1, 4*mm))
-    # Lines table
-    header = ["#", "Description", "Qty", "Rate", "GST%", "Amount"]
+    # Party block
+    flow.append(Paragraph(f"<b>{party_label}:</b>", small))
+    flow.append(Paragraph(f"<font size=11><b>{party_name}</b></font>", small))
+    flow.append(Spacer(1, 5*mm))
+    # Lines
+    header = ["#", "Description", "Qty", "Rate", "GST%", "Amount (Rs.)"]
     data = [header]
     for i, l in enumerate(lines, 1):
         qty = float(l.get("qty", 0) or 0)
         rate = float(l.get("rate", 0) or 0)
         amt = qty * rate
         data.append([str(i), l.get("description", ""), f"{qty:g}", f"{rate:,.2f}", f"{l.get('gst_rate', 0)}", f"{amt:,.2f}"])
-    tbl = Table(data, colWidths=[10*mm, 80*mm, 18*mm, 22*mm, 16*mm, 28*mm])
+    tbl = Table(data, colWidths=[10*mm, 78*mm, 16*mm, 22*mm, 14*mm, 30*mm])
     tbl.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F1F5F9")),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#0F172A")),
+        ("BACKGROUND", (0, 0), (-1, 0), BLACK),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
         ("FONTSIZE", (0, 0), (-1, -1), 9),
         ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#E2E8F0")),
@@ -1205,6 +1245,7 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
         ("RIGHTPADDING", (0, 0), (-1, -1), 4),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
         ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#FAFAFA")]),
     ]))
     flow.append(tbl)
     flow.append(Spacer(1, 4*mm))
@@ -1224,16 +1265,23 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
         ("FONTSIZE", (0, 0), (-1, -1), 10),
         ("ALIGN", (1, 0), (1, -1), "RIGHT"),
         ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
-        ("LINEABOVE", (0, -1), (-1, -1), 0.5, colors.HexColor("#0F172A")),
-        ("TOPPADDING", (0, 0), (-1, -1), 3),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("BACKGROUND", (0, -1), (-1, -1), RED),
+        ("TEXTCOLOR", (0, -1), (-1, -1), colors.white),
+        ("LINEABOVE", (0, -1), (-1, -1), 1, BLACK),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
     ]))
     flow.append(tot_tbl)
     if notes:
         flow.append(Spacer(1, 6*mm))
         flow.append(Paragraph(f"<b>Notes:</b> {notes}", small))
-    flow.append(Spacer(1, 10*mm))
-    flow.append(Paragraph("Thank you for your business.", sub_style))
+    flow.append(Spacer(1, 14*mm))
+    flow.append(Paragraph("Yours faithfully,", small))
+    flow.append(Spacer(1, 12*mm))
+    flow.append(Paragraph(f"<b>For {company.get('company_name','DENPLEX ENGINEERING COMPANY').upper()}</b>", small))
+    flow.append(Paragraph("<font color='#475569'>Authorised Signatory &nbsp;·&nbsp; Managing Partner</font>", sub_style))
     doc.build(flow)
     return buf.getvalue()
 
@@ -1467,6 +1515,393 @@ async def totp_disable(payload: TotpVerifyIn, user=Depends(get_current_user)):
 async def totp_status(user=Depends(get_current_user)):
     u = await db.users.find_one({"id": user["id"]}, {"_id": 0})
     return {"enabled": bool(u.get("totp_enabled"))}
+
+
+
+# ================ Google OAuth (Drive + Gmail) ================
+GOOGLE_SCOPES = [
+    "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "openid",
+]
+
+def _google_client_cfg(cid: str, csec: str, redirect: str) -> Dict[str, Any]:
+    return {
+        "web": {
+            "client_id": cid,
+            "client_secret": csec,
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "redirect_uris": [redirect],
+        }
+    }
+
+async def _user_google_creds(user_id: str) -> GCreds:
+    u = await db.users.find_one({"id": user_id}, {"_id": 0})
+    g = (u or {}).get("google") or {}
+    if not g.get("refresh_token"):
+        raise HTTPException(400, "Google account not connected. Open Settings → Google.")
+    cfg = await get_setting("integrations")
+    creds = GCreds(
+        token=g.get("access_token"),
+        refresh_token=g.get("refresh_token"),
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=cfg.get("google_client_id"),
+        client_secret=cfg.get("google_client_secret"),
+        scopes=GOOGLE_SCOPES,
+    )
+    if not creds.valid:
+        await asyncio.to_thread(creds.refresh, GRequest())
+        await db.users.update_one(
+            {"id": user_id},
+            {"$set": {"google.access_token": creds.token, "google.token_expiry": (creds.expiry.isoformat() if creds.expiry else "")}},
+        )
+    return creds
+
+@api.get("/integrations/google/auth-url")
+async def google_auth_url(user=Depends(get_current_user)):
+    cfg = await get_setting("integrations")
+    cid = cfg.get("google_client_id"); csec = cfg.get("google_client_secret"); redirect = cfg.get("google_redirect_uri")
+    if not (cid and csec and redirect):
+        raise HTTPException(400, "Google OAuth not configured. Admin must set Client ID, Secret, Redirect URI in Settings.")
+    flow = GFlow.from_client_config(_google_client_cfg(cid, csec, redirect), scopes=GOOGLE_SCOPES, redirect_uri=redirect)
+    state = secrets.token_urlsafe(24)
+    await db.oauth_states.replace_one(
+        {"_id": state},
+        {"_id": state, "user_id": user["id"], "created_at": now_iso()},
+        upsert=True,
+    )
+    url, _ = flow.authorization_url(access_type="offline", include_granted_scopes="true", prompt="consent", state=state)
+    return {"auth_url": url}
+
+@api.get("/integrations/google/callback")
+async def google_callback(code: str = Query(...), state: str = Query(...)):
+    st = await db.oauth_states.find_one({"_id": state}, {"_id": 0})
+    if not st:
+        raise HTTPException(400, "Invalid state")
+    await db.oauth_states.delete_one({"_id": state})
+    cfg = await get_setting("integrations")
+    cid = cfg.get("google_client_id"); csec = cfg.get("google_client_secret"); redirect = cfg.get("google_redirect_uri")
+    flow = GFlow.from_client_config(_google_client_cfg(cid, csec, redirect), scopes=GOOGLE_SCOPES, redirect_uri=redirect)
+    try:
+        await asyncio.to_thread(flow.fetch_token, code=code)
+    except Exception as e:
+        raise HTTPException(400, f"Token exchange failed: {e}")
+    creds = flow.credentials
+    # Get user info
+    g_email = ""
+    try:
+        svc = gbuild("oauth2", "v2", credentials=creds, cache_discovery=False)
+        info = await asyncio.to_thread(lambda: svc.userinfo().get().execute())
+        g_email = info.get("email", "")
+    except Exception:
+        pass
+    await db.users.update_one(
+        {"id": st["user_id"]},
+        {"$set": {"google": {
+            "email": g_email,
+            "access_token": creds.token,
+            "refresh_token": creds.refresh_token,
+            "token_expiry": (creds.expiry.isoformat() if creds.expiry else ""),
+            "scopes": list(creds.scopes or []),
+            "connected_at": now_iso(),
+        }}},
+    )
+    await write_audit("system", "google_connected", "user", st["user_id"], {"email": g_email})
+    # redirect to frontend settings
+    from fastapi.responses import RedirectResponse
+    public_base = "/"
+    return RedirectResponse(url=f"{public_base}app/settings?google=connected")
+
+@api.get("/integrations/google/status")
+async def google_status(user=Depends(get_current_user)):
+    u = await db.users.find_one({"id": user["id"]}, {"_id": 0})
+    g = (u or {}).get("google") or {}
+    return {"connected": bool(g.get("refresh_token")), "email": g.get("email", ""), "connected_at": g.get("connected_at", "")}
+
+@api.post("/integrations/google/disconnect")
+async def google_disconnect(user=Depends(get_current_user)):
+    await db.users.update_one({"id": user["id"]}, {"$unset": {"google": ""}})
+    await write_audit(user["name"], "google_disconnected", "user", user["id"])
+    return {"ok": True}
+
+# ---------- Drive upload ----------
+class DriveUploadIn(BaseModel):
+    filename: str
+    mime: str = "application/pdf"
+    file_base64: str  # data URL or plain base64
+    parent_folder_id: Optional[str] = ""
+
+@api.post("/integrations/google/drive/upload")
+async def drive_upload(payload: DriveUploadIn, user=Depends(get_current_user)):
+    creds = await _user_google_creds(user["id"])
+    svc = gbuild("drive", "v3", credentials=creds, cache_discovery=False)
+    b64 = payload.file_base64
+    if b64.startswith("data:") and "," in b64:
+        b64 = b64.split(",", 1)[1]
+    raw = base64.b64decode(b64)
+    cfg = await get_setting("integrations")
+    parent = payload.parent_folder_id or cfg.get("google_drive_folder_id") or None
+    body = {"name": payload.filename}
+    if parent: body["parents"] = [parent]
+    media = MediaInMemoryUpload(raw, mimetype=payload.mime, resumable=False)
+    try:
+        f = await asyncio.to_thread(lambda: svc.files().create(body=body, media_body=media, fields="id,name,webViewLink").execute())
+    except Exception as e:
+        raise HTTPException(502, f"Drive upload failed: {e}")
+    await write_audit(user["name"], "drive_upload", "file", f.get("id"), {"name": payload.filename})
+    return f
+
+@api.post("/integrations/google/drive/backup-doc/{kind}/{doc_id}")
+async def drive_backup_doc(kind: str, doc_id: str, user=Depends(get_current_user)):
+    coll_map = {"invoices": db.invoices, "quotations": db.quotations, "purchase-orders": db.purchase_orders}
+    coll = coll_map.get(kind)
+    if coll is None:
+        raise HTTPException(400, "Invalid kind")
+    d = await coll.find_one({"id": doc_id}, {"_id": 0})
+    if not d:
+        raise HTTPException(404, "Not found")
+    company = await get_setting("integrations")
+    if kind == "invoices":
+        pdf = _build_doc_pdf("Tax Invoice", d.get("code", ""), "Bill To", d.get("customer_name", ""), str(d.get("date", ""))[:10],
+                             d.get("lines", []), {"subtotal": d.get("subtotal", 0), "total": d.get("total", 0)},
+                             gst_breakup={"cgst": d.get("cgst", 0), "sgst": d.get("sgst", 0), "igst": d.get("igst", 0)},
+                             company=company, notes=d.get("notes", ""))
+    elif kind == "quotations":
+        pdf = _build_doc_pdf("Quotation", d.get("code", ""), "To", d.get("customer_name", ""), str(d.get("date", ""))[:10],
+                             d.get("lines", []), {"subtotal": d.get("subtotal", 0), "gst_total": d.get("gst_total", 0), "total": d.get("total", 0)},
+                             company=company, notes=d.get("notes", ""))
+    else:
+        pdf = _build_doc_pdf("Purchase Order", d.get("code", ""), "Supplier", d.get("supplier_name", ""), str(d.get("date", ""))[:10],
+                             d.get("lines", []), {"subtotal": d.get("subtotal", 0), "gst_total": d.get("gst_total", 0), "total": d.get("total", 0)},
+                             company=company, notes=d.get("notes", ""))
+    b64 = base64.b64encode(pdf).decode()
+    return await drive_upload(DriveUploadIn(filename=f"{d.get('code','doc')}.pdf", mime="application/pdf", file_base64=b64), user)
+
+# ---------- Gmail send ----------
+class GmailSendIn(BaseModel):
+    to: List[EmailStr]
+    subject: str
+    html: str
+    attachment_base64: Optional[str] = ""
+    attachment_filename: Optional[str] = ""
+    attachment_mime: Optional[str] = "application/pdf"
+
+@api.post("/integrations/google/gmail/send")
+async def gmail_send(payload: GmailSendIn, user=Depends(get_current_user)):
+    creds = await _user_google_creds(user["id"])
+    svc = gbuild("gmail", "v1", credentials=creds, cache_discovery=False)
+    msg = EmailMessage()
+    msg["To"] = ", ".join([str(e) for e in payload.to])
+    u = await db.users.find_one({"id": user["id"]}, {"_id": 0})
+    msg["From"] = ((u or {}).get("google", {}).get("email")) or u.get("email", "")
+    msg["Subject"] = payload.subject
+    msg.set_content("(HTML email)")
+    msg.add_alternative(payload.html, subtype="html")
+    if payload.attachment_base64 and payload.attachment_filename:
+        b64 = payload.attachment_base64
+        if b64.startswith("data:") and "," in b64:
+            b64 = b64.split(",", 1)[1]
+        raw = base64.b64decode(b64)
+        maintype, _, subtype = (payload.attachment_mime or "application/octet-stream").partition("/")
+        msg.add_attachment(raw, maintype=maintype, subtype=subtype, filename=payload.attachment_filename)
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+    try:
+        sent = await asyncio.to_thread(lambda: svc.users().messages().send(userId="me", body={"raw": raw}).execute())
+    except Exception as e:
+        raise HTTPException(502, f"Gmail send failed: {e}")
+    await write_audit(user["name"], "gmail_send", "email", sent.get("id"), {"to": payload.to, "subject": payload.subject})
+    return {"id": sent.get("id"), "ok": True}
+
+@api.post("/integrations/google/gmail/sync-leads")
+async def gmail_sync_leads(user=Depends(get_current_user)):
+    creds = await _user_google_creds(user["id"])
+    svc = gbuild("gmail", "v1", credentials=creds, cache_discovery=False)
+    try:
+        resp = await asyncio.to_thread(lambda: svc.users().messages().list(userId="me", labelIds=["INBOX"], maxResults=25).execute())
+    except Exception as e:
+        raise HTTPException(502, f"Gmail fetch failed: {e}")
+    added = 0
+    for m in resp.get("messages", []) or []:
+        try:
+            full = await asyncio.to_thread(lambda mid=m["id"]: svc.users().messages().get(userId="me", id=mid, format="metadata", metadataHeaders=["From", "Subject"]).execute())
+        except Exception:
+            continue
+        ext_id = full.get("id")
+        if await db.leads.find_one({"external_id": ext_id}):
+            continue
+        headers = {h["name"].lower(): h["value"] for h in (full.get("payload", {}).get("headers", []) or [])}
+        frm = headers.get("from", "")
+        subj = headers.get("subject", "")
+        snippet = full.get("snippet", "")
+        # parse name + email
+        m1 = re.match(r"\s*\"?([^\"<]+?)\"?\s*<([^>]+)>", frm)
+        if m1:
+            name, em = m1.group(1).strip(), m1.group(2).strip()
+        else:
+            name, em = (frm or "").split("@")[0], (frm or "")
+        # filter promotional: skip noreply / no-reply
+        if "noreply" in em.lower() or "no-reply" in em.lower():
+            continue
+        await db.leads.insert_one({
+            "id": new_id(),
+            "external_id": ext_id,
+            "name": name or "Unknown",
+            "company": "",
+            "phone": "",
+            "email": em,
+            "source": "gmail",
+            "requirement": subj or snippet[:200],
+            "status": "new",
+            "notes": snippet[:500],
+            "created_at": now_iso(),
+        })
+        added += 1
+    await write_audit(user["name"], "gmail_sync_leads", "leads", None, {"added": added, "scanned": len(resp.get("messages", []) or [])})
+    return {"added": added, "scanned": len(resp.get("messages", []) or [])}
+
+# ================ Generic IMAP/SMTP (per-user) ================
+class EmailAccountIn(BaseModel):
+    display_name: Optional[str] = ""
+    smtp_host: str
+    smtp_port: int = 587
+    smtp_use_tls: bool = True
+    smtp_user: str
+    smtp_password: str
+    imap_host: str
+    imap_port: int = 993
+    imap_user: Optional[str] = ""
+    imap_password: Optional[str] = ""
+    from_email: EmailStr
+
+@api.get("/integrations/email-account")
+async def get_email_account(user=Depends(get_current_user)):
+    u = await db.users.find_one({"id": user["id"]}, {"_id": 0})
+    acc = (u or {}).get("email_account") or {}
+    # never return password
+    safe = {k: v for k, v in acc.items() if k not in ("smtp_password", "imap_password")}
+    safe["has_smtp_password"] = bool(acc.get("smtp_password"))
+    safe["has_imap_password"] = bool(acc.get("imap_password"))
+    return safe
+
+@api.put("/integrations/email-account")
+async def set_email_account(payload: EmailAccountIn, user=Depends(get_current_user)):
+    data = payload.model_dump()
+    await db.users.update_one({"id": user["id"]}, {"$set": {"email_account": data}})
+    await write_audit(user["name"], "email_account_set", "user", user["id"], {"smtp_host": data["smtp_host"]})
+    return {"ok": True}
+
+@api.delete("/integrations/email-account")
+async def del_email_account(user=Depends(get_current_user)):
+    await db.users.update_one({"id": user["id"]}, {"$unset": {"email_account": ""}})
+    return {"ok": True}
+
+class SmtpSendIn(BaseModel):
+    to: List[EmailStr]
+    subject: str
+    html: str
+    attachment_base64: Optional[str] = ""
+    attachment_filename: Optional[str] = ""
+    attachment_mime: Optional[str] = "application/pdf"
+
+def _send_smtp_sync(acc: Dict[str, Any], payload: SmtpSendIn) -> None:
+    msg = EmailMessage()
+    msg["From"] = acc.get("from_email")
+    msg["To"] = ", ".join([str(e) for e in payload.to])
+    msg["Subject"] = payload.subject
+    msg.set_content("(HTML email)")
+    msg.add_alternative(payload.html, subtype="html")
+    if payload.attachment_base64 and payload.attachment_filename:
+        b64 = payload.attachment_base64
+        if b64.startswith("data:") and "," in b64:
+            b64 = b64.split(",", 1)[1]
+        raw = base64.b64decode(b64)
+        maintype, _, subtype = (payload.attachment_mime or "application/octet-stream").partition("/")
+        msg.add_attachment(raw, maintype=maintype, subtype=subtype, filename=payload.attachment_filename)
+    ctx = ssl.create_default_context()
+    if acc.get("smtp_use_tls", True):
+        with smtplib.SMTP(acc["smtp_host"], int(acc.get("smtp_port", 587)), timeout=30) as s:
+            s.starttls(context=ctx)
+            s.login(acc["smtp_user"], acc["smtp_password"])
+            s.send_message(msg)
+    else:
+        with smtplib.SMTP_SSL(acc["smtp_host"], int(acc.get("smtp_port", 465)), context=ctx, timeout=30) as s:
+            s.login(acc["smtp_user"], acc["smtp_password"])
+            s.send_message(msg)
+
+@api.post("/integrations/smtp/send")
+async def smtp_send(payload: SmtpSendIn, user=Depends(get_current_user)):
+    u = await db.users.find_one({"id": user["id"]}, {"_id": 0})
+    acc = (u or {}).get("email_account")
+    if not acc or not acc.get("smtp_host"):
+        raise HTTPException(400, "Email account not configured. Open Settings → Email Account.")
+    try:
+        await asyncio.to_thread(_send_smtp_sync, acc, payload)
+    except Exception as e:
+        raise HTTPException(502, f"SMTP send failed: {e}")
+    await write_audit(user["name"], "smtp_send", "email", None, {"to": payload.to, "subject": payload.subject})
+    return {"ok": True}
+
+def _imap_fetch_sync(acc: Dict[str, Any], limit: int = 20) -> List[Dict[str, Any]]:
+    host = acc["imap_host"]; port = int(acc.get("imap_port", 993))
+    user = acc.get("imap_user") or acc.get("smtp_user")
+    pw = acc.get("imap_password") or acc.get("smtp_password")
+    out: List[Dict[str, Any]] = []
+    with imaplib.IMAP4_SSL(host, port) as M:
+        M.login(user, pw)
+        M.select("INBOX")
+        typ, data = M.search(None, "ALL")
+        if typ != "OK": return out
+        ids = data[0].split()[-limit:][::-1]
+        for i in ids:
+            typ, msg_data = M.fetch(i, "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT MESSAGE-ID DATE)])")
+            if typ != "OK": continue
+            raw = msg_data[0][1] if msg_data and msg_data[0] else b""
+            msg = emaillib.message_from_bytes(raw)
+            out.append({
+                "uid": i.decode(),
+                "message_id": msg.get("Message-ID", ""),
+                "from": msg.get("From", ""),
+                "subject": msg.get("Subject", ""),
+                "date": msg.get("Date", ""),
+            })
+    return out
+
+@api.post("/integrations/imap/sync-leads")
+async def imap_sync_leads(user=Depends(get_current_user)):
+    u = await db.users.find_one({"id": user["id"]}, {"_id": 0})
+    acc = (u or {}).get("email_account")
+    if not acc or not acc.get("imap_host"):
+        raise HTTPException(400, "IMAP not configured")
+    try:
+        msgs = await asyncio.to_thread(_imap_fetch_sync, acc, 25)
+    except Exception as e:
+        raise HTTPException(502, f"IMAP fetch failed: {e}")
+    added = 0
+    for m in msgs:
+        ext_id = m.get("message_id") or m.get("uid")
+        if not ext_id or await db.leads.find_one({"external_id": ext_id}):
+            continue
+        frm = m.get("from", "")
+        m1 = re.match(r"\s*\"?([^\"<]+?)\"?\s*<([^>]+)>", frm)
+        if m1:
+            name, em = m1.group(1).strip(), m1.group(2).strip()
+        else:
+            em = frm
+            name = (frm or "").split("@")[0]
+        if "noreply" in em.lower() or "no-reply" in em.lower():
+            continue
+        await db.leads.insert_one({
+            "id": new_id(), "external_id": ext_id, "name": name or "Unknown",
+            "company": "", "phone": "", "email": em, "source": "imap",
+            "requirement": m.get("subject", ""), "status": "new",
+            "notes": f"Date: {m.get('date','')}", "created_at": now_iso(),
+        })
+        added += 1
+    await write_audit(user["name"], "imap_sync_leads", "leads", None, {"added": added, "scanned": len(msgs)})
+    return {"added": added, "scanned": len(msgs)}
 
 
 # ---------------- Seed ----------------

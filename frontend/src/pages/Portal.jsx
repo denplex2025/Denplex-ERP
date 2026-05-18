@@ -29,10 +29,8 @@ export default function Portal() {
       <header className="border-b border-slate-200">
         <div className="max-w-5xl mx-auto px-6 h-16 flex items-center justify-between">
           <Link to="/" className="flex items-center gap-2.5">
-            <div className="h-7 w-7 bg-slate-900 flex items-center justify-center">
-              <Cog className="h-4 w-4 text-white" strokeWidth={2.5} />
-            </div>
-            <span className="font-display font-bold tracking-tight">PRECISION ERP</span>
+            <img src="/denplex-logo.png" alt="Denplex" className="h-9 w-9 object-contain" />
+            <span className="font-display font-bold tracking-tight">DENPLEX ERP</span>
           </Link>
           <Link to="/" className="text-sm text-slate-600 hover:text-slate-900 inline-flex items-center">
             <ArrowLeft className="h-4 w-4 mr-1" /> Back
@@ -41,7 +39,7 @@ export default function Portal() {
       </header>
 
       <div className="max-w-3xl mx-auto px-6 py-16">
-        <div className="text-xs font-semibold uppercase tracking-[0.2em] text-blue-700">Customer Portal</div>
+        <div className="text-xs font-semibold uppercase tracking-[0.2em] text-red-600">Customer Portal</div>
         <h1 className="font-display text-4xl lg:text-5xl font-bold tracking-tight mt-2 text-slate-900">Track your order.</h1>
         <p className="text-slate-600 mt-3">Enter your PO number or our work order reference (e.g. WO-26-0001) to view progress, job cards, and QC results.</p>
 
@@ -50,10 +48,10 @@ export default function Portal() {
             placeholder="WO-26-0001 or your PO number"
             value={ref}
             onChange={(e) => setRef(e.target.value)}
-            className="h-12 rounded-sm border-slate-300 focus-visible:ring-blue-600 text-base"
+            className="h-12 rounded-sm border-slate-300 focus-visible:ring-red-600 text-base"
             data-testid="portal-ref-input"
           />
-          <Button type="submit" disabled={loading} className="h-12 px-6 rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="portal-search-button">
+          <Button type="submit" disabled={loading} className="h-12 px-6 rounded-sm bg-red-600 hover:bg-red-700" data-testid="portal-search-button">
             <Search className="h-4 w-4 mr-2" /> {loading ? "Searching..." : "Track"}
           </Button>
         </form>
@@ -72,7 +70,7 @@ export default function Portal() {
                   <div className="font-mono-tech text-xs text-slate-500 uppercase tracking-wider">Work Order</div>
                   <div className="font-display text-2xl font-bold mt-1">{data.work_order.code}</div>
                 </div>
-                <Badge className="rounded-sm border bg-blue-50 text-blue-800 border-blue-200 uppercase tracking-wider text-xs">{data.work_order.status}</Badge>
+                <Badge className="rounded-sm border bg-red-50 text-red-700 border-red-200 uppercase tracking-wider text-xs">{data.work_order.status}</Badge>
               </div>
               <div className="grid grid-cols-2 md:grid-cols-4 gap-6 mt-6 text-sm">
                 <Info label="Product" v={data.work_order.product} />
@@ -85,7 +83,7 @@ export default function Portal() {
                 <Info label="Progress" v={`${data.work_order.progress || 0}%`} />
               </div>
               <div className="mt-6 h-2 bg-slate-100 overflow-hidden">
-                <div className="h-full bg-blue-700" style={{ width: `${data.work_order.progress || 0}%` }} />
+                <div className="h-full bg-red-600" style={{ width: `${data.work_order.progress || 0}%` }} />
               </div>
             </div>
 

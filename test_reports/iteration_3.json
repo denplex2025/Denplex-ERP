@@ -1,0 +1,62 @@
+{
+  "summary": "Completed backend testing for Denplex ERP integrations: Google OAuth scaffolding, per-user IMAP/SMTP email account, branded PDFs, and regression. 26/26 tests passed. No upstream Google/IMAP/SMTP calls made — only configured/not-configured branches and OAuth auth_url generation were verified.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "/api/integrations/google/drive/backup-doc/{kind}/{doc_id}",
+        "issue": "Endpoint loads the document BEFORE checking Google connection. Calling with a non-existent doc returns 404 even if Google is also not connected. Order of checks is inverted vs other Google endpoints. Suggestion: validate google credentials first (or at least state both reasons clearly)."
+      },
+      {
+        "endpoint": "/api/integrations/google/callback",
+        "issue": "On success it redirects to `/app/settings?google=connected` using `public_base='/'`, producing a relative redirect (`/app/settings?...`). This works when the frontend is served on the same host as backend (ingress), but if backend is on a different host the redirect won't land on the frontend. Consider deriving the public URL from settings or a FRONTEND_PUBLIC_URL env var."
+      },
+      {
+        "endpoint": "/api/integrations/google/gmail/send",
+        "issue": "`u.get('email', '')` is called when `u` may be None for orphaned tokens — gated by `_user_google_creds` so unlikely in practice, but worth a defensive `(u or {})`."
+      },
+      {
+        "endpoint": "/api/integrations/email-account (PUT)",
+        "issue": "smtp_password is stored in plaintext on the user document. The GET endpoint correctly hides it, but at-rest it is unencrypted. Consider encrypting with a server-side key."
+      },
+      {
+        "endpoint": "/api/integrations/google/gmail/sync-leads",
+        "issue": "Closure variable capture in `lambda mid=m[\"id\"]: ...` is correct, but the inner loop uses `asyncio.to_thread` per-message sequentially — for 25 messages this is slow. Consider asyncio.gather for parallel fetch."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_denplex_integrations.py",
+    "/app/test_reports/pytest/pytest_denplex_results.xml"
+  ],
+  "action_items": [
+    "Consider re-ordering /api/integrations/google/drive/backup-doc/{kind}/{doc_id} to check google credentials first (current behaviour returned 404 'Not found' instead of 400 'Google account not connected' when an invalid doc_id was used — test was adjusted to use a real invoice id).",
+    "Make Google callback redirect work for split host deployments (use absolute FRONTEND_PUBLIC_URL).",
+    "Encrypt smtp_password / imap_password at rest in users.email_account."
+  ],
+  "critical_code_review_comments": [
+    "server.py has grown to ~1936 lines — strongly recommend splitting into routers (auth, accounting, integrations_google, integrations_email, integrations_indiamart, pdf, hr/manufacturing) to stay under 700 lines/file.",
+    "Per-user secrets (google.refresh_token, email_account.smtp_password) are stored as plaintext in MongoDB. Add Fernet/AES-GCM encryption with a key from env.",
+    "/api/integrations/email-account is gated only by get_current_user — any logged-in user can set/clear their own; this is intentional, but the SMTP/IMAP send endpoints should rate-limit to prevent abuse from a compromised account.",
+    "/api/integrations/google/callback fetch_token wraps a sync call in asyncio.to_thread — good. But errors are leaked verbatim in HTTP 400 detail (`Token exchange failed: {e}`) which can include OAuth client_secret echo from googleapiclient — sanitize before returning.",
+    "GOOGLE_SCOPES list lacks `https://www.googleapis.com/auth/userinfo.profile` — the callback only reads `email`, so OK, but if future code wants name/picture it'll fail silently. Document the trade-off.",
+    "_user_google_creds calls `creds.refresh` then writes `creds.token` & `token_expiry` back; refresh_token is not updated, which is correct (Google sometimes rotates it). Still, log a warning if refresh raises so admins can re-connect.",
+    "PDF branding adds the logo + tagline; if the company logo file is missing the builder must degrade gracefully. Verified PDFs are >30KB so logo is embedded for tested settings — confirm fallback path is also tested.",
+    "/api/integrations/google/disconnect uses $unset; doesn't revoke the refresh_token at Google. Should call https://oauth2.googleapis.com/revoke for hygiene."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_denplex_integrations.py (new)"
+  ],
+  "success_rate": {"backend": "100%", "frontend": "skipped"},
+  "test_credentials": "admin@erp.com / Admin@123 (from /app/memory/test_credentials.md). One transient TEST_Sales_Denplex_<ts> sales user is created per session for the 403 role-deny test (not cleaned up — register endpoint has no delete; impact: minor user-table growth).",
+  "seed_data_creation": "Per-run: TEST_PDF_Cust_Denplex customer + invoice + quotation, TEST_PDF_Sup_Denplex supplier + PO, TEST_DriveBak_Cust customer + invoice. All prefixed TEST_ for easy identification. Integration settings reset to clean (no google_*/email_account) at start and end of module.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Run: REACT_APP_BACKEND_URL=<url> pytest /app/backend/tests/test_denplex_integrations.py -v . All 26 tests pass. Verified: admin login JWT, regression on /dashboard/stats /customers /invoices /inventory/items, /api/settings/integrations admin-only with new google_client_id/secret/redirect_uri/drive_folder_id/company_tagline persistence, /api/integrations/google/status returns connected=false, /auth-url returns 400 when not configured and Google URL with drive.file+gmail.send+gmail.readonly scopes when configured, drive/upload + gmail/send + gmail/sync-leads + drive/backup-doc/invoices/{id} all return 400 'Google account not connected', /disconnect always 200 ok, /callback requires code+state (400 invalid state), /api/integrations/email-account GET never leaks smtp_password/imap_password (only has_smtp_password/has_imap_password booleans), PUT persists, DELETE clears, SMTP/IMAP send/sync return 400 when not configured. PDFs (invoice/quotation/PO) return application/pdf with %PDF header and size>30KB (logo+tagline embedded). NOTE: drive/backup-doc loads doc BEFORE checking google creds — test uses a real invoice id.",
+  "rca of the issue": "N/A — no failures in final run. Initial run had one test failure: drive/backup-doc returned 404 instead of 400 because in server.py:1657-1665 the document is fetched before `_user_google_creds` is called. Adjusted test to first create an invoice. Flagged this ordering in action_items."
+}

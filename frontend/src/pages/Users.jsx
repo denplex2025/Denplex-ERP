@@ -29,7 +29,7 @@ export default function Users() {
   return (
     <div data-testid="users-page">
       <PageHeader overline="Administration" title="Users & Permissions" subtitle="Create accounts for staff, managers, accountants, and your CA."
-        actions={<Button onClick={()=>setOpen(true)} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="new-user"><Plus className="h-4 w-4 mr-1" /> New User</Button>} />
+        actions={<Button onClick={()=>setOpen(true)} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="new-user"><Plus className="h-4 w-4 mr-1" /> New User</Button>} />
       <Card>
         {users.length === 0 ? <Empty label="No users." /> : (
           <table className="w-full">
@@ -59,7 +59,7 @@ export default function Users() {
           </div>
           <DialogFooter>
             <Button variant="outline" className="rounded-sm" onClick={()=>setOpen(false)}>Cancel</Button>
-            <Button onClick={save} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="save-user">Create</Button>
+            <Button onClick={save} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="save-user">Create</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

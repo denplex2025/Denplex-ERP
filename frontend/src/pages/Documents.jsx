@@ -85,7 +85,7 @@ export default function Documents() {
           <div><Label className="text-xs uppercase">File</Label>
             <input type="file" onChange={e=>setFile(e.target.files?.[0])} className="block mt-2 text-sm" data-testid="doc-file" />
           </div>
-          <div className="flex items-end"><Button onClick={upload} className="rounded-sm bg-blue-700 hover:bg-blue-800 w-full" data-testid="doc-upload"><Upload className="h-4 w-4 mr-1" /> Upload</Button></div>
+          <div className="flex items-end"><Button onClick={upload} className="rounded-sm bg-red-600 hover:bg-red-700 w-full" data-testid="doc-upload"><Upload className="h-4 w-4 mr-1" /> Upload</Button></div>
         </div>
       </Card>
 
@@ -103,7 +103,7 @@ export default function Documents() {
                   <Td>{d.uploaded_by}</Td>
                   <Td>{fmtDate(d.created_at)}</Td>
                   <Td className="text-right whitespace-nowrap">
-                    <Button size="icon" variant="ghost" className="h-8 w-8" onClick={()=>openRev(d)} title="Add revision" data-testid={`doc-revise-${d.id}`}><GitBranch className="h-4 w-4 text-blue-700" /></Button>
+                    <Button size="icon" variant="ghost" className="h-8 w-8" onClick={()=>openRev(d)} title="Add revision" data-testid={`doc-revise-${d.id}`}><GitBranch className="h-4 w-4 text-red-600" /></Button>
                     <Button size="icon" variant="ghost" className="h-8 w-8" onClick={()=>openHistory(d)} title="Revision history"><History className="h-4 w-4" /></Button>
                     <a href={d.file_base64} download={d.name}><Button size="icon" variant="ghost" className="h-8 w-8"><Download className="h-4 w-4" /></Button></a>
                     <Button size="icon" variant="ghost" className="h-8 w-8" onClick={()=>del(d)}><Trash2 className="h-4 w-4 text-red-600" /></Button>
@@ -127,7 +127,7 @@ export default function Documents() {
           </div>
           <DialogFooter>
             <Button variant="outline" className="rounded-sm" onClick={()=>setRevOpen(false)}>Cancel</Button>
-            <Button onClick={saveRev} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="save-revision">Save revision</Button>
+            <Button onClick={saveRev} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="save-revision">Save revision</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

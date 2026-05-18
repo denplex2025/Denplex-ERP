@@ -105,9 +105,9 @@ export default function Inventory() {
         actions={
           <>
             <Button variant="outline" className="rounded-sm border-slate-300" onClick={() => setScanOpen(true)} data-testid="scan-bill-button">
-              <Sparkles className="h-4 w-4 mr-1 text-blue-700" /> Scan bill (AI)
+              <Sparkles className="h-4 w-4 mr-1 text-red-600" /> Scan bill (AI)
             </Button>
-            <Button onClick={() => { setEditing(null); setForm({ uom: "pcs", gst_rate: 18, category: "raw" }); setOpen(true); }} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="new-item-button">
+            <Button onClick={() => { setEditing(null); setForm({ uom: "pcs", gst_rate: 18, category: "raw" }); setOpen(true); }} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="new-item-button">
               <Plus className="h-4 w-4 mr-1" /> New Item
             </Button>
           </>
@@ -142,7 +142,7 @@ export default function Inventory() {
                         <Td className="text-right whitespace-nowrap">
                           <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => openMove(it, "in")} title="Stock In" data-testid={`stock-in-${it.id}`}><ArrowDownToLine className="h-4 w-4 text-emerald-700" /></Button>
                           <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => openMove(it, "out")} title="Stock Out" data-testid={`stock-out-${it.id}`}><ArrowUpFromLine className="h-4 w-4 text-red-700" /></Button>
-                          <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => openMove(it, "adjust")} title="Adjust"><RefreshCw className="h-4 w-4 text-blue-700" /></Button>
+                          <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => openMove(it, "adjust")} title="Adjust"><RefreshCw className="h-4 w-4 text-red-600" /></Button>
                           <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => { setEditing(it); setForm(it); setOpen(true); }}><Edit className="h-4 w-4" /></Button>
                           <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => del(it)}><Trash2 className="h-4 w-4 text-red-600" /></Button>
                         </Td>
@@ -208,7 +208,7 @@ export default function Inventory() {
           </div>
           <DialogFooter>
             <Button variant="outline" className="rounded-sm" onClick={() => setOpen(false)}>Cancel</Button>
-            <Button onClick={save} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="save-item-button">Save</Button>
+            <Button onClick={save} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="save-item-button">Save</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -235,7 +235,7 @@ export default function Inventory() {
           </div>
           <DialogFooter>
             <Button variant="outline" className="rounded-sm" onClick={() => setMoveOpen(false)}>Cancel</Button>
-            <Button onClick={saveMove} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="save-move-button">Save</Button>
+            <Button onClick={saveMove} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="save-move-button">Save</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -243,11 +243,11 @@ export default function Inventory() {
       {/* Bill scan dialog */}
       <Dialog open={scanOpen} onOpenChange={setScanOpen}>
         <DialogContent className="rounded-sm max-w-3xl">
-          <DialogHeader><DialogTitle className="font-display"><Sparkles className="inline h-4 w-4 mr-1 text-blue-700" /> AI Bill Scanner</DialogTitle></DialogHeader>
+          <DialogHeader><DialogTitle className="font-display"><Sparkles className="inline h-4 w-4 mr-1 text-red-600" /> AI Bill Scanner</DialogTitle></DialogHeader>
           <p className="text-sm text-slate-600">Upload a photo / scan of a supplier purchase bill. Claude will extract supplier, items, qty, rate, GST and totals. Review and confirm to add stock.</p>
           <div className="border-2 border-dashed border-slate-300 rounded-sm p-6 text-center">
             <input type="file" accept="image/png,image/jpeg,image/webp" onChange={onScanFile} className="hidden" id="bill-file" data-testid="bill-scan-input" />
-            <label htmlFor="bill-file" className="cursor-pointer text-sm text-blue-700 hover:underline">
+            <label htmlFor="bill-file" className="cursor-pointer text-sm text-red-600 hover:underline">
               {scanLoading ? <span className="inline-flex items-center"><Loader2 className="h-4 w-4 mr-1 animate-spin" /> Extracting...</span> : "Click to upload bill image"}
             </label>
           </div>
@@ -271,7 +271,7 @@ export default function Inventory() {
           )}
           <DialogFooter>
             <Button variant="outline" className="rounded-sm" onClick={() => { setScanOpen(false); setScanResult(null); }}>Cancel</Button>
-            {scanResult && <Button onClick={addScannedToStock} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="confirm-scan-add">Confirm & Add to Stock</Button>}
+            {scanResult && <Button onClick={addScannedToStock} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="confirm-scan-add">Confirm & Add to Stock</Button>}
           </DialogFooter>
         </DialogContent>
       </Dialog>

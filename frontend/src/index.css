@@ -7,16 +7,17 @@
 
 :root {
   --bg: #FFFFFF;
-  --surface: #F8FAFC;
-  --surface-alt: #F1F5F9;
-  --border: #E2E8F0;
-  --text-primary: #0F172A;
-  --text-secondary: #475569;
-  --primary: #1D4ED8;
-  --primary-hover: #1E40AF;
+  --surface: #FAFAFA;
+  --surface-alt: #F4F4F5;
+  --border: #E5E5E5;
+  --text-primary: #0A0A0A;
+  --text-secondary: #525252;
+  --primary: #DC2626;
+  --primary-hover: #B91C1C;
   --danger: #DC2626;
   --warning: #D97706;
   --success: #059669;
+  --ink: #0A0A0A;
 }
 
 body {
@@ -28,7 +29,7 @@ body {
   color: var(--text-primary);
 }
 
-.font-display { font-family: 'Cabinet Grotesk', 'IBM Plex Sans', sans-serif; }
+.font-display { font-family: 'Cabinet Grotesk', 'IBM Plex Sans', sans-serif; letter-spacing: -0.01em; }
 .font-mono-tech { font-family: 'JetBrains Mono', monospace; }
 
 code {
@@ -38,30 +39,30 @@ code {
 @layer base {
   :root {
     --background: 0 0% 100%;
-    --foreground: 222 47% 11%;
+    --foreground: 0 0% 4%;
     --card: 0 0% 100%;
-    --card-foreground: 222 47% 11%;
+    --card-foreground: 0 0% 4%;
     --popover: 0 0% 100%;
-    --popover-foreground: 222 47% 11%;
-    --primary: 224 76% 48%;
+    --popover-foreground: 0 0% 4%;
+    --primary: 0 72% 51%;
     --primary-foreground: 0 0% 100%;
-    --secondary: 210 40% 96%;
-    --secondary-foreground: 222 47% 11%;
-    --muted: 210 40% 96%;
-    --muted-foreground: 215 16% 47%;
-    --accent: 210 40% 96%;
-    --accent-foreground: 222 47% 11%;
+    --secondary: 0 0% 96%;
+    --secondary-foreground: 0 0% 4%;
+    --muted: 0 0% 96%;
+    --muted-foreground: 0 0% 32%;
+    --accent: 0 0% 96%;
+    --accent-foreground: 0 0% 4%;
     --destructive: 0 84% 60%;
     --destructive-foreground: 0 0% 98%;
-    --border: 214 32% 91%;
-    --input: 214 32% 91%;
-    --ring: 224 76% 48%;
+    --border: 0 0% 90%;
+    --input: 0 0% 90%;
+    --ring: 0 72% 51%;
     --radius: 0.25rem;
-    --chart-1: 224 76% 48%;
-    --chart-2: 173 58% 39%;
-    --chart-3: 197 37% 24%;
+    --chart-1: 0 72% 51%;
+    --chart-2: 0 0% 12%;
+    --chart-3: 0 0% 45%;
     --chart-4: 43 74% 56%;
-    --chart-5: 0 84% 60%;
+    --chart-5: 173 58% 39%;
   }
 }
 
@@ -70,19 +71,28 @@ code {
   body { @apply bg-background text-foreground; }
 }
 
-/* Industrial grid pattern */
+/* Subtle grid pattern */
 .bg-grid {
   background-image:
-    linear-gradient(rgba(15, 23, 42, 0.04) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(15, 23, 42, 0.04) 1px, transparent 1px);
+    linear-gradient(rgba(10, 10, 10, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(10, 10, 10, 0.05) 1px, transparent 1px);
   background-size: 32px 32px;
+}
+
+.bg-grid-red {
+  background-image:
+    linear-gradient(rgba(220, 38, 38, 0.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(220, 38, 38, 0.06) 1px, transparent 1px);
+  background-size: 28px 28px;
 }
 
 /* Scrollbar */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 0; }
-::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+::-webkit-scrollbar-thumb { background: #d4d4d4; border-radius: 0; }
+::-webkit-scrollbar-thumb:hover { background: #a3a3a3; }
+
+::selection { background: #DC2626; color: #fff; }
 
 /* Animations */
 @keyframes fadeUp {
@@ -90,3 +100,14 @@ code {
   to { opacity: 1; transform: translateY(0); }
 }
 .fade-up { animation: fadeUp 0.4s ease-out both; }
+
+.brand-stripe {
+  background-image: repeating-linear-gradient(
+    135deg,
+    #DC2626 0px,
+    #DC2626 6px,
+    #0A0A0A 6px,
+    #0A0A0A 12px
+  );
+  height: 3px;
+}

@@ -55,7 +55,7 @@ export default function HR() {
 
         <TabsContent value="emp">
           <div className="flex justify-end mb-3">
-            <Button onClick={()=>{setEditing(null); setEmpForm({department:"production",status:"active"}); setEmpOpen(true);}} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="new-employee"><Plus className="h-4 w-4 mr-1" /> New Employee</Button>
+            <Button onClick={()=>{setEditing(null); setEmpForm({department:"production",status:"active"}); setEmpOpen(true);}} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="new-employee"><Plus className="h-4 w-4 mr-1" /> New Employee</Button>
           </div>
           <Card>
             {emps.length === 0 ? <Empty label="No employees yet." /> : (
@@ -85,7 +85,7 @@ export default function HR() {
 
         <TabsContent value="att">
           <div className="flex justify-end mb-3">
-            <Button onClick={()=>setAttOpen(true)} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="new-attendance"><Plus className="h-4 w-4 mr-1" /> Mark Attendance</Button>
+            <Button onClick={()=>setAttOpen(true)} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="new-attendance"><Plus className="h-4 w-4 mr-1" /> Mark Attendance</Button>
           </div>
           <Card>
             {atts.length === 0 ? <Empty label="No attendance entries." /> : (
@@ -134,7 +134,7 @@ export default function HR() {
           </div>
           <DialogFooter>
             <Button variant="outline" className="rounded-sm" onClick={()=>setEmpOpen(false)}>Cancel</Button>
-            <Button onClick={saveEmp} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="save-employee">Save</Button>
+            <Button onClick={saveEmp} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="save-employee">Save</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -161,7 +161,7 @@ export default function HR() {
           </div>
           <DialogFooter>
             <Button variant="outline" className="rounded-sm" onClick={()=>setAttOpen(false)}>Cancel</Button>
-            <Button onClick={saveAtt} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="save-attendance">Save</Button>
+            <Button onClick={saveAtt} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="save-attendance">Save</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

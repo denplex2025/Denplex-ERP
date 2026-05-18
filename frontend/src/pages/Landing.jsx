@@ -12,10 +12,8 @@ const Landing = () => {
       <header className="sticky top-0 z-50 bg-white/80 backdrop-blur-xl border-b border-slate-200">
         <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
           <Link to="/" className="flex items-center gap-2.5" data-testid="brand-link">
-            <div className="h-7 w-7 bg-slate-900 flex items-center justify-center">
-              <Cog className="h-4 w-4 text-white" strokeWidth={2.5} />
-            </div>
-            <span className="font-display font-bold tracking-tight text-lg">PRECISION ERP</span>
+            <img src="/denplex-logo.png" alt="Denplex" className="h-9 w-9 object-contain" />
+            <span className="font-display font-bold tracking-tight text-lg">DENPLEX ERP</span>
           </Link>
           <nav className="hidden md:flex items-center gap-8 text-sm text-slate-600">
             <a href="#features" className="hover:text-slate-900">Features</a>
@@ -27,7 +25,7 @@ const Landing = () => {
               <Button variant="ghost" className="rounded-sm" data-testid="nav-login-button">Sign in</Button>
             </Link>
             <Link to="/login">
-              <Button className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="nav-cta-button">
+              <Button className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="nav-cta-button">
                 Open dashboard <ArrowRight className="ml-1 h-4 w-4" />
               </Button>
             </Link>
@@ -39,18 +37,18 @@ const Landing = () => {
       <section className="relative">
         <div className="max-w-7xl mx-auto px-6 grid grid-cols-1 lg:grid-cols-12 gap-10 py-16 lg:py-24 items-center">
           <div className="lg:col-span-7 fade-up">
-            <div className="text-xs font-semibold uppercase tracking-[0.2em] text-blue-700 mb-4">
-              Manufacturing ERP · Jig & Fixtures · Precision Job Work
+            <div className="text-xs font-semibold uppercase tracking-[0.2em] text-red-600 mb-4">
+              Denplex Engineering Company · Jig & Fixtures · Precision Job Work
             </div>
             <h1 className="font-display font-bold tracking-tight text-4xl sm:text-5xl lg:text-6xl text-slate-900">
-              Run your workshop with<br />the precision of a<span className="text-blue-700"> ±0.001 mm </span>cut.
+              Run your workshop with<br />the precision of a<span className="text-red-600"> ±0.001 mm </span>cut.
             </h1>
             <p className="mt-6 text-lg text-slate-600 max-w-2xl leading-relaxed">
               One operating system for your inventory, BOM, work orders, job cards, QC, quotations, GST invoices, leads, and customer portal — built for small-scale precision engineering businesses.
             </p>
             <div className="mt-8 flex flex-wrap gap-3">
               <Link to="/login">
-                <Button className="rounded-sm h-11 px-6 bg-blue-700 hover:bg-blue-800" data-testid="hero-primary-cta">
+                <Button className="rounded-sm h-11 px-6 bg-red-600 hover:bg-red-700" data-testid="hero-primary-cta">
                   Sign in to dashboard <ArrowRight className="ml-2 h-4 w-4" />
                 </Button>
               </Link>
@@ -70,8 +68,8 @@ const Landing = () => {
             <div className="relative aspect-[4/5] overflow-hidden border border-slate-200">
               <img src={HERO_IMG} alt="precision jig" className="w-full h-full object-cover" />
               <div className="absolute inset-0 bg-gradient-to-tr from-slate-900/30 via-transparent to-blue-700/20" />
-              <div className="absolute bottom-4 left-4 right-4 bg-white/95 backdrop-blur p-4 border border-slate-200">
-                <div className="text-[10px] font-mono-tech uppercase tracking-widest text-slate-500">Live · Workshop floor</div>
+              <div className="absolute bottom-4 left-4 right-4 bg-white/95 backdrop-blur p-4 border-l-4 border-red-600">
+                <div className="text-[10px] font-mono-tech uppercase tracking-widest text-red-600">Live · Workshop floor</div>
                 <div className="mt-1 font-display font-semibold text-slate-900">Open WO #WO-26-0042</div>
                 <div className="text-xs text-slate-600 mt-0.5">SS-316 Drill Jig · Qty 24 · Stage: Milling</div>
               </div>
@@ -105,7 +103,7 @@ const Landing = () => {
             </div>
           </div>
           <div className="lg:col-span-7">
-            <div className="text-xs font-semibold uppercase tracking-[0.2em] text-blue-700">Built-in modules</div>
+            <div className="text-xs font-semibold uppercase tracking-[0.2em] text-red-600">Built-in modules</div>
             <h2 className="font-display text-3xl lg:text-4xl font-bold mt-2 tracking-tight">Everything your workshop needs — nothing it doesn't.</h2>
             <div className="mt-8 grid grid-cols-2 sm:grid-cols-3 gap-px bg-slate-200 border border-slate-200">
               {["Inventory","BOM","Work Orders","Job Cards","Quotations","Purchase Orders","Invoices","QC Reports","CRM / Leads","Suppliers","Customers","Documents","Dashboard","Customer Portal","User Roles","GST"].map(m => (
@@ -120,25 +118,27 @@ const Landing = () => {
       </section>
 
       {/* Footer CTA */}
-      <section className="bg-slate-900 text-white">
-        <div className="max-w-7xl mx-auto px-6 py-16 flex flex-col md:flex-row items-start md:items-center justify-between gap-6">
+      <section className="bg-slate-900 text-white relative overflow-hidden">
+        <div className="absolute inset-0 bg-grid-red opacity-50" />
+        <div className="max-w-7xl mx-auto px-6 py-16 flex flex-col md:flex-row items-start md:items-center justify-between gap-6 relative">
           <div>
             <h3 className="font-display text-3xl font-bold tracking-tight">Ready to run a tighter shop?</h3>
             <p className="text-slate-300 mt-2">Sign in with the seeded admin to explore the entire system.</p>
             <p className="text-xs text-slate-400 mt-1 font-mono-tech">admin@erp.com · Admin@123</p>
           </div>
           <Link to="/login">
-            <Button className="rounded-sm h-12 px-7 bg-white text-slate-900 hover:bg-slate-100" data-testid="footer-cta-button">
+            <Button className="rounded-sm h-12 px-7 bg-red-600 hover:bg-red-700 text-white border-0" data-testid="footer-cta-button">
               Sign in <ArrowRight className="ml-2 h-4 w-4" />
             </Button>
           </Link>
         </div>
+        <div className="brand-stripe" />
       </section>
 
       <footer className="border-t border-slate-200">
         <div className="max-w-7xl mx-auto px-6 py-6 text-xs text-slate-500 flex justify-between">
-          <div>© 2026 Precision ERP</div>
-          <div className="font-mono-tech">v0.1 · Built for MSMEs</div>
+          <div>© 2026 Denplex Engineering Company</div>
+          <div className="font-mono-tech">Denplex ERP v0.3 · Built for MSMEs</div>
         </div>
       </footer>
     </div>
@@ -154,7 +154,7 @@ const Stat = ({ k, v }) => (
 
 const Feature = ({ icon, title, desc }) => (
   <div className="bg-white p-6">
-    <div className="h-9 w-9 bg-blue-700 text-white flex items-center justify-center">{icon}</div>
+    <div className="h-9 w-9 bg-red-600 text-white flex items-center justify-center">{icon}</div>
     <div className="mt-4 font-display font-semibold text-lg text-slate-900">{title}</div>
     <p className="mt-1.5 text-sm text-slate-600 leading-relaxed">{desc}</p>
   </div>

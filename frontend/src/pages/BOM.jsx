@@ -46,7 +46,7 @@ export default function BOMPage() {
       <PageHeader
         overline="Engineering" title="Bill of Materials"
         subtitle="Recipe per product. Auto-generates a Design Code linked to your SolidWorks files."
-        actions={<Button onClick={openNew} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="new-bom"><Plus className="h-4 w-4 mr-1" /> New BOM</Button>}
+        actions={<Button onClick={openNew} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="new-bom"><Plus className="h-4 w-4 mr-1" /> New BOM</Button>}
       />
       <Card>
         {items.length === 0 ? <Empty label="No BOMs yet." /> : (
@@ -108,7 +108,7 @@ export default function BOMPage() {
           </div>
           <DialogFooter>
             <Button variant="outline" className="rounded-sm" onClick={()=>setOpen(false)}>Cancel</Button>
-            <Button onClick={save} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="save-bom">Save</Button>
+            <Button onClick={save} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="save-bom">Save</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

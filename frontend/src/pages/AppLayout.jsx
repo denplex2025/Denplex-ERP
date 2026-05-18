@@ -51,10 +51,8 @@ export default function AppLayout() {
       <aside className={`${open ? "block" : "hidden"} lg:block fixed lg:sticky top-0 z-40 w-64 h-screen bg-white border-r border-slate-200 flex-shrink-0`}>
         <div className="h-16 px-5 flex items-center border-b border-slate-200">
           <Link to="/app" className="flex items-center gap-2.5">
-            <div className="h-7 w-7 bg-slate-900 flex items-center justify-center">
-              <Cog className="h-4 w-4 text-white" strokeWidth={2.5} />
-            </div>
-            <span className="font-display font-bold tracking-tight">PRECISION ERP</span>
+            <img src="/denplex-logo.png" alt="Denplex" className="h-8 w-8 object-contain" />
+            <span className="font-display font-bold tracking-tight">DENPLEX ERP</span>
           </Link>
         </div>
         <nav className="p-3 space-y-0.5 overflow-y-auto h-[calc(100vh-4rem-5rem)]">
@@ -67,7 +65,7 @@ export default function AppLayout() {
               data-testid={n.testid}
               className={({ isActive }) =>
                 `flex items-center gap-2.5 px-3 py-2 text-sm rounded-sm transition-colors ${
-                  isActive ? "bg-blue-50 text-blue-800 font-medium" : "text-slate-700 hover:bg-slate-100"
+                  isActive ? "bg-red-50 text-red-700 font-medium" : "text-slate-700 hover:bg-slate-100"
                 }`
               }
             >
@@ -91,7 +89,7 @@ export default function AppLayout() {
       <main className="flex-1 min-w-0">
         <div className="lg:hidden sticky top-0 z-30 bg-white border-b border-slate-200 h-14 flex items-center justify-between px-4">
           <Button variant="ghost" size="icon" onClick={() => setOpen(!open)} data-testid="mobile-menu-toggle"><Menu className="h-5 w-5" /></Button>
-          <div className="font-display font-bold tracking-tight">PRECISION ERP</div>
+          <div className="font-display font-bold tracking-tight">Denplex ERP</div>
           <Button variant="ghost" size="icon" onClick={handleLogout}><LogOut className="h-5 w-5" /></Button>
         </div>
         <div className="p-6 lg:p-8 max-w-[1500px]">

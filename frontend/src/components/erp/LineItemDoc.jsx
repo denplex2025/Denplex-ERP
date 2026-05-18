@@ -8,7 +8,7 @@ import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { PageHeader, Card, Th, Td, Empty, inr, fmtDate } from "@/components/erp/Primitives";
 import { StatusBadge } from "@/components/erp/CrudPage";
-import { Plus, Edit, Trash2, X, MessageCircle, FileDown, Mail, Eye, Download as DLIcon } from "lucide-react";
+import { Plus, Edit, Trash2, X, MessageCircle, FileDown, Mail, Eye, Download as DLIcon, Cloud, Send } from "lucide-react";
 import { toast } from "sonner";
 
 /**
@@ -146,11 +146,62 @@ export default function LineItemDoc({
     } catch (e) { toast.error("PDF failed"); }
   };
 
+  const sendViaGmail = async (row) => {
+    const party = parties.find(p => p.id === row[`${partyKey}_id`]);
+    const toEmail = party?.email; if (!toEmail) { toast.error("Customer email missing"); return; }
+    try {
+      const r = await api.get(`${endpoint}/${row.id}/pdf`, { responseType: "blob" });
+      const reader = new FileReader();
+      reader.onload = async () => {
+        const b64 = String(reader.result).split(",")[1];
+        try {
+          await api.post("/integrations/google/gmail/send", {
+            to: [toEmail],
+            subject: `${title.replace(/s$/, '')} ${row.code}`,
+            html: `<p>Hi ${party.name},</p><p>Please find ${title.replace(/s$/, '')} <strong>${row.code}</strong> attached. Total: ₹${row.total}.</p><p>— Denplex Engineering Company</p>`,
+            attachment_base64: b64, attachment_filename: `${row.code}.pdf`,
+          });
+          toast.success(`Sent via your Gmail to ${toEmail}`);
+        } catch (e) { toast.error(e?.response?.data?.detail || "Gmail failed"); }
+      };
+      reader.readAsDataURL(r.data);
+    } catch (e) { toast.error("PDF failed"); }
+  };
+
+  const sendViaSmtp = async (row) => {
+    const party = parties.find(p => p.id === row[`${partyKey}_id`]);
+    const toEmail = party?.email; if (!toEmail) { toast.error("Customer email missing"); return; }
+    try {
+      const r = await api.get(`${endpoint}/${row.id}/pdf`, { responseType: "blob" });
+      const reader = new FileReader();
+      reader.onload = async () => {
+        const b64 = String(reader.result).split(",")[1];
+        try {
+          await api.post("/integrations/smtp/send", {
+            to: [toEmail], subject: `${title.replace(/s$/, '')} ${row.code}`,
+            html: `<p>Hi ${party.name},</p><p>Please find ${title.replace(/s$/, '')} <strong>${row.code}</strong> attached. Total: ₹${row.total}.</p>`,
+            attachment_base64: b64, attachment_filename: `${row.code}.pdf`,
+          });
+          toast.success(`Sent via your email account to ${toEmail}`);
+        } catch (e) { toast.error(e?.response?.data?.detail || "SMTP failed"); }
+      };
+      reader.readAsDataURL(r.data);
+    } catch (e) { toast.error("PDF failed"); }
+  };
+
+  const backupToDrive = async (row) => {
+    const kind = endpoint.replace(/^\//, ""); // invoices / quotations / purchase-orders
+    try {
+      const r = await api.post(`/integrations/google/drive/backup-doc/${kind}/${row.id}`);
+      toast.success(`Backed up to Drive: ${r.data?.name || "ok"}`);
+    } catch (e) { toast.error(e?.response?.data?.detail || "Drive backup failed"); }
+  };
+
   return (
     <div data-testid={testid}>
       <PageHeader
         overline={overline} title={title} subtitle={subtitle}
-        actions={<Button onClick={openNew} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid={`${testid}-new`}><Plus className="h-4 w-4 mr-1" /> New</Button>}
+        actions={<Button onClick={openNew} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid={`${testid}-new`}><Plus className="h-4 w-4 mr-1" /> New</Button>}
       />
       <Card>
         {items.length === 0 ? <Empty label="No records yet." /> : (
@@ -170,7 +221,10 @@ export default function LineItemDoc({
                     <Td className="text-right whitespace-nowrap">
                       <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => previewPdf(r)} title="Preview PDF" data-testid={`row-preview-${r.id}`}><Eye className="h-4 w-4 text-slate-700" /></Button>
                       <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => downloadPdf(r)} title="Download PDF" data-testid={`row-pdf-${r.id}`}><FileDown className="h-4 w-4 text-slate-700" /></Button>
-                      <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => emailDoc(r)} title="Email PDF" data-testid={`row-email-${r.id}`}><Mail className="h-4 w-4 text-blue-700" /></Button>
+                      <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => sendViaGmail(r)} title="Send via Gmail" data-testid={`row-gmail-${r.id}`}><Send className="h-4 w-4 text-red-600" /></Button>
+                      <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => sendViaSmtp(r)} title="Send via your SMTP" data-testid={`row-smtp-${r.id}`}><Mail className="h-4 w-4 text-slate-700" /></Button>
+                      <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => emailDoc(r)} title="Send via Resend" data-testid={`row-email-${r.id}`}><Mail className="h-4 w-4 text-red-600" /></Button>
+                      <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => backupToDrive(r)} title="Backup to Drive" data-testid={`row-drive-${r.id}`}><Cloud className="h-4 w-4 text-slate-700" /></Button>
                       <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => sendWhatsApp(r)} title="WhatsApp web"><MessageCircle className="h-4 w-4 text-emerald-600" /></Button>
                       <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => sendTwilioWA(r)} title="WhatsApp via Twilio" data-testid={`row-twilio-${r.id}`}><MessageCircle className="h-4 w-4 text-emerald-800" strokeWidth={2.5} /></Button>
                       <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => openEdit(r)} data-testid={`row-edit-${r.id}`}><Edit className="h-4 w-4" /></Button>
@@ -254,7 +308,7 @@ export default function LineItemDoc({
 
           <DialogFooter>
             <Button variant="outline" className="rounded-sm" onClick={()=>setOpen(false)}>Cancel</Button>
-            <Button onClick={save} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="save-doc">Save</Button>
+            <Button onClick={save} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="save-doc">Save</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

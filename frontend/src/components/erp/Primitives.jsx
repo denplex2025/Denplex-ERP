@@ -4,7 +4,7 @@ import { cn } from "@/lib/utils";
 export const PageHeader = ({ overline, title, subtitle, actions }) => (
   <div className="flex items-start justify-between gap-4 flex-wrap mb-6">
     <div>
-      {overline && <div className="text-xs font-semibold uppercase tracking-[0.2em] text-blue-700">{overline}</div>}
+      {overline && <div className="text-xs font-semibold uppercase tracking-[0.2em] text-red-600">{overline}</div>}
       <h1 className="font-display text-2xl sm:text-3xl font-bold tracking-tight text-slate-900 mt-1">{title}</h1>
       {subtitle && <p className="text-sm text-slate-600 mt-1">{subtitle}</p>}
     </div>

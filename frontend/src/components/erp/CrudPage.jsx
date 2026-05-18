@@ -90,7 +90,7 @@ export function CrudPage({
         actions={
           <>
             {extraTopActions}
-            <Button onClick={openCreate} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid={`${testid}-new`}>
+            <Button onClick={openCreate} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid={`${testid}-new`}>
               <Plus className="h-4 w-4 mr-1" /> New
             </Button>
           </>
@@ -154,7 +154,7 @@ export function CrudPage({
           </div>
           <DialogFooter>
             <Button variant="outline" className="rounded-sm" onClick={() => setOpen(false)}>Cancel</Button>
-            <Button onClick={save} disabled={loading} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid={`${testid}-save`}>
+            <Button onClick={save} disabled={loading} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid={`${testid}-save`}>
               {loading ? "Saving..." : "Save"}
             </Button>
           </DialogFooter>
@@ -166,13 +166,13 @@ export function CrudPage({
 
 export function StatusBadge({ status }) {
   const map = {
-    new: "bg-blue-50 text-blue-700 border-blue-200",
+    new: "bg-red-50 text-red-600 border-red-200",
     contacted: "bg-amber-50 text-amber-700 border-amber-200",
     qualified: "bg-violet-50 text-violet-700 border-violet-200",
     converted: "bg-emerald-50 text-emerald-700 border-emerald-200",
     lost: "bg-red-50 text-red-700 border-red-200",
     planned: "bg-slate-50 text-slate-700 border-slate-200",
-    in_progress: "bg-blue-50 text-blue-700 border-blue-200",
+    in_progress: "bg-red-50 text-red-600 border-red-200",
     qc: "bg-amber-50 text-amber-700 border-amber-200",
     completed: "bg-emerald-50 text-emerald-700 border-emerald-200",
     on_hold: "bg-orange-50 text-orange-700 border-orange-200",
@@ -180,7 +180,7 @@ export function StatusBadge({ status }) {
     pending: "bg-slate-50 text-slate-700 border-slate-200",
     done: "bg-emerald-50 text-emerald-700 border-emerald-200",
     draft: "bg-slate-50 text-slate-700 border-slate-200",
-    sent: "bg-blue-50 text-blue-700 border-blue-200",
+    sent: "bg-red-50 text-red-600 border-red-200",
     accepted: "bg-emerald-50 text-emerald-700 border-emerald-200",
     rejected: "bg-red-50 text-red-700 border-red-200",
     received: "bg-emerald-50 text-emerald-700 border-emerald-200",
