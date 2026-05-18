@@ -42,12 +42,24 @@ Modules requested: Manufacturing, BOM, Work Orders, Job Cards, Inventory, CRM, Q
 - Dashboard with KPIs (open WO, QC pending, low stock, leads, customers, revenue)
 - Industrial Steel design system; landing page + login + portal
 
-### P1 (added in same session)
+### P1
 - Accounting: Expenses ledger + GST input/output report (CGST/SGST/IGST split, net liability)
 - HR: Employees roster + daily Attendance (present/absent/half_day/leave)
 - Marketing: Multi-channel campaigns log (WhatsApp/Instagram/LinkedIn/Facebook/Email)
 - ISO 9001 Document revisions: rev_no tracking + rev history viewer
 - SolidWorks file URL/path field on BOM
+
+### P2 (added in same session)
+- **Twilio WhatsApp Business** — outbound /api/whatsapp/send (creds stored in DB via Settings UI)
+- **Resend email** — /api/email/send with PDF attachment support
+- **PDF generation** (reportlab) — /api/invoices/{id}/pdf, /api/quotations/{id}/pdf, /api/purchase-orders/{id}/pdf
+- **Indiamart sync** — /api/integrations/indiamart/sync pulls leads (last 7 days) using glusr_crm_key
+- **TradeIndia webhook** — POST /api/integrations/tradeindia/webhook?token=secret → auto-creates lead, dedupes by external_id
+- **GSTR-1 CSV** + **GSTR-3B CSV** — /api/accounting/gstr1.csv, /api/accounting/gstr3b.csv
+- **2FA TOTP** — pyotp Google Authenticator compatible (setup/enable/disable/login flow)
+- **Audit log** — captures sends, 2FA changes, integration imports
+- **Admin Settings page** with Twilio + Resend + Indiamart + TradeIndia + Company GSTIN/address
+- **Per-row buttons on quotations/POs/invoices**: Download PDF, Email PDF (Resend), WhatsApp (web + Twilio)
 
 ## Backlog
 ### P2 (deferred)
