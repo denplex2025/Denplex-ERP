@@ -8,7 +8,7 @@ import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { PageHeader, Card, Th, Td, Empty, inr, fmtDate } from "@/components/erp/Primitives";
 import { StatusBadge } from "@/components/erp/CrudPage";
-import { Plus, Edit, Trash2, X, MessageCircle, FileDown, Mail } from "lucide-react";
+import { Plus, Edit, Trash2, X, MessageCircle, FileDown, Mail, Eye, Download as DLIcon } from "lucide-react";
 import { toast } from "sonner";
 
 /**
@@ -27,6 +27,9 @@ export default function LineItemDoc({
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState({ lines: [] });
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewUrl, setPreviewUrl] = useState("");
+  const [previewRow, setPreviewRow] = useState(null);
 
   const load = async () => {
     const r = await api.get(endpoint); setItems(r.data);
@@ -105,6 +108,21 @@ export default function LineItemDoc({
     } catch (e) { toast.error("PDF failed"); }
   };
 
+  const previewPdf = async (row) => {
+    try {
+      const r = await api.get(`${endpoint}/${row.id}/pdf`, { responseType: "blob" });
+      const url = window.URL.createObjectURL(r.data);
+      setPreviewUrl(url);
+      setPreviewRow(row);
+      setPreviewOpen(true);
+    } catch (e) { toast.error("Preview failed"); }
+  };
+
+  const closePreview = () => {
+    if (previewUrl) window.URL.revokeObjectURL(previewUrl);
+    setPreviewUrl(""); setPreviewRow(null); setPreviewOpen(false);
+  };
+
   const emailDoc = async (row) => {
     const party = parties.find(p => p.id === row[`${partyKey}_id`]);
     const toEmail = party?.email; if (!toEmail) { toast.error("Customer email missing"); return; }
@@ -150,7 +168,8 @@ export default function LineItemDoc({
                     <Td className="font-mono-tech">{inr(r.total)}</Td>
                     <Td><StatusBadge status={r.status} /></Td>
                     <Td className="text-right whitespace-nowrap">
-                      <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => downloadPdf(r)} title="PDF" data-testid={`row-pdf-${r.id}`}><FileDown className="h-4 w-4 text-slate-700" /></Button>
+                      <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => previewPdf(r)} title="Preview PDF" data-testid={`row-preview-${r.id}`}><Eye className="h-4 w-4 text-slate-700" /></Button>
+                      <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => downloadPdf(r)} title="Download PDF" data-testid={`row-pdf-${r.id}`}><FileDown className="h-4 w-4 text-slate-700" /></Button>
                       <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => emailDoc(r)} title="Email PDF" data-testid={`row-email-${r.id}`}><Mail className="h-4 w-4 text-blue-700" /></Button>
                       <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => sendWhatsApp(r)} title="WhatsApp web"><MessageCircle className="h-4 w-4 text-emerald-600" /></Button>
                       <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => sendTwilioWA(r)} title="WhatsApp via Twilio" data-testid={`row-twilio-${r.id}`}><MessageCircle className="h-4 w-4 text-emerald-800" strokeWidth={2.5} /></Button>
@@ -237,6 +256,27 @@ export default function LineItemDoc({
             <Button variant="outline" className="rounded-sm" onClick={()=>setOpen(false)}>Cancel</Button>
             <Button onClick={save} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="save-doc">Save</Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={previewOpen} onOpenChange={(v)=>{ if (!v) closePreview(); }}>
+        <DialogContent className="rounded-sm max-w-5xl p-0 overflow-hidden" data-testid="pdf-preview-dialog">
+          <DialogHeader className="px-5 py-3 border-b border-slate-200">
+            <DialogTitle className="font-display flex items-center justify-between">
+              <span>{previewRow?.code} — PDF Preview</span>
+              <span className="flex gap-2">
+                <Button size="sm" variant="outline" className="rounded-sm" onClick={() => previewRow && downloadPdf(previewRow)} data-testid="preview-download"><DLIcon className="h-4 w-4 mr-1" /> Download</Button>
+                <Button size="sm" variant="outline" className="rounded-sm" onClick={() => previewRow && emailDoc(previewRow)}><Mail className="h-4 w-4 mr-1" /> Email</Button>
+              </span>
+            </DialogTitle>
+          </DialogHeader>
+          <div className="bg-slate-100 h-[78vh]">
+            {previewUrl ? (
+              <iframe title="pdf-preview" src={previewUrl} className="w-full h-full border-0" data-testid="pdf-preview-iframe" />
+            ) : (
+              <div className="flex items-center justify-center h-full text-slate-500 text-sm">Loading...</div>
+            )}
+          </div>
         </DialogContent>
       </Dialog>
     </div>
