@@ -87,4 +87,13 @@ Modules requested: Manufacturing, BOM, Work Orders, Job Cards, Inventory, CRM, Q
 - Two-factor auth + audit logs
 
 ## Credentials
-- Admin: `admin@erp.com` / `Admin@123`
+- **Owner**: `admin@denplex.co` / `Shivganesh4$` (full admin)
+- **Demo sandbox**: `admin@erp.com` / `Admin@123` (for sharing without giving owner access)
+
+## Trial Signup (added Feb 2026)
+- Public form at `/trial` — collects name, company, phone, email, GSTIN, business type, purpose
+- Backend: POST `/api/trial/request` (public). Admin reviews via `/app/trial-requests` → Approve/Reject
+- Approval auto-creates a user with `role=trial`, `trial_expires_at = now + 30 days`, generates a `trial-<random>` temp password (copy-to-clipboard for sharing)
+- **Trial role limits**: can READ everything + CREATE most modules, but global middleware blocks all PUT/PATCH/DELETE on `/api/*`
+- Expired-trial guard at both login + every authenticated request → returns 403 with "contact admin@denplex.co"
+- Red banner at top of dashboard for trial users showing expiry date

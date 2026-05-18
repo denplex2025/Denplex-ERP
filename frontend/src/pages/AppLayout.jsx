@@ -5,7 +5,7 @@ import { Toaster } from "sonner";
 import {
   LayoutDashboard, Boxes, Layers, ClipboardList, FileText,
   ShoppingCart, Receipt, Users, UserPlus, Truck, ShieldCheck,
-  FileBox, Settings as SettingsIcon, LogOut, Cog, Menu, Calculator, UsersRound, Megaphone, Wrench, ScrollText
+  FileBox, Settings as SettingsIcon, LogOut, Cog, Menu, Calculator, UsersRound, Megaphone, Wrench, ScrollText, Ticket
 } from "lucide-react";
 import { useState } from "react";
 
@@ -26,6 +26,7 @@ const NAV = [
   { to: "/app/documents", label: "Documents (ISO)", icon: FileBox, testid: "nav-documents" },
   { to: "/app/hr", label: "HR", icon: UsersRound, testid: "nav-hr" },
   { to: "/app/marketing", label: "Marketing", icon: Megaphone, testid: "nav-marketing" },
+  { to: "/app/trial-requests", label: "Trial Requests", icon: Ticket, testid: "nav-trial-requests", adminOnly: true },
   { to: "/app/settings", label: "Settings", icon: Wrench, testid: "nav-settings", adminOnly: true },
   { to: "/app/audit", label: "Audit Log", icon: ScrollText, testid: "nav-audit", adminOnly: true },
   { to: "/app/users", label: "Users", icon: SettingsIcon, testid: "nav-users", adminOnly: true },
@@ -87,6 +88,14 @@ export default function AppLayout() {
 
       {/* Main */}
       <main className="flex-1 min-w-0">
+        {user.role === "trial" && user.trial_expires_at && (
+          <div className="bg-red-600 text-white text-xs px-4 py-2 flex items-center justify-between" data-testid="trial-banner">
+            <div>
+              <strong>Trial account</strong> — view + create only. Edits and deletions are disabled. Expires {new Date(user.trial_expires_at).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })}.
+            </div>
+            <a href="mailto:admin@denplex.co?subject=Denplex%20ERP%20licence" className="underline">Upgrade to full licence →</a>
+          </div>
+        )}
         <div className="lg:hidden sticky top-0 z-30 bg-white border-b border-slate-200 h-14 flex items-center justify-between px-4">
           <Button variant="ghost" size="icon" onClick={() => setOpen(!open)} data-testid="mobile-menu-toggle"><Menu className="h-5 w-5" /></Button>
           <div className="font-display font-bold tracking-tight">Denplex ERP</div>

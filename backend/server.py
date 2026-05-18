@@ -53,11 +53,30 @@ EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY', '')
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
 
-app = FastAPI(title="Precision ERP")
+app = FastAPI(title="Denplex ERP")
 api = APIRouter(prefix="/api")
 security = HTTPBearer(auto_error=False)
 
-ROLES = ["admin", "manager", "production", "qc", "accountant", "ca", "sales", "employee"]
+# Trial role write-guard middleware: trial users cannot mutate (DELETE/PUT/PATCH) on /api/*
+@app.middleware("http")
+async def trial_write_guard(request: Request, call_next):
+    if request.url.path.startswith("/api") and request.method in ("DELETE", "PUT", "PATCH"):
+        auth = request.headers.get("authorization", "")
+        if auth.lower().startswith("bearer "):
+            try:
+                token = auth.split(" ", 1)[1]
+                payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+                if payload.get("role") == "trial":
+                    from fastapi.responses import JSONResponse
+                    return JSONResponse(
+                        status_code=403,
+                        content={"detail": "Trial accounts have view + create access only. Editing and deleting are disabled during the 1-month trial. Please contact admin@denplex.co for a full license."},
+                    )
+            except Exception:
+                pass
+    return await call_next(request)
+
+ROLES = ["admin", "manager", "production", "qc", "accountant", "ca", "sales", "employee", "trial"]
 
 # ---------------- helpers ----------------
 def now_iso() -> str:
@@ -89,6 +108,23 @@ async def get_current_user(creds: Optional[HTTPAuthorizationCredentials] = Depen
     user = await db.users.find_one({"id": payload["sub"]}, {"_id": 0, "password": 0, "totp_secret": 0})
     if not user:
         raise HTTPException(401, "User not found")
+    # enforce trial expiry
+    exp = user.get("trial_expires_at")
+    if exp:
+        try:
+            exp_dt = datetime.fromisoformat(exp.replace("Z", "+00:00"))
+            if datetime.now(timezone.utc) > exp_dt:
+                raise HTTPException(403, "Trial expired. Please contact admin@denplex.co to extend your access.")
+        except HTTPException:
+            raise
+        except Exception:
+            pass
+    return user
+
+async def require_can_edit(request: Request, user=Depends(get_current_user)) -> Dict[str, Any]:
+    # Trial users cannot DELETE/PUT/PATCH on most endpoints
+    if user.get("role") == "trial" and request.method in ("DELETE", "PUT", "PATCH"):
+        raise HTTPException(403, "Trial accounts have view + create access only. Editing and deleting are disabled during the 1-month trial.")
     return user
 
 def require_roles(*allowed: str):
@@ -117,7 +153,19 @@ class RegisterIn(BaseModel):
     name: str
     email: EmailStr
     password: str
-    role: Literal["admin", "manager", "production", "qc", "accountant", "ca", "sales", "employee"] = "employee"
+    role: Literal["admin", "manager", "production", "qc", "accountant", "ca", "sales", "employee", "trial"] = "employee"
+
+class TrialRequestIn(BaseModel):
+    name: str
+    company: str
+    phone: str
+    email: EmailStr
+    gstin: Optional[str] = ""
+    business_type: Optional[str] = ""
+    purpose: Optional[str] = ""
+
+class TrialApproveIn(BaseModel):
+    note: Optional[str] = ""
 
 class LoginIn(BaseModel):
     email: EmailStr
@@ -431,13 +479,30 @@ async def login(payload: LoginIn):
     user = await db.users.find_one({"email": payload.email.lower()})
     if not user or not verify_password(payload.password, user["password"]):
         raise HTTPException(401, "Invalid credentials")
+    # Trial expiry check at login
+    exp = user.get("trial_expires_at")
+    if exp:
+        try:
+            exp_dt = datetime.fromisoformat(exp.replace("Z", "+00:00"))
+            if datetime.now(timezone.utc) > exp_dt:
+                raise HTTPException(403, "Trial expired. Please contact admin@denplex.co to extend your access.")
+        except HTTPException:
+            raise
+        except Exception:
+            pass
     if user.get("totp_enabled"):
         if not payload.totp_code:
             raise HTTPException(401, "TOTP code required", headers={"X-2FA-Required": "1"})
         if not pyotp.TOTP(user.get("totp_secret", "")).verify(payload.totp_code, valid_window=1):
             raise HTTPException(401, "Invalid TOTP code")
     token = create_token(user["id"], user["role"])
-    return {"token": token, "user": {"id": user["id"], "name": user["name"], "email": user["email"], "role": user["role"]}}
+    return {
+        "token": token,
+        "user": {
+            "id": user["id"], "name": user["name"], "email": user["email"], "role": user["role"],
+            "trial_expires_at": user.get("trial_expires_at", ""),
+        }
+    }
 
 @api.get("/auth/me")
 async def me(user=Depends(get_current_user)):
@@ -1909,16 +1974,117 @@ async def imap_sync_leads(user=Depends(get_current_user)):
 # ---------------- Seed ----------------
 @app.on_event("startup")
 async def startup():
+    # Owner admin (Denplex)
+    if not await db.users.find_one({"email": "admin@denplex.co"}):
+        await db.users.insert_one({
+            "id": new_id(),
+            "name": "Denplex Owner",
+            "email": "admin@denplex.co",
+            "role": "admin",
+            "password": hash_password("Shivganesh4$"),
+            "created_at": now_iso(),
+        })
+        logger.info("Seeded owner admin@denplex.co")
+    # Demo admin (trial sandbox login)
     if not await db.users.find_one({"email": "admin@erp.com"}):
         await db.users.insert_one({
             "id": new_id(),
-            "name": "Admin",
+            "name": "Demo Admin",
             "email": "admin@erp.com",
             "role": "admin",
             "password": hash_password("Admin@123"),
             "created_at": now_iso(),
         })
-        logger.info("Seeded admin@erp.com / Admin@123")
+        logger.info("Seeded demo admin@erp.com / Admin@123")
+
+# ---------------- Trial Signup ----------------
+@api.post("/trial/request")
+async def submit_trial_request(payload: TrialRequestIn):
+    if await db.trial_requests.find_one({"email": payload.email.lower(), "status": {"$in": ["pending", "approved"]}}):
+        raise HTTPException(400, "A trial request for this email already exists. Please contact admin@denplex.co.")
+    doc = {
+        "id": new_id(),
+        "name": payload.name,
+        "company": payload.company,
+        "phone": payload.phone,
+        "email": payload.email.lower(),
+        "gstin": payload.gstin or "",
+        "business_type": payload.business_type or "",
+        "purpose": payload.purpose or "",
+        "status": "pending",
+        "created_at": now_iso(),
+        "reviewed_at": "",
+        "reviewed_by": "",
+        "review_note": "",
+        "approved_user_id": "",
+        "trial_expires_at": "",
+        "temp_password": "",
+    }
+    await db.trial_requests.insert_one(doc)
+    return {"ok": True, "id": doc["id"], "message": "Thank you! Your trial request has been received. We'll verify and email you within 24 hours."}
+
+@api.get("/trial/requests")
+async def list_trial_requests(status: Optional[str] = None, user=Depends(require_roles("admin"))):
+    q = {"status": status} if status else {}
+    rows = await db.trial_requests.find(q, {"_id": 0}).sort("created_at", -1).to_list(500)
+    return rows
+
+@api.post("/trial/requests/{rid}/approve")
+async def approve_trial(rid: str, payload: TrialApproveIn, user=Depends(require_roles("admin"))):
+    req = await db.trial_requests.find_one({"id": rid}, {"_id": 0})
+    if not req:
+        raise HTTPException(404, "Request not found")
+    if req["status"] != "pending":
+        raise HTTPException(400, f"Request already {req['status']}")
+    if await db.users.find_one({"email": req["email"]}):
+        raise HTTPException(400, "A user with this email already exists")
+    temp_pw = "trial-" + secrets.token_urlsafe(6)
+    expires = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+    new_user_id = new_id()
+    await db.users.insert_one({
+        "id": new_user_id,
+        "name": req["name"],
+        "email": req["email"],
+        "role": "trial",
+        "password": hash_password(temp_pw),
+        "trial_expires_at": expires,
+        "created_at": now_iso(),
+        "company": req.get("company", ""),
+        "phone": req.get("phone", ""),
+    })
+    await db.trial_requests.update_one(
+        {"id": rid},
+        {"$set": {
+            "status": "approved",
+            "reviewed_at": now_iso(),
+            "reviewed_by": user["name"],
+            "review_note": payload.note or "",
+            "approved_user_id": new_user_id,
+            "trial_expires_at": expires,
+            "temp_password": temp_pw,
+        }},
+    )
+    await write_audit(user["name"], "trial_approved", "trial_request", rid, {"email": req["email"]})
+    return {"ok": True, "email": req["email"], "temp_password": temp_pw, "trial_expires_at": expires}
+
+@api.post("/trial/requests/{rid}/reject")
+async def reject_trial(rid: str, payload: TrialApproveIn, user=Depends(require_roles("admin"))):
+    req = await db.trial_requests.find_one({"id": rid}, {"_id": 0})
+    if not req:
+        raise HTTPException(404, "Request not found")
+    if req["status"] != "pending":
+        raise HTTPException(400, f"Request already {req['status']}")
+    await db.trial_requests.update_one(
+        {"id": rid},
+        {"$set": {"status": "rejected", "reviewed_at": now_iso(), "reviewed_by": user["name"], "review_note": payload.note or ""}},
+    )
+    await write_audit(user["name"], "trial_rejected", "trial_request", rid)
+    return {"ok": True}
+
+@api.delete("/trial/requests/{rid}")
+async def del_trial_request(rid: str, user=Depends(require_roles("admin"))):
+    await db.trial_requests.delete_one({"id": rid})
+    return {"ok": True}
 
 # ---------------- App config ----------------
 app.include_router(api)

@@ -12,8 +12,8 @@ const AUTH_IMG = "https://static.prod-images.emergentagent.com/jobs/7f514505-bc8
 export default function Login() {
   const { login } = useAuth();
   const nav = useNavigate();
-  const [email, setEmail] = useState("admin@erp.com");
-  const [password, setPassword] = useState("Admin@123");
+  const [email, setEmail] = useState("admin@denplex.co");
+  const [password, setPassword] = useState("");
   const [totp, setTotp] = useState("");
   const [needs2fa, setNeeds2fa] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -85,8 +85,12 @@ export default function Login() {
           </form>
 
           <div className="mt-6 p-4 bg-slate-50 border border-slate-200 text-xs">
-            <div className="font-semibold text-slate-700 uppercase tracking-wider">Demo credentials</div>
-            <div className="mt-1.5 font-mono-tech text-slate-600">admin@erp.com · Admin@123</div>
+            <div className="font-semibold text-slate-700 uppercase tracking-wider">Don't have an account?</div>
+            <Link to="/trial" className="mt-1.5 inline-block text-red-600 underline" data-testid="trial-link-from-login">Request a 30-day free trial →</Link>
+            <div className="mt-3 pt-3 border-t border-slate-200">
+              <div className="font-semibold text-slate-700 uppercase tracking-wider">Sandbox demo</div>
+              <div className="mt-1.5 font-mono-tech text-slate-600">admin@erp.com · Admin@123</div>
+            </div>
           </div>
           <div className="mt-6 text-center">
             <Link to="/portal" className="text-sm text-slate-600 hover:text-red-600" data-testid="portal-link-from-login">Track an order in the customer portal →</Link>

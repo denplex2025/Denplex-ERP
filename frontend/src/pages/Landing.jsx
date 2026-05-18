@@ -19,6 +19,7 @@ const Landing = () => {
             <a href="#features" className="hover:text-slate-900">Features</a>
             <a href="#modules" className="hover:text-slate-900">Modules</a>
             <Link to="/portal" className="hover:text-slate-900" data-testid="nav-portal-link">Customer Portal</Link>
+            <Link to="/trial" className="hover:text-slate-900 text-red-600 font-medium" data-testid="nav-trial-link">Free Trial</Link>
           </nav>
           <div className="flex items-center gap-2">
             <Link to="/login">
@@ -47,14 +48,19 @@ const Landing = () => {
               One operating system for your inventory, BOM, work orders, job cards, QC, quotations, GST invoices, leads, and customer portal — built for small-scale precision engineering businesses.
             </p>
             <div className="mt-8 flex flex-wrap gap-3">
-              <Link to="/login">
+              <Link to="/trial">
                 <Button className="rounded-sm h-11 px-6 bg-red-600 hover:bg-red-700" data-testid="hero-primary-cta">
-                  Sign in to dashboard <ArrowRight className="ml-2 h-4 w-4" />
+                  Start 30-day free trial <ArrowRight className="ml-2 h-4 w-4" />
+                </Button>
+              </Link>
+              <Link to="/login">
+                <Button variant="outline" className="rounded-sm h-11 px-6 border-slate-300" data-testid="hero-login-cta">
+                  Sign in
                 </Button>
               </Link>
               <Link to="/portal">
-                <Button variant="outline" className="rounded-sm h-11 px-6 border-slate-300" data-testid="hero-portal-cta">
-                  Track an order
+                <Button variant="ghost" className="rounded-sm h-11 px-6 text-slate-700" data-testid="hero-portal-cta">
+                  Track an order →
                 </Button>
               </Link>
             </div>
@@ -123,12 +129,12 @@ const Landing = () => {
         <div className="max-w-7xl mx-auto px-6 py-16 flex flex-col md:flex-row items-start md:items-center justify-between gap-6 relative">
           <div>
             <h3 className="font-display text-3xl font-bold tracking-tight">Ready to run a tighter shop?</h3>
-            <p className="text-slate-300 mt-2">Sign in with the seeded admin to explore the entire system.</p>
-            <p className="text-xs text-slate-400 mt-1 font-mono-tech">admin@erp.com · Admin@123</p>
+            <p className="text-slate-300 mt-2">Start a 30-day free trial — no card needed. We verify and email you in 24 hours.</p>
+            <p className="text-xs text-slate-400 mt-1 font-mono-tech">Or try the sandbox: admin@erp.com · Admin@123</p>
           </div>
-          <Link to="/login">
+          <Link to="/trial">
             <Button className="rounded-sm h-12 px-7 bg-red-600 hover:bg-red-700 text-white border-0" data-testid="footer-cta-button">
-              Sign in <ArrowRight className="ml-2 h-4 w-4" />
+              Get started <ArrowRight className="ml-2 h-4 w-4" />
             </Button>
           </Link>
         </div>

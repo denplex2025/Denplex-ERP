@@ -26,6 +26,8 @@ import HR from "@/pages/HR";
 import Marketing from "@/pages/Marketing";
 import Settings from "@/pages/Settings";
 import AuditLog from "@/pages/AuditLog";
+import Trial from "@/pages/Trial";
+import TrialRequests from "@/pages/TrialRequests";
 
 function Protected({ children }) {
   const { user, loading } = useAuth();
@@ -43,6 +45,7 @@ function App() {
             <Route path="/" element={<Landing />} />
             <Route path="/login" element={<Login />} />
             <Route path="/portal" element={<Portal />} />
+            <Route path="/trial" element={<Trial />} />
             <Route path="/app" element={<Protected><AppLayout /></Protected>}>
               <Route index element={<Dashboard />} />
               <Route path="inventory" element={<Inventory />} />
@@ -62,6 +65,7 @@ function App() {
               <Route path="marketing" element={<Marketing />} />
               <Route path="settings" element={<Settings />} />
               <Route path="audit" element={<AuditLog />} />
+              <Route path="trial-requests" element={<TrialRequests />} />
               <Route path="users" element={<Users />} />
             </Route>
             <Route path="*" element={<Navigate to="/" replace />} />
