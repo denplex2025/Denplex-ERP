@@ -1,0 +1,124 @@
+{
+  "project_context": {
+    "domain": "Manufacturing ERP",
+    "business_type": "Precision Engineering & Jig/Fixtures MSME",
+    "theme": "LIGHT",
+    "archetype": "4 (Swiss & High-Contrast)",
+    "tone": "Precision, Industrial, Functional, Authoritative"
+  },
+  "typography": {
+    "font_strategy": "The 'Old Money Tech' variant for industrial context: Squarish/Technical sans for marketing headings, highly legible functional sans for data.",
+    "fonts": {
+      "marketing_heading": "Cabinet Grotesk, sans-serif",
+      "dashboard_heading": "IBM Plex Sans, sans-serif",
+      "body": "IBM Plex Sans, sans-serif",
+      "mono": "JetBrains Mono, monospace"
+    },
+    "hierarchy": {
+      "h1": "text-4xl sm:text-5xl lg:text-6xl tracking-tight font-bold",
+      "h2": "text-2xl sm:text-3xl lg:text-4xl tracking-tight font-semibold",
+      "h3": "text-xl sm:text-2xl tracking-tight font-medium",
+      "h4": "text-lg sm:text-xl font-medium",
+      "body_base": "text-base leading-relaxed text-slate-700",
+      "body_small": "text-sm leading-normal text-slate-600",
+      "label_overline": "text-xs font-semibold uppercase tracking-[0.2em] text-slate-500"
+    }
+  },
+  "colors": {
+    "strategy": "Industrial Steel. Base is stark white for clarity, with cool slate grays to mimic metal. Action color is an industrial Cobalt Blue, alerts in Signal Red.",
+    "palette": {
+      "background": "#FFFFFF",
+      "surface": "#F8FAFC",
+      "surface_alt": "#F1F5F9",
+      "border": "#E2E8F0",
+      "text_primary": "#0F172A",
+      "text_secondary": "#475569",
+      "primary": "#1D4ED8",
+      "primary_hover": "#1E40AF",
+      "primary_text": "#FFFFFF",
+      "danger": "#DC2626",
+      "warning": "#D97706",
+      "success": "#059669"
+    }
+  },
+  "layout_and_spacing": {
+    "strategy": "Mode B (Control Room Grid) for dashboards. High density but structured. Generous spacing (Mode A) for the customer portal and landing page.",
+    "spacing_scale": "p-1, p-2, p-4, p-6, p-8, p-12",
+    "dashboard_grid": "grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-4 md:gap-6",
+    "marketing_grid": "grid-cols-1 md:grid-cols-8 lg:grid-cols-12 gap-8 lg:gap-12",
+    "border_radius": {
+      "default": "rounded-none",
+      "small": "rounded-sm",
+      "medium": "rounded-md",
+      "large": "rounded-lg"
+    }
+  },
+  "surface_styles": {
+    "strategy": "Technical precision. Minimal shadows, strong use of 1px borders to separate modular widgets.",
+    "dashboard_card": "bg-white border border-slate-200 shadow-sm rounded-md",
+    "marketing_card": "bg-white border border-slate-200 shadow-[0_8px_30px_rgb(0,0,0,0.04)] hover:shadow-[0_8px_30px_rgb(0,0,0,0.08)] transition-all rounded-lg",
+    "header_nav": "bg-white/80 backdrop-blur-xl border-b border-slate-200 sticky top-0 z-50",
+    "inputs": "bg-white border border-slate-300 focus:border-blue-600 focus:ring-1 focus:ring-blue-600 rounded-sm text-slate-900"
+  },
+  "components": {
+    "strategy": "Use Shadcn highly customized for a flat, technical look. Erase the default Vercel aesthetic by sharp corners and steel colors.",
+    "buttons": {
+      "primary": "bg-blue-700 text-white hover:bg-blue-800 transition-colors rounded-sm px-4 py-2 font-medium shadow-sm",
+      "secondary": "bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 transition-colors rounded-sm px-4 py-2 font-medium shadow-sm",
+      "ghost": "bg-transparent text-slate-600 hover:bg-slate-100 transition-colors rounded-sm px-4 py-2"
+    },
+    "tables": "Dense rows, 1px border-b on cells. text-sm. Hover state on rows. Stick header.",
+    "badges": "px-2 py-0.5 text-xs font-medium rounded border",
+    "icons": {
+      "library": "@phosphor-icons/react",
+      "style": "Regular or Light weight for dashboard density. Duotone for marketing/empty states."
+    }
+  },
+  "media_and_assets": {
+    "strategy": "High-end industrial macro photography and 3D architectural renders to convey precision.",
+    "images": [
+      {
+        "category": "landing_hero",
+        "url": "https://static.prod-images.emergentagent.com/jobs/7f514505-bc8d-48ed-954b-5815c5f6170a/images/0475821f5ac9696210216b4d7b8fd14a0f3b01c44be9da7e3b33a4e81d154066.png",
+        "description": "Macro shot of a precision milled steel mechanical jig and fixture part, used for the main landing page hero background. Use with a dark gradient overlay if placing white text."
+      },
+      {
+        "category": "auth_background",
+        "url": "https://static.prod-images.emergentagent.com/jobs/7f514505-bc8d-48ed-954b-5815c5f6170a/images/cb22e629690813a8f97ff85f0f116a8265e6e640f54f29986e2c004002dc647a.png",
+        "description": "Abstract 3D architectural rendering of a modern steel factory layout, used for the login/auth split screen background."
+      },
+      {
+        "category": "feature_machining_1",
+        "url": "https://images.unsplash.com/photo-1666634157070-6fd830fb5672?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1OTN8MHwxfHNlYXJjaHwxfHxwcmVjaXNpb24lMjBjbmMlMjBtYWNoaW5pbmclMjBtZXRhbHxlbnwwfHx8fDE3NzkxMjY0NDR8MA&ixlib=rb-4.1.0&q=85",
+        "description": "Close up of CNC machining, to be used in marketing features or placeholder for QC reports."
+      },
+      {
+        "category": "feature_machining_2",
+        "url": "https://images.unsplash.com/photo-1666618090858-fbcee636bd3e?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1OTN8MHwxfHNlYXJjaHwyfHxwcmVjaXNpb24lMjBjbmMlMjBtYWNoaW5pbmclMjBtZXRhbHxlbnwwfHx8fDE3NzkxMjY0NDR8MA&ixlib=rb-4.1.0&q=85",
+        "description": "Machine tool close up, usable for Work Order placeholders or Gallery."
+      },
+      {
+        "category": "factory_background",
+        "url": "https://images.unsplash.com/photo-1720282338064-6c47e32bc0b9?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDk1Nzd8MHwxfHNlYXJjaHwxfHxpbmR1c3RyaWFsJTIwZW5naW5lZXIlMjBmYWN0b3J5fGVufDB8fHx8MTc3OTEyNjQ0NHww&ixlib=rb-4.1.0&q=85",
+        "description": "Industrial steel structure, suitable for Customer Portal login background or About page."
+      }
+    ]
+  },
+  "testing_attributes": {
+    "rule": "MANDATORY: All interactive elements must include a data-testid attribute in kebab-case based on their role.",
+    "examples": [
+      "data-testid='login-submit-button'",
+      "data-testid='inventory-adjust-stock-button'",
+      "data-testid='dashboard-work-orders-card'",
+      "data-testid='nav-crm-link'"
+    ]
+  },
+  "instructions_to_main_agent": [
+    "Install and use @phosphor-icons/react for dense dashboard interfaces.",
+    "For the Landing Page, construct custom layout using Tailwind grid-cols-12 and avoid standard card-in-card designs. Overlap the hero image with clean white/steel blocks.",
+    "For the Dashboard, use Shadcn components heavily (Tables, Dialogs, Select, Tabs) but override default radii to be sharper (rounded-sm) and borders to be slate-200.",
+    "Implement Recharts for Dashboard KPIs (OEE, Machine utilization, Revenue, Open work orders).",
+    "Ensure all forms (PO creation, Quotation, QC Upload) have strong validation and accessible focus states (ring-blue-600).",
+    "For the Customer portal track-by-reference UI, use a clean centralized search bar interface, not a dense table."
+  ]
+}
