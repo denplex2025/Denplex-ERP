@@ -24,6 +24,8 @@ import Users from "@/pages/Users";
 import Accounting from "@/pages/Accounting";
 import HR from "@/pages/HR";
 import Marketing from "@/pages/Marketing";
+import Settings from "@/pages/Settings";
+import AuditLog from "@/pages/AuditLog";
 
 function Protected({ children }) {
   const { user, loading } = useAuth();
@@ -58,6 +60,8 @@ function App() {
               <Route path="accounting" element={<Accounting />} />
               <Route path="hr" element={<HR />} />
               <Route path="marketing" element={<Marketing />} />
+              <Route path="settings" element={<Settings />} />
+              <Route path="audit" element={<AuditLog />} />
               <Route path="users" element={<Users />} />
             </Route>
             <Route path="*" element={<Navigate to="/" replace />} />

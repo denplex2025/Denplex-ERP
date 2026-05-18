@@ -1,0 +1,51 @@
+{
+  "summary": "Completed full backend testing of Precision ERP P2 layer (integrations, PDF, GSTR CSVs, 2FA TOTP, audit log). 26/26 tests passed including regression sanity for P1 endpoints. Admin restored to clean state (2FA disabled) post-test.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "/api/accounting/gstr3b.csv",
+        "issue": "ITC (A)(5) row uses a heuristic: it splits in_gst across CGST/SGST and zeroes IGST only if NO invoice in the period is interstate. This logic is based on output invoices, not input expenses, so an inter-state purchase will still be split as CGST/SGST. Consider tracking expense.is_interstate at expense level for accurate ITC bucketing."
+      },
+      {
+        "endpoint": "/api/integrations/tradeindia/webhook",
+        "issue": "Webhook does not record an audit log entry on lead creation, while WhatsApp/email/Indiamart paths do. Recommend adding write_audit('tradeindia_webhook', ...) for traceability."
+      },
+      {
+        "endpoint": "/api/auth/2fa/setup",
+        "issue": "Returns 400 'already enabled' rather than supporting re-issue of a new secret after disable+re-enable cycle. Works after disable (which clears totp_secret), but flow could be more explicit."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_p2_integrations.py",
+    "/app/test_reports/pytest/pytest_p2_results.xml"
+  ],
+  "action_items": [
+    "Optional: add audit log on tradeindia webhook lead creation",
+    "Optional: improve GSTR-3B ITC bucketing using per-expense interstate flag"
+  ],
+  "critical_code_review_comments": [
+    "server.py is 1500 lines — recommend splitting into routers (auth.py, accounting.py, integrations.py, inventory.py, hr.py) to stay <700 lines per file.",
+    "Webhook endpoint /api/integrations/tradeindia/webhook accepts token via Query string and compares with == (string equality). For production, use hmac.compare_digest to mitigate timing attacks.",
+    "2FA secret is stored in plaintext on the user document. Consider encrypting at rest with a server-side key.",
+    "/api/email/send and /api/whatsapp/send are gated only by get_current_user (any authenticated user). Should likely be restricted to roles like admin/manager/sales to prevent abuse.",
+    "PDF endpoints lack role-restriction (only require auth). Consider restricting invoice PDF download to accountant/admin/manager.",
+    "Indiamart sync calls external HTTP with no retry/backoff; httpx timeout=30 is reasonable but failures are swallowed into a generic 502 message."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_p2_integrations.py (new)"
+  ],
+  "success_rate": {"backend": "100%", "frontend": "skipped"},
+  "test_credentials": "admin@erp.com / Admin@123 (from /app/memory/test_credentials.md); a transient sales user is created per session for role-deny tests.",
+  "seed_data_creation": "Created TEST_ prefixed customer, supplier, invoice, quotation, PO, inventory item for PDF + regression tests; cleared integration settings to defaults at start and end. Admin 2FA was enabled mid-test and explicitly disabled at the end.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "P2 features all working: GET/PUT /api/settings/integrations (admin-only with 403 for non-admin), POST /api/whatsapp/send & /api/email/send & /api/integrations/indiamart/sync all return 400 when not configured, /api/integrations/tradeindia/webhook returns 401 with bad token / 200 with correct token / dedupes on external_id, /api/{invoices,quotations,purchase-orders}/{id}/pdf return application/pdf with %PDF magic header, /api/accounting/gstr1.csv has full GSTR-1 header, /api/accounting/gstr3b.csv contains 'GSTR-3B Summary' and 'Net GST Payable', 2FA full lifecycle (setup→enable→login-with-totp→disable) works using pyotp.TOTP(secret).now(), audit log captures 2fa_enable/2fa_disable, non-admin role gets 403 on /api/settings/integrations and /api/audit-logs. Admin login still works without TOTP after teardown. Run tests via: REACT_APP_BACKEND_URL=<url> pytest /app/backend/tests/test_p2_integrations.py -v",
+  "rca of the issue": "N/A — no failures encountered."
+}

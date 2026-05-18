@@ -1,5 +1,6 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, Query
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, Query, Request, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.responses import StreamingResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -9,11 +10,26 @@ import bcrypt
 import jwt
 import uuid
 import base64
+import io
+import csv
+import asyncio
+import secrets
+import pyotp
+import phonenumbers
+import httpx
 from pathlib import Path
 from pydantic import BaseModel, Field, EmailStr, ConfigDict
 from typing import List, Optional, Literal, Any, Dict
 from datetime import datetime, timezone, timedelta
 from emergentintegrations.llm.chat import LlmChat, UserMessage, ImageContent
+from reportlab.lib.pagesizes import A4
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import mm
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from twilio.rest import Client as TwilioClient
+from twilio.base.exceptions import TwilioRestException
+import resend as resend_sdk
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -59,7 +75,7 @@ async def get_current_user(creds: Optional[HTTPAuthorizationCredentials] = Depen
         payload = jwt.decode(creds.credentials, JWT_SECRET, algorithms=["HS256"])
     except Exception:
         raise HTTPException(401, "Invalid token")
-    user = await db.users.find_one({"id": payload["sub"]}, {"_id": 0, "password": 0})
+    user = await db.users.find_one({"id": payload["sub"]}, {"_id": 0, "password": 0, "totp_secret": 0})
     if not user:
         raise HTTPException(401, "User not found")
     return user
@@ -95,6 +111,7 @@ class RegisterIn(BaseModel):
 class LoginIn(BaseModel):
     email: EmailStr
     password: str
+    totp_code: Optional[str] = ""
 
 class Customer(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -403,6 +420,11 @@ async def login(payload: LoginIn):
     user = await db.users.find_one({"email": payload.email.lower()})
     if not user or not verify_password(payload.password, user["password"]):
         raise HTTPException(401, "Invalid credentials")
+    if user.get("totp_enabled"):
+        if not payload.totp_code:
+            raise HTTPException(401, "TOTP code required", headers={"X-2FA-Required": "1"})
+        if not pyotp.TOTP(user.get("totp_secret", "")).verify(payload.totp_code, valid_window=1):
+            raise HTTPException(401, "Invalid TOTP code")
     token = create_token(user["id"], user["role"])
     return {"token": token, "user": {"id": user["id"], "name": user["name"], "email": user["email"], "role": user["role"]}}
 
@@ -412,7 +434,7 @@ async def me(user=Depends(get_current_user)):
 
 @api.get("/users")
 async def list_users(user=Depends(require_roles("admin"))):
-    return await db.users.find({}, {"_id": 0, "password": 0}).to_list(500)
+    return await db.users.find({}, {"_id": 0, "password": 0, "totp_secret": 0}).to_list(500)
 
 # ---------------- Generic CRUD helpers ----------------
 def serialize(d: Dict[str, Any]) -> Dict[str, Any]:
@@ -1004,6 +1026,448 @@ async def portal_track(ref: str = Query(..., min_length=2)):
 @api.get("/")
 async def root():
     return {"ok": True, "service": "precision-erp"}
+
+
+# ================ P2: Settings, Twilio WhatsApp, Resend, Indiamart, TradeIndia, GSTR, 2FA, Audit ================
+
+async def get_setting(key: str) -> Dict[str, Any]:
+    doc = await db.settings.find_one({"_id": key}, {"_id": 0})
+    return doc or {}
+
+async def set_setting(key: str, data: Dict[str, Any]):
+    await db.settings.replace_one({"_id": key}, {"_id": key, **data}, upsert=True)
+
+class IntegrationSettingsIn(BaseModel):
+    twilio_account_sid: Optional[str] = ""
+    twilio_auth_token: Optional[str] = ""
+    twilio_whatsapp_from: Optional[str] = ""
+    resend_api_key: Optional[str] = ""
+    resend_from_email: Optional[str] = ""
+    indiamart_crm_key: Optional[str] = ""
+    tradeindia_webhook_secret: Optional[str] = ""
+    company_name: Optional[str] = "Precision Engineering Works"
+    company_gstin: Optional[str] = ""
+    company_state: Optional[str] = ""
+    company_address: Optional[str] = ""
+
+@api.get("/settings/integrations")
+async def get_integrations(user=Depends(require_roles("admin"))):
+    return await get_setting("integrations")
+
+@api.put("/settings/integrations")
+async def update_integrations(payload: IntegrationSettingsIn, user=Depends(require_roles("admin"))):
+    data = payload.model_dump()
+    await set_setting("integrations", data)
+    return data
+
+# ---------- Audit log ----------
+async def write_audit(user_name: str, action: str, entity: str, entity_id: Optional[str] = None, details: Optional[Dict] = None):
+    try:
+        await db.audit_logs.insert_one({
+            "id": new_id(),
+            "user": user_name,
+            "action": action,
+            "entity": entity,
+            "entity_id": entity_id or "",
+            "details": details or {},
+            "created_at": now_iso(),
+        })
+    except Exception as e:
+        logger.exception("audit failed: %s", e)
+
+@api.get("/audit-logs")
+async def list_audit(limit: int = 200, user=Depends(require_roles("admin"))):
+    rows = await db.audit_logs.find({}, {"_id": 0}).sort("created_at", -1).to_list(min(limit, 1000))
+    return rows
+
+# ---------- Twilio WhatsApp ----------
+def _format_in_whatsapp(raw: str) -> str:
+    raw = (raw or "").strip()
+    if not raw:
+        raise ValueError("Empty phone number")
+    if raw.lower().startswith("whatsapp:"):
+        return raw
+    try:
+        if raw.startswith("+"):
+            parsed = phonenumbers.parse(raw, None)
+        else:
+            parsed = phonenumbers.parse(raw, "IN")
+        if not phonenumbers.is_valid_number(parsed):
+            raise ValueError("Invalid phone number")
+        e164 = phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
+    except phonenumbers.NumberParseException as ex:
+        raise ValueError(f"Phone parse error: {ex}")
+    return f"whatsapp:{e164}"
+
+class WhatsAppSendIn(BaseModel):
+    to_phone: str
+    body: str
+    media_url: Optional[str] = ""
+
+@api.post("/whatsapp/send")
+async def whatsapp_send(payload: WhatsAppSendIn, user=Depends(get_current_user)):
+    cfg = await get_setting("integrations")
+    sid = cfg.get("twilio_account_sid"); tok = cfg.get("twilio_auth_token"); frm = cfg.get("twilio_whatsapp_from")
+    if not (sid and tok and frm):
+        raise HTTPException(400, "Twilio not configured. Set credentials in Settings → Integrations.")
+    try:
+        to = _format_in_whatsapp(payload.to_phone)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    def _send():
+        client = TwilioClient(sid, tok)
+        kwargs = {"body": payload.body, "from_": frm, "to": to}
+        if payload.media_url:
+            kwargs["media_url"] = [payload.media_url]
+        return client.messages.create(**kwargs)
+    try:
+        msg = await asyncio.to_thread(_send)
+    except TwilioRestException as e:
+        raise HTTPException(502, f"Twilio: {e.msg}")
+    await write_audit(user["name"], "whatsapp_send", "message", msg.sid, {"to": to})
+    return {"sid": msg.sid, "status": msg.status}
+
+# ---------- Resend email ----------
+class EmailSendIn(BaseModel):
+    to: List[EmailStr]
+    subject: str
+    html: str
+    attachment_base64: Optional[str] = ""
+    attachment_filename: Optional[str] = ""
+
+@api.post("/email/send")
+async def email_send(payload: EmailSendIn, user=Depends(get_current_user)):
+    cfg = await get_setting("integrations")
+    key = cfg.get("resend_api_key"); frm = cfg.get("resend_from_email")
+    if not (key and frm):
+        raise HTTPException(400, "Resend not configured. Set RESEND_API_KEY and from email in Settings.")
+    resend_sdk.api_key = key
+    params: Dict[str, Any] = {"from": frm, "to": [str(e) for e in payload.to], "subject": payload.subject, "html": payload.html}
+    if payload.attachment_base64 and payload.attachment_filename:
+        b64 = payload.attachment_base64
+        if b64.startswith("data:") and "," in b64:
+            b64 = b64.split(",", 1)[1]
+        params["attachments"] = [{"filename": payload.attachment_filename, "content": b64}]
+    try:
+        sent = await asyncio.to_thread(resend_sdk.Emails.send, params)
+    except Exception as e:
+        raise HTTPException(502, f"Resend: {e}")
+    await write_audit(user["name"], "email_send", "email", str(sent.get("id", "")), {"to": payload.to, "subject": payload.subject})
+    return {"id": sent.get("id"), "ok": True}
+
+# ---------- PDF builders ----------
+def _money(n) -> str:
+    try:
+        return f"Rs. {float(n):,.2f}"
+    except Exception:
+        return f"Rs. {n}"
+
+def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, date_s: str,
+                   lines: List[Dict[str, Any]], totals: Dict[str, float], gst_breakup: Optional[Dict[str, float]] = None,
+                   company: Optional[Dict[str, Any]] = None, notes: str = "") -> bytes:
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, rightMargin=18*mm, leftMargin=18*mm, topMargin=18*mm, bottomMargin=18*mm)
+    styles = getSampleStyleSheet()
+    h_style = ParagraphStyle("h", parent=styles["Heading1"], fontSize=18, textColor=colors.HexColor("#0F172A"), spaceAfter=2)
+    sub_style = ParagraphStyle("sub", parent=styles["Normal"], fontSize=9, textColor=colors.HexColor("#475569"))
+    small = ParagraphStyle("sm", parent=styles["Normal"], fontSize=9, textColor=colors.HexColor("#0F172A"))
+    label = ParagraphStyle("lbl", parent=styles["Normal"], fontSize=8, textColor=colors.HexColor("#64748B"), spaceAfter=0)
+    flow = []
+    company = company or {}
+    # Header band
+    flow.append(Paragraph(f"<b>{company.get('company_name','Precision Engineering Works')}</b>", styles["Heading2"]))
+    if company.get("company_address"): flow.append(Paragraph(company["company_address"], sub_style))
+    if company.get("company_gstin"): flow.append(Paragraph(f"GSTIN: {company['company_gstin']}", sub_style))
+    flow.append(Spacer(1, 6*mm))
+    flow.append(Paragraph(f"{title}", h_style))
+    flow.append(Paragraph(f"<b>{code}</b> &nbsp;&nbsp; Date: {date_s}", small))
+    flow.append(Spacer(1, 4*mm))
+    flow.append(Paragraph(f"{party_label}: <b>{party_name}</b>", small))
+    flow.append(Spacer(1, 4*mm))
+    # Lines table
+    header = ["#", "Description", "Qty", "Rate", "GST%", "Amount"]
+    data = [header]
+    for i, l in enumerate(lines, 1):
+        qty = float(l.get("qty", 0) or 0)
+        rate = float(l.get("rate", 0) or 0)
+        amt = qty * rate
+        data.append([str(i), l.get("description", ""), f"{qty:g}", f"{rate:,.2f}", f"{l.get('gst_rate', 0)}", f"{amt:,.2f}"])
+    tbl = Table(data, colWidths=[10*mm, 80*mm, 18*mm, 22*mm, 16*mm, 28*mm])
+    tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F1F5F9")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#0F172A")),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#E2E8F0")),
+        ("ALIGN", (2, 0), (-1, -1), "RIGHT"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    flow.append(tbl)
+    flow.append(Spacer(1, 4*mm))
+    # Totals
+    tot_rows = [["Subtotal", _money(totals.get("subtotal", 0))]]
+    if gst_breakup:
+        if gst_breakup.get("igst"):
+            tot_rows.append(["IGST", _money(gst_breakup.get("igst", 0))])
+        else:
+            tot_rows.append(["CGST", _money(gst_breakup.get("cgst", 0))])
+            tot_rows.append(["SGST", _money(gst_breakup.get("sgst", 0))])
+    else:
+        tot_rows.append(["GST", _money(totals.get("gst_total", 0))])
+    tot_rows.append(["Total", _money(totals.get("total", 0))])
+    tot_tbl = Table(tot_rows, colWidths=[60*mm, 40*mm], hAlign="RIGHT")
+    tot_tbl.setStyle(TableStyle([
+        ("FONTSIZE", (0, 0), (-1, -1), 10),
+        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+        ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+        ("LINEABOVE", (0, -1), (-1, -1), 0.5, colors.HexColor("#0F172A")),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]))
+    flow.append(tot_tbl)
+    if notes:
+        flow.append(Spacer(1, 6*mm))
+        flow.append(Paragraph(f"<b>Notes:</b> {notes}", small))
+    flow.append(Spacer(1, 10*mm))
+    flow.append(Paragraph("Thank you for your business.", sub_style))
+    doc.build(flow)
+    return buf.getvalue()
+
+async def _resolve_doc(coll, doc_id: str, party_id_key: str, party_name_key: str):
+    doc = await coll.find_one({"id": doc_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Not found")
+    return doc
+
+@api.get("/invoices/{iid}/pdf")
+async def invoice_pdf(iid: str, user=Depends(get_current_user)):
+    inv = await db.invoices.find_one({"id": iid}, {"_id": 0})
+    if not inv: raise HTTPException(404, "Not found")
+    company = await get_setting("integrations")
+    pdf = _build_doc_pdf("Tax Invoice", inv.get("code", ""), "Bill To", inv.get("customer_name", ""), str(inv.get("date", ""))[:10],
+                         inv.get("lines", []), {"subtotal": inv.get("subtotal", 0), "total": inv.get("total", 0)},
+                         gst_breakup={"cgst": inv.get("cgst", 0), "sgst": inv.get("sgst", 0), "igst": inv.get("igst", 0)},
+                         company=company, notes=inv.get("notes", ""))
+    return Response(content=pdf, media_type="application/pdf",
+                    headers={"Content-Disposition": f'inline; filename="{inv.get("code","invoice")}.pdf"'})
+
+@api.get("/quotations/{qid}/pdf")
+async def quote_pdf(qid: str, user=Depends(get_current_user)):
+    q = await db.quotations.find_one({"id": qid}, {"_id": 0})
+    if not q: raise HTTPException(404, "Not found")
+    company = await get_setting("integrations")
+    pdf = _build_doc_pdf("Quotation", q.get("code", ""), "To", q.get("customer_name", ""), str(q.get("date", ""))[:10],
+                         q.get("lines", []), {"subtotal": q.get("subtotal", 0), "gst_total": q.get("gst_total", 0), "total": q.get("total", 0)},
+                         company=company, notes=q.get("notes", ""))
+    return Response(content=pdf, media_type="application/pdf",
+                    headers={"Content-Disposition": f'inline; filename="{q.get("code","quote")}.pdf"'})
+
+@api.get("/purchase-orders/{pid}/pdf")
+async def po_pdf(pid: str, user=Depends(get_current_user)):
+    p = await db.purchase_orders.find_one({"id": pid}, {"_id": 0})
+    if not p: raise HTTPException(404, "Not found")
+    company = await get_setting("integrations")
+    pdf = _build_doc_pdf("Purchase Order", p.get("code", ""), "Supplier", p.get("supplier_name", ""), str(p.get("date", ""))[:10],
+                         p.get("lines", []), {"subtotal": p.get("subtotal", 0), "gst_total": p.get("gst_total", 0), "total": p.get("total", 0)},
+                         company=company, notes=p.get("notes", ""))
+    return Response(content=pdf, media_type="application/pdf",
+                    headers={"Content-Disposition": f'inline; filename="{p.get("code","po")}.pdf"'})
+
+# ---------- Indiamart pull leads ----------
+@api.post("/integrations/indiamart/sync")
+async def indiamart_sync(user=Depends(require_roles("admin", "manager", "sales"))):
+    cfg = await get_setting("integrations")
+    key = cfg.get("indiamart_crm_key")
+    if not key:
+        raise HTTPException(400, "Indiamart CRM key not set in Settings")
+    # Indiamart Lead Manager: pulls last 7 days by default
+    url = f"https://mapi.indiamart.com/wservce/crm/crmListing/v2/?glusr_crm_key={key}"
+    try:
+        async with httpx.AsyncClient(timeout=30) as cli:
+            r = await cli.get(url)
+        data = r.json()
+    except Exception as e:
+        raise HTTPException(502, f"Indiamart fetch failed: {e}")
+    if data.get("CODE") not in (200, "200"):
+        raise HTTPException(400, f"Indiamart: {data.get('MESSAGE', 'error')}")
+    rows = data.get("RESPONSE", []) or []
+    added = 0
+    for row in rows:
+        ext_id = str(row.get("UNIQUE_QUERY_ID") or row.get("QUERY_ID") or "")
+        if ext_id and await db.leads.find_one({"external_id": ext_id}):
+            continue
+        lead = {
+            "id": new_id(),
+            "external_id": ext_id,
+            "name": row.get("SENDER_NAME", "Unknown"),
+            "company": row.get("SENDER_COMPANY", ""),
+            "phone": row.get("SENDER_MOBILE", "") or row.get("SENDER_PHONE", ""),
+            "email": row.get("SENDER_EMAIL", ""),
+            "source": "indiamart",
+            "requirement": row.get("QUERY_PRODUCT_NAME", "") or row.get("QUERY_MESSAGE", ""),
+            "status": "new",
+            "notes": f"City: {row.get('SENDER_CITY','')}, State: {row.get('SENDER_STATE','')}",
+            "created_at": now_iso(),
+        }
+        await db.leads.insert_one(lead)
+        added += 1
+    await write_audit(user["name"], "indiamart_sync", "leads", None, {"added": added, "fetched": len(rows)})
+    return {"added": added, "fetched": len(rows)}
+
+# ---------- TradeIndia webhook ----------
+class TradeIndiaLead(BaseModel):
+    name: Optional[str] = ""
+    company: Optional[str] = ""
+    phone: Optional[str] = ""
+    mobile: Optional[str] = ""
+    email: Optional[str] = ""
+    message: Optional[str] = ""
+    product: Optional[str] = ""
+    city: Optional[str] = ""
+    state: Optional[str] = ""
+    external_id: Optional[str] = ""
+
+@api.post("/integrations/tradeindia/webhook")
+async def tradeindia_webhook(payload: TradeIndiaLead, token: str = Query(...)):
+    cfg = await get_setting("integrations")
+    expected = cfg.get("tradeindia_webhook_secret") or ""
+    if not expected or token != expected:
+        raise HTTPException(401, "Invalid webhook token")
+    name = payload.name or "Unknown"
+    phone = payload.mobile or payload.phone or ""
+    if payload.external_id and await db.leads.find_one({"external_id": payload.external_id}):
+        return {"ok": True, "skipped": "duplicate"}
+    lead = {
+        "id": new_id(),
+        "external_id": payload.external_id or "",
+        "name": name, "company": payload.company or "",
+        "phone": phone, "email": payload.email or "",
+        "source": "tradeindia",
+        "requirement": payload.product or payload.message or "",
+        "status": "new",
+        "notes": f"City: {payload.city or ''}, State: {payload.state or ''}",
+        "created_at": now_iso(),
+    }
+    await db.leads.insert_one(lead)
+    return {"ok": True}
+
+# ---------- GSTR-1 / GSTR-3B CSV exports ----------
+def _csv_response(rows: List[List[Any]], filename: str) -> Response:
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    for r in rows:
+        w.writerow(r)
+    return Response(content=buf.getvalue(), media_type="text/csv",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+@api.get("/accounting/gstr1.csv")
+async def gstr1_csv(period_from: Optional[str] = None, period_to: Optional[str] = None,
+                    user=Depends(require_roles("admin", "accountant", "ca"))):
+    q = {}
+    if period_from or period_to:
+        q["date"] = {}
+        if period_from: q["date"]["$gte"] = period_from
+        if period_to: q["date"]["$lte"] = period_to
+    invs = await db.invoices.find(q, {"_id": 0}).to_list(5000)
+    rows: List[List[Any]] = [["GSTIN/UIN of Recipient", "Receiver Name", "Invoice Number", "Invoice Date",
+                              "Invoice Value", "Place of Supply", "Reverse Charge", "Applicable % of Tax Rate",
+                              "Invoice Type", "E-Commerce GSTIN", "Rate", "Taxable Value", "Cess Amount"]]
+    for i in invs:
+        # group lines by rate
+        by_rate: Dict[float, float] = {}
+        for ln in i.get("lines", []):
+            r = float(ln.get("gst_rate", 0))
+            amt = float(ln.get("qty", 0)) * float(ln.get("rate", 0))
+            by_rate[r] = by_rate.get(r, 0) + amt
+        for rate, taxable in by_rate.items():
+            rows.append([
+                i.get("customer_gstin", ""), i.get("customer_name", ""), i.get("code", ""),
+                str(i.get("date", ""))[:10], round(i.get("total", 0), 2), i.get("place_of_supply", ""),
+                "N", "", "Regular", "", rate, round(taxable, 2), 0,
+            ])
+    return _csv_response(rows, f"GSTR1_{period_from or 'all'}_{period_to or 'all'}.csv")
+
+@api.get("/accounting/gstr3b.csv")
+async def gstr3b_csv(period_from: Optional[str] = None, period_to: Optional[str] = None,
+                     user=Depends(require_roles("admin", "accountant", "ca"))):
+    q = {}
+    if period_from or period_to:
+        q["date"] = {}
+        if period_from: q["date"]["$gte"] = period_from
+        if period_to: q["date"]["$lte"] = period_to
+    invs = await db.invoices.find(q, {"_id": 0}).to_list(5000)
+    exq = q.copy()
+    expenses = await db.expenses.find(exq, {"_id": 0}).to_list(5000)
+    out_tax = sum(i.get("subtotal", 0) for i in invs)
+    out_cgst = sum(i.get("cgst", 0) for i in invs)
+    out_sgst = sum(i.get("sgst", 0) for i in invs)
+    out_igst = sum(i.get("igst", 0) for i in invs)
+    in_tax = sum(e.get("amount", 0) for e in expenses)
+    in_gst = sum(e.get("gst_amount", 0) for e in expenses)
+    rows = [
+        ["GSTR-3B Summary", f"{period_from or ''} to {period_to or ''}"],
+        [],
+        ["3.1 Outward Supplies (Taxable)"],
+        ["Nature", "Taxable Value", "IGST", "CGST", "SGST", "Cess"],
+        ["(a) Outward taxable supplies (other than zero rated, nil rated and exempted)",
+         round(out_tax, 2), round(out_igst, 2), round(out_cgst, 2), round(out_sgst, 2), 0],
+        [],
+        ["4. Eligible ITC"],
+        ["Source", "IGST", "CGST", "SGST", "Cess"],
+        ["(A)(5) All other ITC", round(in_gst/2, 2) if not any(i.get("is_interstate") for i in invs) else 0,
+         round(in_gst/2, 2), round(in_gst/2, 2), 0],
+        [],
+        ["Net GST Payable", round(out_cgst + out_sgst + out_igst - in_gst, 2)],
+        ["Output taxable total", round(out_tax, 2)],
+        ["Input taxable total", round(in_tax, 2)],
+    ]
+    return _csv_response(rows, f"GSTR3B_{period_from or 'all'}_{period_to or 'all'}.csv")
+
+# ---------- 2FA TOTP ----------
+class TotpVerifyIn(BaseModel):
+    code: str
+
+@api.post("/auth/2fa/setup")
+async def totp_setup(user=Depends(get_current_user)):
+    u = await db.users.find_one({"id": user["id"]}, {"_id": 0})
+    if u.get("totp_enabled"):
+        raise HTTPException(400, "2FA already enabled")
+    secret = pyotp.random_base32()
+    await db.users.update_one({"id": user["id"]}, {"$set": {"totp_secret": secret, "totp_enabled": False}})
+    uri = pyotp.totp.TOTP(secret).provisioning_uri(name=u["email"], issuer_name="Precision ERP")
+    return {"secret": secret, "otpauth_url": uri}
+
+@api.post("/auth/2fa/enable")
+async def totp_enable(payload: TotpVerifyIn, user=Depends(get_current_user)):
+    u = await db.users.find_one({"id": user["id"]}, {"_id": 0})
+    secret = u.get("totp_secret")
+    if not secret:
+        raise HTTPException(400, "Run setup first")
+    if not pyotp.TOTP(secret).verify(payload.code, valid_window=1):
+        raise HTTPException(400, "Invalid code")
+    await db.users.update_one({"id": user["id"]}, {"$set": {"totp_enabled": True}})
+    await write_audit(user["name"], "2fa_enable", "user", user["id"])
+    return {"ok": True}
+
+@api.post("/auth/2fa/disable")
+async def totp_disable(payload: TotpVerifyIn, user=Depends(get_current_user)):
+    u = await db.users.find_one({"id": user["id"]}, {"_id": 0})
+    if not u.get("totp_enabled"): return {"ok": True}
+    if not pyotp.TOTP(u["totp_secret"]).verify(payload.code, valid_window=1):
+        raise HTTPException(400, "Invalid code")
+    await db.users.update_one({"id": user["id"]}, {"$set": {"totp_enabled": False, "totp_secret": ""}})
+    await write_audit(user["name"], "2fa_disable", "user", user["id"])
+    return {"ok": True}
+
+@api.get("/auth/2fa/status")
+async def totp_status(user=Depends(get_current_user)):
+    u = await db.users.find_one({"id": user["id"]}, {"_id": 0})
+    return {"enabled": bool(u.get("totp_enabled"))}
+
 
 # ---------------- Seed ----------------
 @app.on_event("startup")

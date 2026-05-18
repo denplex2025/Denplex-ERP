@@ -14,17 +14,25 @@ export default function Login() {
   const nav = useNavigate();
   const [email, setEmail] = useState("admin@erp.com");
   const [password, setPassword] = useState("Admin@123");
+  const [totp, setTotp] = useState("");
+  const [needs2fa, setNeeds2fa] = useState(false);
   const [loading, setLoading] = useState(false);
 
   const submit = async (e) => {
     e.preventDefault();
     setLoading(true);
     try {
-      await login(email, password);
+      await login(email, password, totp);
       toast.success("Welcome back");
       nav("/app");
     } catch (err) {
-      toast.error(err?.response?.data?.detail || "Login failed");
+      const detail = err?.response?.data?.detail || "Login failed";
+      if (typeof detail === "string" && detail.toLowerCase().includes("totp")) {
+        setNeeds2fa(true);
+        toast.message("Enter your 6-digit authenticator code");
+      } else {
+        toast.error(detail);
+      }
     } finally {
       setLoading(false);
     }
@@ -67,6 +75,12 @@ export default function Login() {
               <Label htmlFor="password" className="text-xs font-semibold uppercase tracking-wider text-slate-600">Password</Label>
               <Input id="password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} required className="mt-1.5 rounded-sm border-slate-300 focus-visible:ring-blue-600" data-testid="login-password-input" />
             </div>
+            {needs2fa && (
+              <div>
+                <Label htmlFor="totp" className="text-xs font-semibold uppercase tracking-wider text-slate-600">6-digit authenticator code</Label>
+                <Input id="totp" value={totp} onChange={(e) => setTotp(e.target.value)} required className="mt-1.5 rounded-sm border-slate-300 focus-visible:ring-blue-600 font-mono-tech" data-testid="login-totp-input" />
+              </div>
+            )}
             <Button type="submit" disabled={loading} className="w-full h-11 rounded-sm bg-blue-700 hover:bg-blue-800 font-medium" data-testid="login-submit-button">
               {loading ? "Signing in..." : "Sign in"}
             </Button>

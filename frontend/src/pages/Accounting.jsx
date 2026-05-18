@@ -40,6 +40,15 @@ export default function Accounting() {
   };
   const del = async (r) => { if (!window.confirm("Delete?")) return; await api.delete(`/expenses/${r.id}`); loadExpenses(); loadReport(); };
 
+  const downloadGstr = async (kind) => {
+    try {
+      const r = await api.get(`/accounting/${kind}.csv`, { params: { period_from: from || undefined, period_to: to || undefined }, responseType: "blob" });
+      const url = window.URL.createObjectURL(r.data);
+      const a = document.createElement("a"); a.href = url; a.download = `${kind.toUpperCase()}_${from || "all"}_${to || "all"}.csv`; a.click();
+      window.URL.revokeObjectURL(url);
+    } catch (e) { toast.error("Failed"); }
+  };
+
   return (
     <div data-testid="accounting-page">
       <PageHeader overline="Accounting" title="Accounting & GST" subtitle="GST input/output report and expense ledger. Restricted to Admin, Manager, Accountant, CA." />
@@ -55,6 +64,8 @@ export default function Accounting() {
               <div><Label className="text-xs uppercase">From</Label><Input type="date" value={from} onChange={e=>setFrom(e.target.value)} className="rounded-sm mt-1.5" /></div>
               <div><Label className="text-xs uppercase">To</Label><Input type="date" value={to} onChange={e=>setTo(e.target.value)} className="rounded-sm mt-1.5" /></div>
               <Button onClick={loadReport} className="rounded-sm bg-blue-700 hover:bg-blue-800" data-testid="run-gst-report"><FileSpreadsheet className="h-4 w-4 mr-1" /> Run report</Button>
+              <Button onClick={()=>downloadGstr("gstr1")} variant="outline" className="rounded-sm" data-testid="download-gstr1"><FileSpreadsheet className="h-4 w-4 mr-1" /> GSTR-1 CSV</Button>
+              <Button onClick={()=>downloadGstr("gstr3b")} variant="outline" className="rounded-sm" data-testid="download-gstr3b"><FileSpreadsheet className="h-4 w-4 mr-1" /> GSTR-3B CSV</Button>
             </div>
           </Card>
           {report && (

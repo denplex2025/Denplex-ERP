@@ -8,7 +8,7 @@ import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { PageHeader, Card, Th, Td, Empty, inr, fmtDate } from "@/components/erp/Primitives";
 import { StatusBadge } from "@/components/erp/CrudPage";
-import { Plus, Edit, Trash2, X, MessageCircle } from "lucide-react";
+import { Plus, Edit, Trash2, X, MessageCircle, FileDown, Mail } from "lucide-react";
 import { toast } from "sonner";
 
 /**
@@ -84,6 +84,50 @@ export default function LineItemDoc({
     window.open(`https://wa.me/${String(party.phone).replace(/\D/g,'')}?text=${msg}`, "_blank");
   };
 
+  const sendTwilioWA = async (row) => {
+    const party = parties.find(p => p.id === row[`${partyKey}_id`]);
+    if (!party?.phone) { toast.error("No phone on file"); return; }
+    const portalLink = row.po_ref ? `${window.location.origin}/portal?ref=${row.po_ref}` : `${window.location.origin}/portal`;
+    const body = `Hi ${party.name}, your ${title.replace(/s$/, '')} ${row.code} is ready. Total ₹${row.total}.\nTrack: ${portalLink}`;
+    try {
+      await api.post("/whatsapp/send", { to_phone: party.phone, body });
+      toast.success("WhatsApp queued via Twilio");
+    } catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
+  };
+
+  const downloadPdf = async (row) => {
+    try {
+      const r = await api.get(`${endpoint}/${row.id}/pdf`, { responseType: "blob" });
+      const url = window.URL.createObjectURL(r.data);
+      const a = document.createElement("a");
+      a.href = url; a.download = `${row.code}.pdf`; a.click();
+      window.URL.revokeObjectURL(url);
+    } catch (e) { toast.error("PDF failed"); }
+  };
+
+  const emailDoc = async (row) => {
+    const party = parties.find(p => p.id === row[`${partyKey}_id`]);
+    const toEmail = party?.email; if (!toEmail) { toast.error("Customer email missing"); return; }
+    try {
+      const r = await api.get(`${endpoint}/${row.id}/pdf`, { responseType: "blob" });
+      const reader = new FileReader();
+      reader.onload = async () => {
+        const b64 = String(reader.result).split(",")[1];
+        try {
+          await api.post("/email/send", {
+            to: [toEmail],
+            subject: `${title.replace(/s$/, '')} ${row.code}`,
+            html: `<p>Hi ${party.name},</p><p>Please find ${title.replace(/s$/, '')} <strong>${row.code}</strong> attached. Total: ₹${row.total}.</p><p>Thank you for your business.</p>`,
+            attachment_base64: b64,
+            attachment_filename: `${row.code}.pdf`,
+          });
+          toast.success(`Emailed to ${toEmail}`);
+        } catch (e) { toast.error(e?.response?.data?.detail || "Email failed"); }
+      };
+      reader.readAsDataURL(r.data);
+    } catch (e) { toast.error("PDF failed"); }
+  };
+
   return (
     <div data-testid={testid}>
       <PageHeader
@@ -106,7 +150,10 @@ export default function LineItemDoc({
                     <Td className="font-mono-tech">{inr(r.total)}</Td>
                     <Td><StatusBadge status={r.status} /></Td>
                     <Td className="text-right whitespace-nowrap">
-                      <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => sendWhatsApp(r)} title="WhatsApp"><MessageCircle className="h-4 w-4 text-emerald-600" /></Button>
+                      <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => downloadPdf(r)} title="PDF" data-testid={`row-pdf-${r.id}`}><FileDown className="h-4 w-4 text-slate-700" /></Button>
+                      <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => emailDoc(r)} title="Email PDF" data-testid={`row-email-${r.id}`}><Mail className="h-4 w-4 text-blue-700" /></Button>
+                      <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => sendWhatsApp(r)} title="WhatsApp web"><MessageCircle className="h-4 w-4 text-emerald-600" /></Button>
+                      <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => sendTwilioWA(r)} title="WhatsApp via Twilio" data-testid={`row-twilio-${r.id}`}><MessageCircle className="h-4 w-4 text-emerald-800" strokeWidth={2.5} /></Button>
                       <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => openEdit(r)} data-testid={`row-edit-${r.id}`}><Edit className="h-4 w-4" /></Button>
                       <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => del(r)} data-testid={`row-delete-${r.id}`}><Trash2 className="h-4 w-4 text-red-600" /></Button>
                     </Td>

@@ -5,7 +5,7 @@ import { Toaster } from "sonner";
 import {
   LayoutDashboard, Boxes, Layers, ClipboardList, FileText,
   ShoppingCart, Receipt, Users, UserPlus, Truck, ShieldCheck,
-  FileBox, Settings, LogOut, Cog, Menu, Calculator, UsersRound, Megaphone
+  FileBox, Settings as SettingsIcon, LogOut, Cog, Menu, Calculator, UsersRound, Megaphone, Wrench, ScrollText
 } from "lucide-react";
 import { useState } from "react";
 
@@ -26,7 +26,9 @@ const NAV = [
   { to: "/app/documents", label: "Documents (ISO)", icon: FileBox, testid: "nav-documents" },
   { to: "/app/hr", label: "HR", icon: UsersRound, testid: "nav-hr" },
   { to: "/app/marketing", label: "Marketing", icon: Megaphone, testid: "nav-marketing" },
-  { to: "/app/users", label: "Users", icon: Settings, testid: "nav-users", adminOnly: true },
+  { to: "/app/settings", label: "Settings", icon: Wrench, testid: "nav-settings", adminOnly: true },
+  { to: "/app/audit", label: "Audit Log", icon: ScrollText, testid: "nav-audit", adminOnly: true },
+  { to: "/app/users", label: "Users", icon: SettingsIcon, testid: "nav-users", adminOnly: true },
 ];
 
 export default function AppLayout() {

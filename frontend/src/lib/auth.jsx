@@ -22,8 +22,10 @@ export function AuthProvider({ children }) {
     }).finally(() => setLoading(false));
   }, []);
 
-  const login = async (email, password) => {
-    const r = await api.post("/auth/login", { email, password });
+  const login = async (email, password, totpCode) => {
+    const body = { email, password };
+    if (totpCode) body.totp_code = totpCode;
+    const r = await api.post("/auth/login", body);
     localStorage.setItem("erp_token", r.data.token);
     localStorage.setItem("erp_user", JSON.stringify(r.data.user));
     setUser(r.data.user);
