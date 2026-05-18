@@ -1,74 +1,1026 @@
-from fastapi import FastAPI, APIRouter
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, Query
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
-from pathlib import Path
-from pydantic import BaseModel, Field, ConfigDict
-from typing import List
+import bcrypt
+import jwt
 import uuid
-from datetime import datetime, timezone
-
+import base64
+from pathlib import Path
+from pydantic import BaseModel, Field, EmailStr, ConfigDict
+from typing import List, Optional, Literal, Any, Dict
+from datetime import datetime, timezone, timedelta
+from emergentintegrations.llm.chat import LlmChat, UserMessage, ImageContent
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# MongoDB connection
-mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+MONGO_URL = os.environ['MONGO_URL']
+DB_NAME = os.environ['DB_NAME']
+JWT_SECRET = os.environ.get('JWT_SECRET', 'dev-secret')
+EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY', '')
 
-# Create the main app without a prefix
-app = FastAPI()
+client = AsyncIOMotorClient(MONGO_URL)
+db = client[DB_NAME]
 
-# Create a router with the /api prefix
-api_router = APIRouter(prefix="/api")
+app = FastAPI(title="Precision ERP")
+api = APIRouter(prefix="/api")
+security = HTTPBearer(auto_error=False)
+
+ROLES = ["admin", "manager", "production", "qc", "accountant", "ca", "sales", "employee"]
+
+# ---------------- helpers ----------------
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+def new_id() -> str:
+    return str(uuid.uuid4())
+
+def hash_password(pw: str) -> str:
+    return bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
+
+def verify_password(pw: str, h: str) -> bool:
+    try:
+        return bcrypt.checkpw(pw.encode(), h.encode())
+    except Exception:
+        return False
+
+def create_token(uid: str, role: str) -> str:
+    payload = {"sub": uid, "role": role, "exp": datetime.now(timezone.utc) + timedelta(days=7)}
+    return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
+
+async def get_current_user(creds: Optional[HTTPAuthorizationCredentials] = Depends(security)) -> Dict[str, Any]:
+    if not creds:
+        raise HTTPException(401, "Not authenticated")
+    try:
+        payload = jwt.decode(creds.credentials, JWT_SECRET, algorithms=["HS256"])
+    except Exception:
+        raise HTTPException(401, "Invalid token")
+    user = await db.users.find_one({"id": payload["sub"]}, {"_id": 0, "password": 0})
+    if not user:
+        raise HTTPException(401, "User not found")
+    return user
+
+def require_roles(*allowed: str):
+    async def checker(user: Dict[str, Any] = Depends(get_current_user)):
+        if user["role"] not in allowed and user["role"] != "admin":
+            raise HTTPException(403, "Insufficient permissions")
+        return user
+    return checker
+
+async def next_seq(name: str) -> int:
+    doc = await db.counters.find_one_and_update(
+        {"_id": name},
+        {"$inc": {"seq": 1}},
+        upsert=True,
+        return_document=True,
+    )
+    return doc["seq"] if doc else 1
+
+async def gen_code(prefix: str, name: str) -> str:
+    n = await next_seq(name)
+    year = datetime.now(timezone.utc).strftime("%y")
+    return f"{prefix}-{year}-{n:04d}"
+
+# ---------------- Models ----------------
+class RegisterIn(BaseModel):
+    name: str
+    email: EmailStr
+    password: str
+    role: Literal["admin", "manager", "production", "qc", "accountant", "ca", "sales", "employee"] = "employee"
+
+class LoginIn(BaseModel):
+    email: EmailStr
+    password: str
+
+class Customer(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    code: Optional[str] = None
+    name: str
+    contact_person: Optional[str] = ""
+    phone: Optional[str] = ""
+    email: Optional[str] = ""
+    gstin: Optional[str] = ""
+    address: Optional[str] = ""
+    customer_type: Literal["repeat", "one_time"] = "one_time"
+    orders_count: int = 0
+    created_at: str = Field(default_factory=now_iso)
+
+class Lead(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    name: str
+    company: Optional[str] = ""
+    phone: Optional[str] = ""
+    email: Optional[str] = ""
+    source: Optional[str] = "manual"  # manual, b2b, website
+    requirement: Optional[str] = ""
+    status: Literal["new", "contacted", "qualified", "converted", "lost"] = "new"
+    notes: Optional[str] = ""
+    created_at: str = Field(default_factory=now_iso)
+
+class Supplier(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    name: str
+    contact_person: Optional[str] = ""
+    phone: Optional[str] = ""
+    email: Optional[str] = ""
+    gstin: Optional[str] = ""
+    address: Optional[str] = ""
+    created_at: str = Field(default_factory=now_iso)
+
+class InventoryItem(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    sku: str
+    name: str
+    category: Optional[str] = "raw"  # raw, wip, finished, tool, consumable
+    uom: str = "pcs"
+    qty_on_hand: float = 0
+    qty_in_process: float = 0
+    reorder_level: float = 0
+    unit_cost: float = 0
+    hsn: Optional[str] = ""
+    gst_rate: float = 18.0
+    location: Optional[str] = ""
+    created_at: str = Field(default_factory=now_iso)
+
+class StockMovement(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    item_id: str
+    item_sku: str
+    item_name: str
+    type: Literal["in", "out", "adjust", "in_process"]
+    qty: float
+    ref: Optional[str] = ""
+    notes: Optional[str] = ""
+    by_user: Optional[str] = ""
+    created_at: str = Field(default_factory=now_iso)
+
+class BOMLine(BaseModel):
+    item_id: str
+    item_name: str
+    qty: float
+    uom: str = "pcs"
+
+class BOM(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    code: Optional[str] = None
+    product_name: str
+    description: Optional[str] = ""
+    design_code: Optional[str] = ""
+    solidworks_url: Optional[str] = ""
+    lines: List[BOMLine] = []
+    created_at: str = Field(default_factory=now_iso)
+
+class WorkOrder(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    code: Optional[str] = None
+    customer_id: Optional[str] = ""
+    customer_name: Optional[str] = ""
+    bom_id: Optional[str] = ""
+    product: str
+    qty: float
+    po_ref: Optional[str] = ""
+    status: Literal["planned", "in_progress", "qc", "completed", "on_hold", "cancelled"] = "planned"
+    priority: Literal["low", "medium", "high"] = "medium"
+    start_date: Optional[str] = ""
+    due_date: Optional[str] = ""
+    notes: Optional[str] = ""
+    progress: int = 0
+    created_at: str = Field(default_factory=now_iso)
+
+class JobCard(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    code: Optional[str] = None
+    work_order_id: str
+    work_order_code: Optional[str] = ""
+    operation: str
+    machine: Optional[str] = ""
+    operator: Optional[str] = ""
+    qty_planned: float = 0
+    qty_done: float = 0
+    status: Literal["pending", "in_progress", "done"] = "pending"
+    started_at: Optional[str] = ""
+    finished_at: Optional[str] = ""
+    notes: Optional[str] = ""
+    created_at: str = Field(default_factory=now_iso)
+
+class QuoteLine(BaseModel):
+    description: str
+    qty: float
+    rate: float
+    gst_rate: float = 18.0
+
+class Quotation(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    code: Optional[str] = None
+    customer_id: str
+    customer_name: str
+    date: str = Field(default_factory=now_iso)
+    valid_until: Optional[str] = ""
+    lines: List[QuoteLine] = []
+    subtotal: float = 0
+    gst_total: float = 0
+    total: float = 0
+    status: Literal["draft", "sent", "accepted", "rejected"] = "draft"
+    notes: Optional[str] = ""
+    created_at: str = Field(default_factory=now_iso)
+
+class POLine(BaseModel):
+    description: str
+    qty: float
+    rate: float
+    gst_rate: float = 18.0
+
+class PurchaseOrder(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    code: Optional[str] = None
+    supplier_id: str
+    supplier_name: str
+    date: str = Field(default_factory=now_iso)
+    delivery_date: Optional[str] = ""
+    lines: List[POLine] = []
+    subtotal: float = 0
+    gst_total: float = 0
+    total: float = 0
+    status: Literal["draft", "sent", "received", "cancelled"] = "draft"
+    notes: Optional[str] = ""
+    created_at: str = Field(default_factory=now_iso)
+
+class InvoiceLine(BaseModel):
+    description: str
+    hsn: Optional[str] = ""
+    qty: float
+    rate: float
+    gst_rate: float = 18.0
+
+class Invoice(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    code: Optional[str] = None
+    customer_id: str
+    customer_name: str
+    customer_gstin: Optional[str] = ""
+    place_of_supply: Optional[str] = ""
+    is_interstate: bool = False
+    date: str = Field(default_factory=now_iso)
+    due_date: Optional[str] = ""
+    lines: List[InvoiceLine] = []
+    subtotal: float = 0
+    cgst: float = 0
+    sgst: float = 0
+    igst: float = 0
+    total: float = 0
+    status: Literal["draft", "sent", "paid", "overdue"] = "draft"
+    notes: Optional[str] = ""
+    created_at: str = Field(default_factory=now_iso)
+
+class QCReport(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    code: Optional[str] = None
+    work_order_id: Optional[str] = ""
+    work_order_code: Optional[str] = ""
+    customer_id: Optional[str] = ""
+    customer_name: Optional[str] = ""
+    inspector: Optional[str] = ""
+    inspection_date: str = Field(default_factory=now_iso)
+    parameter: str
+    spec: Optional[str] = ""
+    measured: Optional[str] = ""
+    result: Literal["pass", "fail", "rework"] = "pass"
+    photos: List[str] = []  # base64 strings
+    notes: Optional[str] = ""
+    created_at: str = Field(default_factory=now_iso)
+
+class DocumentMeta(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    name: str
+    category: Optional[str] = "general"  # general, iso, drawing, qc, packaging
+    linked_to: Optional[str] = ""  # work_order_id / invoice_id etc
+    linked_type: Optional[str] = ""
+    file_base64: str  # data URL
+    mime: Optional[str] = ""
+    size: int = 0
+    uploaded_by: Optional[str] = ""
+    created_at: str = Field(default_factory=now_iso)
+
+class BillScanIn(BaseModel):
+    image_base64: str  # raw base64 (no data URL prefix) or data URL
+    mime: str = "image/jpeg"
+
+# ---------------- P1: Accounting / HR / Marketing models ----------------
+class Expense(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    date: str = Field(default_factory=now_iso)
+    category: str = "general"
+    description: str
+    vendor: Optional[str] = ""
+    amount: float = 0
+    gst_rate: float = 0
+    gst_amount: float = 0
+    total: float = 0
+    payment_mode: Optional[str] = "bank"
+    notes: Optional[str] = ""
+    created_at: str = Field(default_factory=now_iso)
+
+class Employee(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    code: Optional[str] = None
+    name: str
+    designation: Optional[str] = ""
+    department: Optional[str] = ""
+    phone: Optional[str] = ""
+    email: Optional[str] = ""
+    join_date: Optional[str] = ""
+    monthly_salary: float = 0
+    status: Literal["active", "inactive"] = "active"
+    notes: Optional[str] = ""
+    created_at: str = Field(default_factory=now_iso)
+
+class Attendance(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    employee_id: str
+    employee_name: Optional[str] = ""
+    date: str
+    status: Literal["present", "absent", "half_day", "leave"] = "present"
+    hours: float = 8
+    notes: Optional[str] = ""
+    created_at: str = Field(default_factory=now_iso)
+
+class Campaign(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    title: str
+    channel: Literal["whatsapp", "instagram", "linkedin", "facebook", "email", "other"] = "whatsapp"
+    content: Optional[str] = ""
+    scheduled_for: Optional[str] = ""
+    status: Literal["draft", "scheduled", "published"] = "draft"
+    metrics: Optional[str] = ""
+    created_at: str = Field(default_factory=now_iso)
+
+class DocRevIn(BaseModel):
+    file_base64: str
+    notes: Optional[str] = ""
+
+# ---------------- Auth ----------------
+@api.post("/auth/register")
+async def register(payload: RegisterIn, current=Depends(get_current_user)):
+    if current["role"] != "admin":
+        raise HTTPException(403, "Only admin can register users")
+    if await db.users.find_one({"email": payload.email.lower()}):
+        raise HTTPException(400, "Email already exists")
+    user = {
+        "id": new_id(),
+        "name": payload.name,
+        "email": payload.email.lower(),
+        "role": payload.role,
+        "password": hash_password(payload.password),
+        "created_at": now_iso(),
+    }
+    await db.users.insert_one(user)
+    user.pop("_id", None); user.pop("password", None)
+    return user
+
+@api.post("/auth/login")
+async def login(payload: LoginIn):
+    user = await db.users.find_one({"email": payload.email.lower()})
+    if not user or not verify_password(payload.password, user["password"]):
+        raise HTTPException(401, "Invalid credentials")
+    token = create_token(user["id"], user["role"])
+    return {"token": token, "user": {"id": user["id"], "name": user["name"], "email": user["email"], "role": user["role"]}}
+
+@api.get("/auth/me")
+async def me(user=Depends(get_current_user)):
+    return user
+
+@api.get("/users")
+async def list_users(user=Depends(require_roles("admin"))):
+    return await db.users.find({}, {"_id": 0, "password": 0}).to_list(500)
+
+# ---------------- Generic CRUD helpers ----------------
+def serialize(d: Dict[str, Any]) -> Dict[str, Any]:
+    d.pop("_id", None)
+    return d
+
+async def list_collection(coll, query: Dict = None, sort_key: str = "created_at"):
+    cursor = coll.find(query or {}, {"_id": 0}).sort(sort_key, -1)
+    return await cursor.to_list(2000)
+
+# ---------------- Customers ----------------
+@api.post("/customers")
+async def create_customer(c: Customer, user=Depends(get_current_user)):
+    doc = c.model_dump()
+    doc["code"] = await gen_code("CUST", "customer")
+    await db.customers.insert_one(doc)
+    return serialize(doc)
+
+@api.get("/customers")
+async def list_customers(user=Depends(get_current_user)):
+    return await list_collection(db.customers)
+
+@api.put("/customers/{cid}")
+async def update_customer(cid: str, c: Customer, user=Depends(get_current_user)):
+    data = c.model_dump(); data.pop("id", None); data.pop("created_at", None)
+    await db.customers.update_one({"id": cid}, {"$set": data})
+    return {"ok": True}
+
+@api.delete("/customers/{cid}")
+async def del_customer(cid: str, user=Depends(require_roles("admin", "manager"))):
+    await db.customers.delete_one({"id": cid})
+    return {"ok": True}
+
+# ---------------- Leads ----------------
+@api.post("/leads")
+async def create_lead(l: Lead, user=Depends(get_current_user)):
+    doc = l.model_dump()
+    await db.leads.insert_one(doc)
+    return serialize(doc)
+
+@api.get("/leads")
+async def list_leads(user=Depends(get_current_user)):
+    return await list_collection(db.leads)
+
+@api.put("/leads/{lid}")
+async def update_lead(lid: str, l: Lead, user=Depends(get_current_user)):
+    data = l.model_dump(); data.pop("id", None); data.pop("created_at", None)
+    await db.leads.update_one({"id": lid}, {"$set": data})
+    return {"ok": True}
+
+@api.delete("/leads/{lid}")
+async def del_lead(lid: str, user=Depends(get_current_user)):
+    await db.leads.delete_one({"id": lid})
+    return {"ok": True}
+
+# ---------------- Suppliers ----------------
+@api.post("/suppliers")
+async def create_supplier(s: Supplier, user=Depends(get_current_user)):
+    doc = s.model_dump()
+    await db.suppliers.insert_one(doc)
+    return serialize(doc)
+
+@api.get("/suppliers")
+async def list_suppliers(user=Depends(get_current_user)):
+    return await list_collection(db.suppliers)
+
+@api.put("/suppliers/{sid}")
+async def update_supplier(sid: str, s: Supplier, user=Depends(get_current_user)):
+    data = s.model_dump(); data.pop("id", None); data.pop("created_at", None)
+    await db.suppliers.update_one({"id": sid}, {"$set": data})
+    return {"ok": True}
+
+@api.delete("/suppliers/{sid}")
+async def del_supplier(sid: str, user=Depends(get_current_user)):
+    await db.suppliers.delete_one({"id": sid})
+    return {"ok": True}
+
+# ---------------- Inventory ----------------
+@api.post("/inventory/items")
+async def create_item(it: InventoryItem, user=Depends(get_current_user)):
+    if await db.items.find_one({"sku": it.sku}):
+        raise HTTPException(400, "SKU already exists")
+    doc = it.model_dump()
+    await db.items.insert_one(doc)
+    return serialize(doc)
+
+@api.get("/inventory/items")
+async def list_items(user=Depends(get_current_user)):
+    return await list_collection(db.items, sort_key="name")
+
+@api.put("/inventory/items/{iid}")
+async def update_item(iid: str, it: InventoryItem, user=Depends(get_current_user)):
+    data = it.model_dump(); data.pop("id", None); data.pop("created_at", None)
+    await db.items.update_one({"id": iid}, {"$set": data})
+    return {"ok": True}
+
+@api.delete("/inventory/items/{iid}")
+async def del_item(iid: str, user=Depends(require_roles("admin", "manager"))):
+    await db.items.delete_one({"id": iid})
+    return {"ok": True}
+
+@api.post("/inventory/movements")
+async def create_movement(m: StockMovement, user=Depends(get_current_user)):
+    item = await db.items.find_one({"id": m.item_id}, {"_id": 0})
+    if not item:
+        raise HTTPException(404, "Item not found")
+    qty = float(m.qty)
+    new_oh = item["qty_on_hand"]
+    new_ip = item.get("qty_in_process", 0)
+    if m.type == "in":
+        new_oh += qty
+    elif m.type == "out":
+        new_oh -= qty
+    elif m.type == "adjust":
+        new_oh = qty
+    elif m.type == "in_process":
+        new_ip += qty
+        new_oh -= qty
+    await db.items.update_one({"id": m.item_id}, {"$set": {"qty_on_hand": new_oh, "qty_in_process": new_ip}})
+    doc = m.model_dump()
+    doc["item_sku"] = item["sku"]
+    doc["item_name"] = item["name"]
+    doc["by_user"] = user["name"]
+    await db.movements.insert_one(doc)
+    return serialize(doc)
+
+@api.get("/inventory/movements")
+async def list_movements(user=Depends(get_current_user)):
+    return await list_collection(db.movements)
+
+@api.post("/inventory/scan-bill")
+async def scan_bill(payload: BillScanIn, user=Depends(get_current_user)):
+    if not EMERGENT_LLM_KEY:
+        raise HTTPException(500, "LLM key not configured")
+    b64 = payload.image_base64
+    if "," in b64 and b64.startswith("data:"):
+        b64 = b64.split(",", 1)[1]
+    try:
+        chat = LlmChat(
+            api_key=EMERGENT_LLM_KEY,
+            session_id=f"bill-{new_id()}",
+            system_message="You are an expert at extracting structured data from Indian supplier purchase bills/invoices. Return ONLY valid JSON, no markdown fences."
+        ).with_model("anthropic", "claude-sonnet-4-5-20250929")
+        prompt = (
+            "Extract the bill into JSON with keys: supplier_name, supplier_gstin, bill_number, bill_date, "
+            "items (array of {description, hsn, qty, uom, rate, amount, gst_rate}), subtotal, cgst, sgst, igst, total. "
+            "Use empty string if a field is missing. Use 0 for missing numbers. Output ONLY the JSON object."
+        )
+        msg = UserMessage(text=prompt, file_contents=[ImageContent(image_base64=b64)])
+        resp = await chat.send_message(msg)
+        text = str(resp).strip()
+        if text.startswith("```"):
+            text = text.strip("`")
+            if text.lower().startswith("json"):
+                text = text[4:]
+            text = text.strip()
+        import json
+        try:
+            data = json.loads(text)
+        except Exception:
+            # try to find JSON substring
+            s = text.find("{"); e = text.rfind("}")
+            data = json.loads(text[s:e+1]) if s != -1 and e != -1 else {"raw": text}
+        return {"ok": True, "extracted": data}
+    except Exception as ex:
+        logger.exception("scan-bill failed")
+        raise HTTPException(500, f"AI extraction failed: {ex}")
+
+# ---------------- BOM ----------------
+@api.post("/bom")
+async def create_bom(b: BOM, user=Depends(get_current_user)):
+    doc = b.model_dump()
+    doc["code"] = await gen_code("BOM", "bom")
+    if not doc.get("design_code"):
+        doc["design_code"] = f"DSGN-{datetime.now(timezone.utc).strftime('%y%m')}-{await next_seq('design'):04d}"
+    await db.boms.insert_one(doc)
+    return serialize(doc)
+
+@api.get("/bom")
+async def list_bom(user=Depends(get_current_user)):
+    return await list_collection(db.boms)
+
+@api.put("/bom/{bid}")
+async def update_bom(bid: str, b: BOM, user=Depends(get_current_user)):
+    data = b.model_dump(); data.pop("id", None); data.pop("created_at", None)
+    await db.boms.update_one({"id": bid}, {"$set": data})
+    return {"ok": True}
+
+@api.delete("/bom/{bid}")
+async def del_bom(bid: str, user=Depends(get_current_user)):
+    await db.boms.delete_one({"id": bid})
+    return {"ok": True}
+
+# ---------------- Work Orders ----------------
+@api.post("/work-orders")
+async def create_wo(w: WorkOrder, user=Depends(get_current_user)):
+    doc = w.model_dump()
+    doc["code"] = await gen_code("WO", "wo")
+    await db.work_orders.insert_one(doc)
+    if doc.get("customer_id"):
+        await db.customers.update_one({"id": doc["customer_id"]}, {"$inc": {"orders_count": 1}})
+        cust = await db.customers.find_one({"id": doc["customer_id"]}, {"_id": 0})
+        if cust and cust.get("orders_count", 0) >= 2:
+            await db.customers.update_one({"id": doc["customer_id"]}, {"$set": {"customer_type": "repeat"}})
+    return serialize(doc)
+
+@api.get("/work-orders")
+async def list_wo(user=Depends(get_current_user)):
+    return await list_collection(db.work_orders)
+
+@api.put("/work-orders/{wid}")
+async def update_wo(wid: str, w: WorkOrder, user=Depends(get_current_user)):
+    data = w.model_dump(); data.pop("id", None); data.pop("created_at", None)
+    await db.work_orders.update_one({"id": wid}, {"$set": data})
+    return {"ok": True}
+
+@api.delete("/work-orders/{wid}")
+async def del_wo(wid: str, user=Depends(require_roles("admin", "manager"))):
+    await db.work_orders.delete_one({"id": wid})
+    return {"ok": True}
+
+# ---------------- Job Cards ----------------
+@api.post("/job-cards")
+async def create_jc(j: JobCard, user=Depends(get_current_user)):
+    doc = j.model_dump()
+    doc["code"] = await gen_code("JC", "jc")
+    wo = await db.work_orders.find_one({"id": j.work_order_id}, {"_id": 0})
+    if wo:
+        doc["work_order_code"] = wo.get("code", "")
+    await db.job_cards.insert_one(doc)
+    return serialize(doc)
+
+@api.get("/job-cards")
+async def list_jc(user=Depends(get_current_user)):
+    return await list_collection(db.job_cards)
+
+@api.put("/job-cards/{jid}")
+async def update_jc(jid: str, j: JobCard, user=Depends(get_current_user)):
+    data = j.model_dump(); data.pop("id", None); data.pop("created_at", None)
+    await db.job_cards.update_one({"id": jid}, {"$set": data})
+    return {"ok": True}
+
+@api.delete("/job-cards/{jid}")
+async def del_jc(jid: str, user=Depends(get_current_user)):
+    await db.job_cards.delete_one({"id": jid})
+    return {"ok": True}
+
+# ---------------- Helper: totals ----------------
+def compute_totals(lines: List[Dict[str, Any]]) -> Dict[str, float]:
+    subtotal = 0.0; gst_total = 0.0
+    for l in lines:
+        amt = float(l.get("qty", 0)) * float(l.get("rate", 0))
+        gst = amt * float(l.get("gst_rate", 0)) / 100.0
+        subtotal += amt; gst_total += gst
+    return {"subtotal": round(subtotal, 2), "gst_total": round(gst_total, 2), "total": round(subtotal + gst_total, 2)}
+
+# ---------------- Quotations ----------------
+@api.post("/quotations")
+async def create_quote(q: Quotation, user=Depends(get_current_user)):
+    doc = q.model_dump()
+    doc["code"] = await gen_code("QT", "quote")
+    t = compute_totals([l for l in doc["lines"]])
+    doc.update(t)
+    await db.quotations.insert_one(doc)
+    return serialize(doc)
+
+@api.get("/quotations")
+async def list_quotes(user=Depends(get_current_user)):
+    return await list_collection(db.quotations)
+
+@api.put("/quotations/{qid}")
+async def update_quote(qid: str, q: Quotation, user=Depends(get_current_user)):
+    data = q.model_dump(); data.pop("id", None); data.pop("created_at", None)
+    t = compute_totals(data["lines"]); data.update(t)
+    await db.quotations.update_one({"id": qid}, {"$set": data})
+    return {"ok": True}
+
+@api.delete("/quotations/{qid}")
+async def del_quote(qid: str, user=Depends(get_current_user)):
+    await db.quotations.delete_one({"id": qid})
+    return {"ok": True}
+
+# ---------------- Purchase Orders ----------------
+@api.post("/purchase-orders")
+async def create_po(p: PurchaseOrder, user=Depends(get_current_user)):
+    doc = p.model_dump()
+    doc["code"] = await gen_code("PO", "po")
+    t = compute_totals(doc["lines"]); doc.update(t)
+    await db.purchase_orders.insert_one(doc)
+    return serialize(doc)
+
+@api.get("/purchase-orders")
+async def list_po(user=Depends(get_current_user)):
+    return await list_collection(db.purchase_orders)
+
+@api.put("/purchase-orders/{pid}")
+async def update_po(pid: str, p: PurchaseOrder, user=Depends(get_current_user)):
+    data = p.model_dump(); data.pop("id", None); data.pop("created_at", None)
+    t = compute_totals(data["lines"]); data.update(t)
+    await db.purchase_orders.update_one({"id": pid}, {"$set": data})
+    return {"ok": True}
+
+@api.delete("/purchase-orders/{pid}")
+async def del_po(pid: str, user=Depends(require_roles("admin", "manager"))):
+    await db.purchase_orders.delete_one({"id": pid})
+    return {"ok": True}
+
+# ---------------- Invoices ----------------
+def compute_invoice_totals(lines: List[Dict[str, Any]], interstate: bool) -> Dict[str, float]:
+    subtotal = 0.0; gst = 0.0
+    for l in lines:
+        amt = float(l.get("qty", 0)) * float(l.get("rate", 0))
+        g = amt * float(l.get("gst_rate", 0)) / 100.0
+        subtotal += amt; gst += g
+    if interstate:
+        return {"subtotal": round(subtotal, 2), "cgst": 0.0, "sgst": 0.0, "igst": round(gst, 2), "total": round(subtotal + gst, 2)}
+    return {"subtotal": round(subtotal, 2), "cgst": round(gst/2, 2), "sgst": round(gst/2, 2), "igst": 0.0, "total": round(subtotal + gst, 2)}
+
+@api.post("/invoices")
+async def create_invoice(inv: Invoice, user=Depends(get_current_user)):
+    doc = inv.model_dump()
+    doc["code"] = await gen_code("INV", "invoice")
+    doc.update(compute_invoice_totals(doc["lines"], doc.get("is_interstate", False)))
+    await db.invoices.insert_one(doc)
+    return serialize(doc)
+
+@api.get("/invoices")
+async def list_invoices(user=Depends(get_current_user)):
+    return await list_collection(db.invoices)
+
+@api.put("/invoices/{iid}")
+async def update_invoice(iid: str, inv: Invoice, user=Depends(get_current_user)):
+    data = inv.model_dump(); data.pop("id", None); data.pop("created_at", None)
+    data.update(compute_invoice_totals(data["lines"], data.get("is_interstate", False)))
+    await db.invoices.update_one({"id": iid}, {"$set": data})
+    return {"ok": True}
+
+@api.delete("/invoices/{iid}")
+async def del_invoice(iid: str, user=Depends(require_roles("admin", "manager", "accountant", "ca"))):
+    await db.invoices.delete_one({"id": iid})
+    return {"ok": True}
+
+# ---------------- QC Reports ----------------
+@api.post("/qc-reports")
+async def create_qc(q: QCReport, user=Depends(get_current_user)):
+    doc = q.model_dump()
+    doc["code"] = await gen_code("QC", "qc")
+    if q.work_order_id:
+        wo = await db.work_orders.find_one({"id": q.work_order_id}, {"_id": 0})
+        if wo:
+            doc["work_order_code"] = wo.get("code", "")
+            doc["customer_id"] = doc.get("customer_id") or wo.get("customer_id", "")
+            doc["customer_name"] = doc.get("customer_name") or wo.get("customer_name", "")
+    await db.qc_reports.insert_one(doc)
+    return serialize(doc)
+
+@api.get("/qc-reports")
+async def list_qc(user=Depends(get_current_user)):
+    return await list_collection(db.qc_reports)
+
+@api.delete("/qc-reports/{qid}")
+async def del_qc(qid: str, user=Depends(require_roles("admin", "manager", "qc"))):
+    await db.qc_reports.delete_one({"id": qid})
+    return {"ok": True}
+
+# ---------------- Documents ----------------
+@api.post("/documents")
+async def upload_doc(d: DocumentMeta, user=Depends(get_current_user)):
+    doc = d.model_dump()
+    doc["uploaded_by"] = user["name"]
+    await db.documents.insert_one(doc)
+    return serialize(doc)
+
+@api.get("/documents")
+async def list_docs(linked_to: Optional[str] = None, user=Depends(get_current_user)):
+    q = {"linked_to": linked_to} if linked_to else {}
+    return await db.documents.find(q, {"_id": 0}).sort("created_at", -1).to_list(500)
+
+@api.delete("/documents/{did}")
+async def del_doc(did: str, user=Depends(get_current_user)):
+    await db.documents.delete_one({"id": did})
+    return {"ok": True}
+
+# ---------------- Dashboard ----------------
+@api.get("/dashboard/stats")
+async def dashboard_stats(user=Depends(get_current_user)):
+    items = await db.items.find({}, {"_id": 0}).to_list(5000)
+    low_stock = [i for i in items if i["qty_on_hand"] <= i.get("reorder_level", 0)]
+    open_wo = await db.work_orders.count_documents({"status": {"$in": ["planned", "in_progress"]}})
+    qc_pending = await db.work_orders.count_documents({"status": "qc"})
+    leads_open = await db.leads.count_documents({"status": {"$in": ["new", "contacted", "qualified"]}})
+    customers = await db.customers.count_documents({})
+    invoices = await db.invoices.find({}, {"_id": 0}).to_list(2000)
+    revenue = sum([i.get("total", 0) for i in invoices if i.get("status") in ("paid", "sent")])
+    repeat_customers = await db.customers.count_documents({"customer_type": "repeat"})
+    # recent wo
+    recent = await db.work_orders.find({}, {"_id": 0}).sort("created_at", -1).to_list(8)
+    return {
+        "open_wo": open_wo,
+        "qc_pending": qc_pending,
+        "low_stock_count": len(low_stock),
+        "low_stock_items": low_stock[:10],
+        "leads_open": leads_open,
+        "customers": customers,
+        "repeat_customers": repeat_customers,
+        "revenue": round(revenue, 2),
+        "items_count": len(items),
+        "recent_wo": recent,
+    }
+
+# ---------------- P1: Accounting (Expenses + GST Report) ----------------
+@api.post("/expenses")
+async def create_expense(e: Expense, user=Depends(require_roles("admin", "manager", "accountant", "ca"))):
+    doc = e.model_dump()
+    amt = float(doc.get("amount") or 0)
+    rate = float(doc.get("gst_rate") or 0)
+    doc["gst_amount"] = round(amt * rate / 100.0, 2)
+    doc["total"] = round(amt + doc["gst_amount"], 2)
+    await db.expenses.insert_one(doc)
+    return serialize(doc)
+
+@api.get("/expenses")
+async def list_expenses(user=Depends(require_roles("admin", "manager", "accountant", "ca"))):
+    return await list_collection(db.expenses)
+
+@api.delete("/expenses/{eid}")
+async def del_expense(eid: str, user=Depends(require_roles("admin", "accountant", "ca"))):
+    await db.expenses.delete_one({"id": eid})
+    return {"ok": True}
+
+@api.get("/accounting/gst-report")
+async def gst_report(period_from: Optional[str] = None, period_to: Optional[str] = None,
+                     user=Depends(require_roles("admin", "manager", "accountant", "ca"))):
+    invq = {}
+    if period_from or period_to:
+        invq["date"] = {}
+        if period_from: invq["date"]["$gte"] = period_from
+        if period_to: invq["date"]["$lte"] = period_to
+    invs = await db.invoices.find(invq, {"_id": 0}).to_list(5000)
+    output_cgst = sum(i.get("cgst", 0) for i in invs)
+    output_sgst = sum(i.get("sgst", 0) for i in invs)
+    output_igst = sum(i.get("igst", 0) for i in invs)
+    output_taxable = sum(i.get("subtotal", 0) for i in invs)
+
+    exq = {}
+    if period_from or period_to:
+        exq["date"] = {}
+        if period_from: exq["date"]["$gte"] = period_from
+        if period_to: exq["date"]["$lte"] = period_to
+    expenses = await db.expenses.find(exq, {"_id": 0}).to_list(5000)
+    input_gst = sum(e.get("gst_amount", 0) for e in expenses)
+    input_taxable = sum(e.get("amount", 0) for e in expenses)
+
+    return {
+        "period_from": period_from or "",
+        "period_to": period_to or "",
+        "output": {
+            "taxable": round(output_taxable, 2),
+            "cgst": round(output_cgst, 2),
+            "sgst": round(output_sgst, 2),
+            "igst": round(output_igst, 2),
+            "total_gst": round(output_cgst + output_sgst + output_igst, 2),
+            "invoice_count": len(invs),
+        },
+        "input": {
+            "taxable": round(input_taxable, 2),
+            "total_gst": round(input_gst, 2),
+            "expense_count": len(expenses),
+        },
+        "net_liability": round((output_cgst + output_sgst + output_igst) - input_gst, 2),
+    }
+
+# ---------------- P1: HR (Employees + Attendance) ----------------
+@api.post("/employees")
+async def create_emp(e: Employee, user=Depends(require_roles("admin", "manager"))):
+    doc = e.model_dump()
+    doc["code"] = await gen_code("EMP", "employee")
+    await db.employees.insert_one(doc)
+    return serialize(doc)
+
+@api.get("/employees")
+async def list_emp(user=Depends(get_current_user)):
+    return await list_collection(db.employees)
+
+@api.put("/employees/{eid}")
+async def upd_emp(eid: str, e: Employee, user=Depends(require_roles("admin", "manager"))):
+    data = e.model_dump(); data.pop("id", None); data.pop("created_at", None)
+    await db.employees.update_one({"id": eid}, {"$set": data})
+    return {"ok": True}
+
+@api.delete("/employees/{eid}")
+async def del_emp(eid: str, user=Depends(require_roles("admin"))):
+    await db.employees.delete_one({"id": eid})
+    return {"ok": True}
+
+@api.post("/attendance")
+async def create_att(a: Attendance, user=Depends(require_roles("admin", "manager"))):
+    emp = await db.employees.find_one({"id": a.employee_id}, {"_id": 0})
+    doc = a.model_dump()
+    if emp: doc["employee_name"] = emp.get("name", "")
+    await db.attendance.insert_one(doc)
+    return serialize(doc)
+
+@api.get("/attendance")
+async def list_att(user=Depends(get_current_user)):
+    return await list_collection(db.attendance, sort_key="date")
+
+@api.delete("/attendance/{aid}")
+async def del_att(aid: str, user=Depends(require_roles("admin", "manager"))):
+    await db.attendance.delete_one({"id": aid})
+    return {"ok": True}
+
+# ---------------- P1: Marketing / Social Campaigns ----------------
+@api.post("/campaigns")
+async def create_camp(c: Campaign, user=Depends(get_current_user)):
+    doc = c.model_dump()
+    await db.campaigns.insert_one(doc)
+    return serialize(doc)
+
+@api.get("/campaigns")
+async def list_camp(user=Depends(get_current_user)):
+    return await list_collection(db.campaigns)
+
+@api.put("/campaigns/{cid}")
+async def upd_camp(cid: str, c: Campaign, user=Depends(get_current_user)):
+    data = c.model_dump(); data.pop("id", None); data.pop("created_at", None)
+    await db.campaigns.update_one({"id": cid}, {"$set": data})
+    return {"ok": True}
+
+@api.delete("/campaigns/{cid}")
+async def del_camp(cid: str, user=Depends(get_current_user)):
+    await db.campaigns.delete_one({"id": cid})
+    return {"ok": True}
+
+# ---------------- P1: Document Revisions (ISO 9001 etc.) ----------------
+@api.post("/documents/{did}/revisions")
+async def add_revision(did: str, payload: DocRevIn, user=Depends(get_current_user)):
+    doc = await db.documents.find_one({"id": did}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Document not found")
+    revs = doc.get("revisions", [])
+    if not revs:
+        revs.append({
+            "rev_no": 0,
+            "file_base64": doc.get("file_base64", ""),
+            "notes": "Initial version",
+            "by": doc.get("uploaded_by", ""),
+            "created_at": doc.get("created_at", now_iso()),
+        })
+    new_rev_no = max([r.get("rev_no", 0) for r in revs]) + 1
+    revs.append({
+        "rev_no": new_rev_no,
+        "file_base64": payload.file_base64,
+        "notes": payload.notes or "",
+        "by": user["name"],
+        "created_at": now_iso(),
+    })
+    await db.documents.update_one(
+        {"id": did},
+        {"$set": {"revisions": revs, "file_base64": payload.file_base64, "current_revision": new_rev_no}},
+    )
+    return {"ok": True, "current_revision": new_rev_no}
+
+@api.get("/documents/{did}/revisions")
+async def get_revisions(did: str, user=Depends(get_current_user)):
+    doc = await db.documents.find_one({"id": did}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Document not found")
+    return {"current_revision": doc.get("current_revision", 0), "revisions": doc.get("revisions", [])}
 
 
-# Define Models
-class StatusCheck(BaseModel):
-    model_config = ConfigDict(extra="ignore")  # Ignore MongoDB's _id field
-    
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    client_name: str
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-class StatusCheckCreate(BaseModel):
-    client_name: str
+# ---------------- Customer Portal (public) ----------------
+@api.get("/portal/track")
+async def portal_track(ref: str = Query(..., min_length=2)):
+    ref_u = ref.strip()
+    wo = await db.work_orders.find_one({"$or": [{"code": ref_u}, {"po_ref": ref_u}]}, {"_id": 0})
+    if not wo:
+        raise HTTPException(404, "Reference not found")
+    jcs = await db.job_cards.find({"work_order_id": wo["id"]}, {"_id": 0}).to_list(200)
+    qcs = await db.qc_reports.find({"work_order_id": wo["id"]}, {"_id": 0, "photos": 0}).to_list(200)
+    return {
+        "work_order": {k: wo.get(k) for k in ["code", "product", "qty", "status", "priority", "progress", "start_date", "due_date", "customer_name", "po_ref", "created_at"]},
+        "job_cards": jcs,
+        "qc_reports": qcs,
+    }
 
-# Add your routes to the router instead of directly to app
-@api_router.get("/")
+# ---------------- Health ----------------
+@api.get("/")
 async def root():
-    return {"message": "Hello World"}
+    return {"ok": True, "service": "precision-erp"}
 
-@api_router.post("/status", response_model=StatusCheck)
-async def create_status_check(input: StatusCheckCreate):
-    status_dict = input.model_dump()
-    status_obj = StatusCheck(**status_dict)
-    
-    # Convert to dict and serialize datetime to ISO string for MongoDB
-    doc = status_obj.model_dump()
-    doc['timestamp'] = doc['timestamp'].isoformat()
-    
-    _ = await db.status_checks.insert_one(doc)
-    return status_obj
+# ---------------- Seed ----------------
+@app.on_event("startup")
+async def startup():
+    if not await db.users.find_one({"email": "admin@erp.com"}):
+        await db.users.insert_one({
+            "id": new_id(),
+            "name": "Admin",
+            "email": "admin@erp.com",
+            "role": "admin",
+            "password": hash_password("Admin@123"),
+            "created_at": now_iso(),
+        })
+        logger.info("Seeded admin@erp.com / Admin@123")
 
-@api_router.get("/status", response_model=List[StatusCheck])
-async def get_status_checks():
-    # Exclude MongoDB's _id field from the query results
-    status_checks = await db.status_checks.find({}, {"_id": 0}).to_list(1000)
-    
-    # Convert ISO string timestamps back to datetime objects
-    for check in status_checks:
-        if isinstance(check['timestamp'], str):
-            check['timestamp'] = datetime.fromisoformat(check['timestamp'])
-    
-    return status_checks
-
-# Include the router in the main app
-app.include_router(api_router)
-
+# ---------------- App config ----------------
+app.include_router(api)
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
@@ -76,12 +1028,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 @app.on_event("shutdown")
