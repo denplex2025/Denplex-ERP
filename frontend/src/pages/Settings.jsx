@@ -55,10 +55,9 @@ export default function Settings() {
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList className="rounded-sm bg-slate-100 mb-4 flex-wrap h-auto">
           <TabsTrigger value="company" className="rounded-sm" data-testid="tab-company">Company</TabsTrigger>
-          <TabsTrigger value="google" className="rounded-sm" data-testid="tab-google">Google (Drive + Gmail)</TabsTrigger>
-          <TabsTrigger value="email" className="rounded-sm" data-testid="tab-email">Email Account (IMAP/SMTP)</TabsTrigger>
+          <TabsTrigger value="google" className="rounded-sm" data-testid="tab-google">Gmail + Drive</TabsTrigger>
+          <TabsTrigger value="outlook" className="rounded-sm" data-testid="tab-outlook">Outlook (Microsoft)</TabsTrigger>
           <TabsTrigger value="twilio" className="rounded-sm" data-testid="tab-twilio">Twilio WhatsApp</TabsTrigger>
-          <TabsTrigger value="resend" className="rounded-sm" data-testid="tab-resend">Resend Email</TabsTrigger>
           <TabsTrigger value="indiamart" className="rounded-sm" data-testid="tab-indiamart">Indiamart</TabsTrigger>
           <TabsTrigger value="tradeindia" className="rounded-sm" data-testid="tab-tradeindia">TradeIndia</TabsTrigger>
           <TabsTrigger value="2fa" className="rounded-sm" data-testid="tab-2fa">Security & 2FA</TabsTrigger>
@@ -93,8 +92,20 @@ export default function Settings() {
           </Card>
         </TabsContent>
 
-        <TabsContent value="email">
-          <EmailAccountTab />
+        <TabsContent value="outlook">
+          <Card className="p-6">
+            <p className="text-sm text-slate-600 mb-3">Register an app in <a className="text-red-600 underline" target="_blank" rel="noreferrer" href="https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade">Microsoft Entra (Azure Portal)</a> → New registration → add platform "Web" with this Redirect URI: <code className="bg-slate-100 px-1 text-xs">{`${window.location.origin}/api/integrations/microsoft/callback`}</code>. Under API permissions add <strong>Mail.Send, Mail.Read, User.Read, offline_access</strong> (delegated) and grant admin consent. Create a Client Secret under "Certificates & secrets".</p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <Fld label="Microsoft Client (Application) ID"><Input value={s.microsoft_client_id || ""} onChange={e=>setF("microsoft_client_id", e.target.value)} className="rounded-sm font-mono-tech" data-testid="ms-client-id" /></Fld>
+              <Fld label="Microsoft Client Secret"><Input type="password" value={s.microsoft_client_secret || ""} onChange={e=>setF("microsoft_client_secret", e.target.value)} className="rounded-sm font-mono-tech" data-testid="ms-client-secret" /></Fld>
+              <Fld label="Tenant (default 'common' for any account)"><Input value={s.microsoft_tenant || "common"} onChange={e=>setF("microsoft_tenant", e.target.value)} className="rounded-sm font-mono-tech" /></Fld>
+              <Fld label="Redirect URI"><Input value={s.microsoft_redirect_uri || `${window.location.origin}/api/integrations/microsoft/callback`} onChange={e=>setF("microsoft_redirect_uri", e.target.value)} className="rounded-sm font-mono-tech" data-testid="ms-redirect" /></Fld>
+            </div>
+            <div className="mt-4 flex gap-2 items-center">
+              <Button onClick={save} className="rounded-sm bg-red-600 hover:bg-red-700"><Save className="h-4 w-4 mr-1" /> Save</Button>
+              <OutlookConnectBlock />
+            </div>
+          </Card>
         </TabsContent>
 
         <TabsContent value="twilio">
@@ -106,17 +117,6 @@ export default function Settings() {
               <Fld label="From WhatsApp number"><Input value={s.twilio_whatsapp_from || ""} onChange={e=>setF("twilio_whatsapp_from", e.target.value)} placeholder="whatsapp:+14155238886" className="rounded-sm font-mono-tech" data-testid="twilio-from" /></Fld>
             </div>
             <div className="mt-4"><Button onClick={save} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="save-twilio"><Save className="h-4 w-4 mr-1" /> Save</Button></div>
-          </Card>
-        </TabsContent>
-
-        <TabsContent value="resend">
-          <Card className="p-6">
-            <p className="text-sm text-slate-600 mb-3">Get an API key from <a className="text-red-600 underline" target="_blank" rel="noreferrer" href="https://resend.com/api-keys">Resend dashboard</a>. Verify your sender domain to send to any recipient.</p>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <Fld label="Resend API Key"><Input type="password" value={s.resend_api_key || ""} onChange={e=>setF("resend_api_key", e.target.value)} placeholder="re_xxxxxxxxxxxx" className="rounded-sm font-mono-tech" data-testid="resend-key" /></Fld>
-              <Fld label="From Email"><Input value={s.resend_from_email || ""} onChange={e=>setF("resend_from_email", e.target.value)} placeholder="noreply@yourdomain.com" className="rounded-sm" data-testid="resend-from" /></Fld>
-            </div>
-            <div className="mt-4"><Button onClick={save} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="save-resend"><Save className="h-4 w-4 mr-1" /> Save</Button></div>
           </Card>
         </TabsContent>
 
@@ -225,39 +225,6 @@ function GoogleConnectBlock() {
   );
 }
 
-function EmailAccountTab() {
-  const [a, setA] = useState({ smtp_port: 587, imap_port: 993, smtp_use_tls: true });
-  const [has, setHas] = useState({ has_smtp_password: false, has_imap_password: false });
-  const load = async () => { try { const r = await api.get("/integrations/email-account"); setA(p => ({ ...p, ...r.data })); setHas(r.data); } catch (e) {} };
-  useEffect(() => { load(); }, []);
-  const setF = (k, v) => setA(p => ({ ...p, [k]: v }));
-  const save = async () => {
-    try { await api.put("/integrations/email-account", a); toast.success("Email account saved"); load(); }
-    catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
-  };
-  const del = async () => { if (!window.confirm("Remove email account?")) return; await api.delete("/integrations/email-account"); setA({ smtp_port: 587, imap_port: 993, smtp_use_tls: true }); toast.success("Removed"); };
-  return (
-    <Card className="p-6" data-testid="email-account-card">
-      <p className="text-sm text-slate-600 mb-3">Connect any Outlook / Zoho / iCloud / custom IMAP+SMTP account to send invoices/quotes from your own mailbox and to import inquiry emails as leads. Credentials are stored only for your user.</p>
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <Fld label="Display name (optional)"><Input value={a.display_name || ""} onChange={e=>setF("display_name", e.target.value)} className="rounded-sm" /></Fld>
-        <Fld label="From email *"><Input value={a.from_email || ""} onChange={e=>setF("from_email", e.target.value)} className="rounded-sm" data-testid="email-from" /></Fld>
-        <Fld label="SMTP host *"><Input value={a.smtp_host || ""} onChange={e=>setF("smtp_host", e.target.value)} className="rounded-sm font-mono-tech" placeholder="smtp.office365.com" data-testid="smtp-host" /></Fld>
-        <Fld label="SMTP port"><Input type="number" value={a.smtp_port || 587} onChange={e=>setF("smtp_port", Number(e.target.value))} className="rounded-sm font-mono-tech" /></Fld>
-        <Fld label="SMTP user *"><Input value={a.smtp_user || ""} onChange={e=>setF("smtp_user", e.target.value)} className="rounded-sm" data-testid="smtp-user" /></Fld>
-        <Fld label="SMTP password *"><Input type="password" placeholder={has.has_smtp_password ? "•••••• (saved — type to change)" : ""} value={a.smtp_password || ""} onChange={e=>setF("smtp_password", e.target.value)} className="rounded-sm font-mono-tech" data-testid="smtp-pass" /></Fld>
-        <Fld label="IMAP host *"><Input value={a.imap_host || ""} onChange={e=>setF("imap_host", e.target.value)} className="rounded-sm font-mono-tech" placeholder="imap.office365.com" data-testid="imap-host" /></Fld>
-        <Fld label="IMAP port"><Input type="number" value={a.imap_port || 993} onChange={e=>setF("imap_port", Number(e.target.value))} className="rounded-sm font-mono-tech" /></Fld>
-        <Fld label="IMAP user (defaults to SMTP user)"><Input value={a.imap_user || ""} onChange={e=>setF("imap_user", e.target.value)} className="rounded-sm" /></Fld>
-        <Fld label="IMAP password (defaults to SMTP password)"><Input type="password" placeholder={has.has_imap_password ? "•••••• (saved)" : ""} value={a.imap_password || ""} onChange={e=>setF("imap_password", e.target.value)} className="rounded-sm font-mono-tech" /></Fld>
-      </div>
-      <div className="mt-4 flex gap-2">
-        <Button onClick={save} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="save-email-account"><Save className="h-4 w-4 mr-1" /> Save</Button>
-        {has.has_smtp_password && <Button variant="outline" className="rounded-sm border-red-300 text-red-700 hover:bg-red-50" onClick={del}>Remove</Button>}
-      </div>
-    </Card>
-  );
-}
 
 function ChangePasswordForm() {
   const [cur, setCur] = useState("");
@@ -288,3 +255,26 @@ function ChangePasswordForm() {
   );
 }
 
+
+function OutlookConnectBlock() {
+  const [status, setStatus] = useState(null);
+  const load = async () => { try { const r = await api.get("/integrations/microsoft/status"); setStatus(r.data); } catch (e) {} };
+  useEffect(() => { load(); }, []);
+  const connect = async () => {
+    try { const r = await api.get("/integrations/microsoft/auth-url"); window.location.href = r.data.auth_url; }
+    catch (e) { toast.error(e?.response?.data?.detail || "Save Microsoft OAuth config first"); }
+  };
+  const disconnect = async () => {
+    if (!window.confirm("Disconnect your Outlook account?")) return;
+    await api.post("/integrations/microsoft/disconnect"); load(); toast.success("Disconnected");
+  };
+  if (!status) return null;
+  return status.connected ? (
+    <div className="flex items-center gap-3 text-sm">
+      <span className="inline-flex items-center gap-1 text-emerald-700"><ShieldCheck className="h-4 w-4" /> Connected as <code className="font-mono-tech">{status.email}</code></span>
+      <Button onClick={disconnect} variant="outline" className="rounded-sm border-red-300 text-red-700 hover:bg-red-50" data-testid="disconnect-outlook">Disconnect</Button>
+    </div>
+  ) : (
+    <Button onClick={connect} className="rounded-sm bg-black hover:bg-slate-800" data-testid="connect-outlook">Connect Outlook account</Button>
+  );
+}
