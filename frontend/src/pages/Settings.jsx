@@ -479,63 +479,112 @@ const TEMPLATE_TOGGLES = [
   { key: "print_original_duplicate",  label: "Print 'Original for Recipient' label" },
 ];
 
+const DOC_TYPES = [
+  { key: "default",          label: "Default (all docs)" },
+  { key: "invoice",          label: "Tax Invoice" },
+  { key: "quotation",        label: "Quotation" },
+  { key: "sale_order",       label: "Sale Order" },
+  { key: "delivery_challan", label: "Delivery Challan" },
+  { key: "job_work_out",     label: "Job Work Out Challan" },
+  { key: "credit_note",      label: "Credit Note" },
+  { key: "purchase_order",   label: "Purchase Order" },
+  { key: "vendor_bill",      label: "Purchase Bill" },
+];
+
+const PREVIEW_ENDPOINTS = {
+  invoice:          "/invoices",
+  quotation:        "/quotations",
+  sale_order:       "/sale-orders",
+  delivery_challan: "/delivery-challans",
+  job_work_out:     "/job-work-out",
+  credit_note:      "/credit-notes",
+  purchase_order:   "/purchase-orders",
+  vendor_bill:      "/vendor-bills",
+};
+
 function InvoiceTemplatePanel() {
-  const [t, setT] = useState(null);
+  const [docType, setDocType] = useState("default");
+  const [allTpl, setAllTpl] = useState(null);   // full map keyed by doc_type
   const [previewUrl, setPreviewUrl] = useState("");
   const [loading, setLoading] = useState(true);
 
   const load = async () => {
     setLoading(true);
-    try { const r = await api.get("/settings/invoice-template"); setT(r.data); }
+    try { const r = await api.get("/settings/invoice-template"); setAllTpl(r.data); }
     catch (e) { toast.error("Admin only"); }
     finally { setLoading(false); }
   };
   useEffect(() => { load(); }, []);
 
+  const t = allTpl?.[docType] || {};
+  const setFlag = (k) => setAllTpl(p => ({ ...p, [docType]: { ...(p?.[docType] || {}), [k]: !p?.[docType]?.[k] } }));
+
   const save = async () => {
-    try { await api.put("/settings/invoice-template", t); toast.success("Template saved"); }
-    catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
+    try {
+      // Save the whole map so per-doc-type overrides are preserved
+      await api.put("/settings/invoice-template", allTpl);
+      toast.success(`Template saved (${DOC_TYPES.find(d=>d.key===docType)?.label})`);
+    } catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
   };
-  const toggle = (k) => setT(p => ({ ...p, [k]: !p[k] }));
+
+  const resetThis = () => {
+    if (docType === "default") { toast.error("Cannot reset default — edit values instead"); return; }
+    setAllTpl(p => ({ ...p, [docType]: { ...(p?.default || {}) } }));
+    toast.success(`Reset ${DOC_TYPES.find(d=>d.key===docType)?.label} to default`);
+  };
 
   const livePreview = async () => {
+    const ep = docType === "default" ? "/invoices" : PREVIEW_ENDPOINTS[docType];
+    if (!ep) { toast.error("Pick a non-default doc type to preview"); return; }
     try {
-      const inv = await api.get("/invoices");
-      const first = inv.data?.[0]; if (!first) { toast.error("Create at least one invoice to preview"); return; }
-      await api.put("/settings/invoice-template", t);
-      const r = await api.get(`/invoices/${first.id}/pdf`, { responseType: "blob" });
+      const list = await api.get(ep);
+      const first = list.data?.[0]; if (!first) { toast.error(`No ${docType} records found to preview`); return; }
+      await api.put("/settings/invoice-template", allTpl);
+      const r = await api.get(`${ep}/${first.id}/pdf`, { responseType: "blob" });
       if (previewUrl) URL.revokeObjectURL(previewUrl);
       setPreviewUrl(URL.createObjectURL(r.data));
-    } catch (e) { toast.error("Preview failed"); }
+    } catch (e) { toast.error(e?.response?.data?.detail || "Preview failed"); }
   };
 
-  if (loading || !t) return <Card className="p-6"><div className="text-sm text-slate-500">Loading…</div></Card>;
+  if (loading || !allTpl) return <Card className="p-6"><div className="text-sm text-slate-500">Loading…</div></Card>;
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-5 gap-4" data-testid="invoice-template-panel">
       <Card className="p-6 lg:col-span-2">
-        <div className="flex items-start justify-between gap-3 mb-4 flex-wrap">
+        <div className="flex items-start justify-between gap-3 mb-3 flex-wrap">
           <div>
-            <h3 className="font-display text-lg font-semibold">Invoice template</h3>
-            <p className="text-sm text-slate-600 mt-1">Toggle which blocks appear on your printed/PDF invoices. Mirrors Vyapar's "Print → Regular Printer" options.</p>
-          </div>
-          <div className="flex gap-2 shrink-0">
-            <Button size="sm" variant="outline" className="rounded-sm" onClick={livePreview} data-testid="preview-template"><Eye className="h-4 w-4 mr-1" /> Preview</Button>
-            <Button size="sm" className="rounded-sm bg-red-600 hover:bg-red-700" onClick={save} data-testid="save-template"><Save className="h-4 w-4 mr-1" /> Save</Button>
+            <h3 className="font-display text-lg font-semibold">Document templates</h3>
+            <p className="text-sm text-slate-600 mt-1">Choose a document type below — each can have its own visibility flags. <strong>"Default"</strong> applies to any type that hasn't been customised.</p>
           </div>
         </div>
-        <div className="space-y-2 max-h-[70vh] overflow-y-auto -mx-2 px-2">
+        <div className="mb-4">
+          <Label className="text-xs uppercase tracking-wider text-slate-600">Editing template for</Label>
+          <select
+            value={docType}
+            onChange={(e)=>setDocType(e.target.value)}
+            data-testid="template-doc-type-select"
+            className="mt-1.5 w-full h-9 border border-slate-300 rounded-sm px-2 text-sm bg-white"
+          >
+            {DOC_TYPES.map(d => <option key={d.key} value={d.key}>{d.label}</option>)}
+          </select>
+        </div>
+        <div className="flex gap-2 mb-3">
+          <Button size="sm" variant="outline" className="rounded-sm" onClick={livePreview} data-testid="preview-template"><Eye className="h-4 w-4 mr-1" /> Preview</Button>
+          <Button size="sm" className="rounded-sm bg-red-600 hover:bg-red-700" onClick={save} data-testid="save-template"><Save className="h-4 w-4 mr-1" /> Save</Button>
+          {docType !== "default" && <Button size="sm" variant="outline" className="rounded-sm" onClick={resetThis}>Reset to default</Button>}
+        </div>
+        <div className="space-y-1 max-h-[60vh] overflow-y-auto -mx-2 px-2">
           {TEMPLATE_TOGGLES.map(({ key, label }) => (
             <label key={key} className="flex items-center justify-between gap-3 py-1.5 border-b border-slate-100 last:border-0 cursor-pointer">
               <span className="text-sm text-slate-700">{label}</span>
-              <Switch checked={!!t[key]} onCheckedChange={()=>toggle(key)} data-testid={`tpl-${key}`} />
+              <Switch checked={!!t[key]} onCheckedChange={()=>setFlag(key)} data-testid={`tpl-${key}`} />
             </label>
           ))}
         </div>
       </Card>
       <Card className="p-3 lg:col-span-3 bg-slate-50">
         <div className="flex items-center justify-between mb-2 px-3">
-          <span className="text-xs uppercase tracking-wider text-slate-600">Live preview</span>
+          <span className="text-xs uppercase tracking-wider text-slate-600">Live preview · {DOC_TYPES.find(d=>d.key===docType)?.label}</span>
           {previewUrl && <a href={previewUrl} target="_blank" rel="noreferrer" className="text-xs text-red-600 underline">Open in new tab</a>}
         </div>
         {previewUrl ? (
@@ -544,7 +593,7 @@ function InvoiceTemplatePanel() {
           <div className="h-[78vh] grid place-items-center text-sm text-slate-500 border border-dashed border-slate-300">
             <div className="text-center">
               <FileText className="h-8 w-8 text-slate-400 mx-auto mb-2" />
-              Click <strong>Preview</strong> to render the first invoice with current settings.
+              Click <strong>Preview</strong> to render the first {DOC_TYPES.find(d=>d.key===docType)?.label} with current settings.
             </div>
           </div>
         )}

@@ -73,10 +73,16 @@ Modules requested: Manufacturing, BOM, Work Orders, Job Cards, Inventory, CRM, Q
 
 ### P3.6 (Feb 2026 — Vyapar-style Invoices + Vyapar Data Import) ✅ CURRENT
 - **New Vyapar-style PDF generator** (`_build_doc_pdf`): top "ORIGINAL FOR RECIPIENT" label, company header card (logo + name + UDYAM + GSTIN + phone + email + state), Bill-To + Invoice Details two-column box, optional Ship-To, item table with HSN/SAC, Qty, Price/unit, Discount, GST, Amount, **HSN-wise Tax Summary** (CGST/SGST or IGST), Totals sidebar (Sub Total / Discount / Tax / Total in Denplex red), **Invoice Amount in Words** (Indian-English), Payment Mode, Description + Terms two-column box, Bank Details with **auto-generated UPI QR code** (via `qrcode` lib), and signatory image upload.
-- **Invoice Template settings** (`GET/PUT /api/settings/invoice-template`): 21 togglable visibility flags mirroring Vyapar's "Print → Regular Printer" panel + paper size / orientation / amount-in-words locale.
+- **Per-document-type template settings** (`GET/PUT /api/settings/invoice-template`): map of `{default, invoice, quotation, sale_order, delivery_challan, job_work_out, credit_note, purchase_order, vendor_bill}` — each with 21 togglable visibility flags. Frontend dropdown lets user pick which doc type to edit; `_tpl_for(doc_type)` merges default + override at render time.
 - **Company settings extended**: company_phone, company_email, company_udyam, bank_name, bank_account_no, bank_ifsc, bank_branch, upi_id, signatory_image_b64, signatory_label, invoice_terms, invoice_description.
-- **Vyapar Import** (`POST /api/integrations/vyapar/inspect`, `POST /api/integrations/vyapar/import`): user uploads `.vyb` / `.xlsx` / `.csv` / `.zip` / `.db`. We auto-detect format: plain SQLite (extract directly), ZIP with inner SQLite (extract & import), XLSX (heuristic column-mapping per sheet), or encrypted-unsupported (show Excel-export instructions). Imports Parties → Customers, Items → Inventory, Sale Invoices, Purchase Invoices. Dry-run option available. Dedupes by name / invoice code.
-- **Frontend**: new Settings tabs "Invoice Template" (with live PDF preview iframe) and "Vyapar Import" (drag/drop upload + per-entity import toggles).
+- **Vyapar Import — REAL .vyb support** (`POST /api/integrations/vyapar/inspect`, `POST /api/integrations/vyapar/import`):
+  - Vyapar `.vyb` is ZIP-with-inner-`.vyp` (plain SQLite). Auto-extracts and inspects.
+  - **Native kb_* schema mapping** (kb_names → parties, kb_items → items, kb_transactions → split by txn_type into invoices / vendor_bills / quotations / sale_orders / purchase_orders / delivery_challans / job_work_out / credit_notes; kb_lineitems → joined to each).
+  - Auto-seeds company info from `kb_firms` (without overwriting any value the user already saved).
+  - **Validated with Denplex's real backup (May 12 2026)**: 401 parties, 3,748 items, 801 sales, 1,747 purchase bills, 8 quotations, 6 sale orders, 5 POs, 6 delivery challans, 52 job-work-out challans, 42 credit notes — imported in ~7 seconds.
+  - Falls back to generic SQLite or Excel/CSV import for non-Vyapar files.
+- **5 new doc types in UI**: sidebar adds Sale Orders, Delivery Challans, Job Work Out, Purchase Bills, Credit Notes. Each uses a shared read-only `DocList.jsx` page (search + side-by-side PDF preview).
+- **New backend endpoints**: `GET /api/{vendor-bills, sale-orders, delivery-challans, job-work-out, credit-notes}` (list) and `/{kind}/{id}/pdf` (download) — all use the per-doc-type template + Denplex letterhead.
 - **Updated brand assets**: higher-resolution Denplex logo extracted from user's 2026 letterhead.docx.
 - Endpoints:
   - `POST /api/email/accounts` — add (auto-detects provider, real SMTP login test before persist)

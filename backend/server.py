@@ -530,9 +530,9 @@ def serialize(d: Dict[str, Any]) -> Dict[str, Any]:
     d.pop("_id", None)
     return d
 
-async def list_collection(coll, query: Dict = None, sort_key: str = "created_at"):
+async def list_collection(coll, query: Dict = None, sort_key: str = "created_at", limit: int = 5000):
     cursor = coll.find(query or {}, {"_id": 0}).sort(sort_key, -1)
-    return await cursor.to_list(2000)
+    return await cursor.to_list(limit)
 
 # ---------------- Customers ----------------
 @api.post("/customers")
@@ -1192,16 +1192,41 @@ class InvoiceTemplateIn(BaseModel):
     amount_in_words_locale: Literal["en_IN", "en"] = "en_IN"
 
 @api.get("/settings/invoice-template")
-async def get_invoice_template(user=Depends(get_current_user)):
-    s = await get_setting("invoice_template")
-    # Merge with defaults so frontend always gets a full payload
-    return {**InvoiceTemplateIn().model_dump(), **(s or {})}
+async def get_invoice_template(doc_type: Optional[str] = None, user=Depends(get_current_user)):
+    """Return template settings. If `doc_type` is supplied, returns the merged
+    {default + doc_type override} flags. Otherwise returns the full map keyed by doc_type."""
+    s = await get_setting("invoice_template") or {}
+    defaults = InvoiceTemplateIn().model_dump()
+    base = {**defaults, **(s.get("default") or {})}
+    if doc_type:
+        override = (s.get(doc_type) or {})
+        return {**base, **override}
+    # Return full map for the UI
+    KNOWN = ["default", "invoice", "quotation", "purchase_order", "sale_order",
+            "delivery_challan", "job_work_out", "credit_note", "vendor_bill"]
+    out: Dict[str, Any] = {}
+    for k in KNOWN:
+        out[k] = {**base, **((s.get(k) or {}))}
+    return out
 
 @api.put("/settings/invoice-template")
-async def update_invoice_template(payload: InvoiceTemplateIn, user=Depends(require_roles("admin"))):
-    data = payload.model_dump()
-    await set_setting("invoice_template", data)
-    return data
+async def update_invoice_template(payload: Dict[str, Any], user=Depends(require_roles("admin"))):
+    """Accepts either a flat `InvoiceTemplateIn` (treated as `default`) or a map
+    {doc_type: {flags...}}. Storing only the overrides keeps each doc_type small."""
+    # Validate by passing through model where possible
+    allowed = set(InvoiceTemplateIn().model_dump().keys())
+    s = await get_setting("invoice_template") or {}
+    if any(k in payload for k in allowed):
+        # Flat payload → save as `default`
+        clean = {k: v for k, v in payload.items() if k in allowed}
+        s["default"] = clean
+    else:
+        # Map payload → merge each doc_type
+        for dt, flags in payload.items():
+            if not isinstance(flags, dict): continue
+            s[dt] = {k: v for k, v in flags.items() if k in allowed}
+    await set_setting("invoice_template", s)
+    return s
 
 # ---------- Audit log ----------
 async def write_audit(user_name: str, action: str, entity: str, entity_id: Optional[str] = None, details: Optional[Dict] = None):
@@ -1730,13 +1755,18 @@ async def _resolve_doc(coll, doc_id: str, party_id_key: str, party_name_key: str
         raise HTTPException(404, "Not found")
     return doc
 
+async def _tpl_for(doc_type: str) -> Dict[str, Any]:
+    s = await get_setting("invoice_template") or {}
+    defaults = InvoiceTemplateIn().model_dump()
+    base = {**defaults, **(s.get("default") or {})}
+    return {**base, **((s.get(doc_type) or {}))}
+
 @api.get("/invoices/{iid}/pdf")
 async def invoice_pdf(iid: str, copy: Optional[str] = "ORIGINAL FOR RECIPIENT", user=Depends(get_current_user)):
     inv = await db.invoices.find_one({"id": iid}, {"_id": 0})
     if not inv: raise HTTPException(404, "Not found")
     company = await get_setting("integrations")
-    tpl = await get_setting("invoice_template")
-    # Fetch party details
+    tpl = await _tpl_for("invoice")
     party_extra = {}
     if inv.get("customer_id"):
         c = await db.customers.find_one({"id": inv["customer_id"]}, {"_id": 0}) or {}
@@ -1758,7 +1788,7 @@ async def quote_pdf(qid: str, user=Depends(get_current_user)):
     q = await db.quotations.find_one({"id": qid}, {"_id": 0})
     if not q: raise HTTPException(404, "Not found")
     company = await get_setting("integrations")
-    tpl = await get_setting("invoice_template")
+    tpl = await _tpl_for("quotation")
     party_extra = {}
     if q.get("customer_id"):
         c = await db.customers.find_one({"id": q["customer_id"]}, {"_id": 0}) or {}
@@ -1775,7 +1805,7 @@ async def po_pdf(pid: str, user=Depends(get_current_user)):
     p = await db.purchase_orders.find_one({"id": pid}, {"_id": 0})
     if not p: raise HTTPException(404, "Not found")
     company = await get_setting("integrations")
-    tpl = await get_setting("invoice_template")
+    tpl = await _tpl_for("purchase_order")
     party_extra = {}
     if p.get("supplier_id"):
         c = await db.suppliers.find_one({"id": p["supplier_id"]}, {"_id": 0}) or {}
@@ -1786,6 +1816,73 @@ async def po_pdf(pid: str, user=Depends(get_current_user)):
                          copy_label="")
     return Response(content=pdf, media_type="application/pdf",
                     headers={"Content-Disposition": f'inline; filename="{p.get("code","po")}.pdf"'})
+
+# ---------- New document types (imported from Vyapar) ----------
+def _party_extra_from(c: Dict[str, Any]) -> Dict[str, Any]:
+    return {"address": (c or {}).get("address",""), "phone": (c or {}).get("phone",""),
+            "gstin": (c or {}).get("gstin",""), "state": (c or {}).get("state","")}
+
+async def _generic_doc_pdf(coll, did: str, title: str, party_label: str, party_field: str, party_coll, doc_type: str, copy_label: str = ""):
+    d = await coll.find_one({"id": did}, {"_id": 0})
+    if not d: raise HTTPException(404, "Not found")
+    company = await get_setting("integrations")
+    tpl = await _tpl_for(doc_type)
+    party_id_key = f"{party_field}_id"
+    party_name_key = f"{party_field}_name"
+    party_extra = _party_extra_from(await party_coll.find_one({"id": d.get(party_id_key)}, {"_id": 0}) if d.get(party_id_key) else {})
+    totals = {"subtotal": d.get("subtotal", 0), "gst_total": d.get("gst_total", 0), "total": d.get("total", 0)}
+    pdf = _build_doc_pdf(title, d.get("code",""), party_label, d.get(party_name_key,""), str(d.get("date",""))[:10],
+                         d.get("lines", []), totals,
+                         gst_breakup={"cgst": d.get("cgst",0), "sgst": d.get("sgst",0), "igst": d.get("igst",0)},
+                         company=company, notes=d.get("notes",""), tpl=tpl,
+                         party_extra=party_extra,
+                         doc_meta={"due_date": str(d.get("due_date",""))[:10],
+                                   "place_of_supply": d.get("place_of_supply",""),
+                                   "payment_mode": d.get("payment_mode",""),
+                                   "is_interstate": bool(d.get("is_interstate"))},
+                         copy_label=copy_label)
+    return Response(content=pdf, media_type="application/pdf",
+                    headers={"Content-Disposition": f'inline; filename="{d.get("code",doc_type)}.pdf"'})
+
+@api.get("/vendor-bills")
+async def list_vendor_bills(user=Depends(get_current_user)):
+    return await list_collection(db.vendor_bills, sort_key="date")
+
+@api.get("/vendor-bills/{did}/pdf")
+async def vendor_bill_pdf(did: str, user=Depends(get_current_user)):
+    return await _generic_doc_pdf(db.vendor_bills, did, "Purchase Bill", "Supplier", "supplier", db.suppliers, "vendor_bill")
+
+@api.get("/sale-orders")
+async def list_sale_orders(user=Depends(get_current_user)):
+    return await list_collection(db.sale_orders, sort_key="date")
+
+@api.get("/sale-orders/{did}/pdf")
+async def sale_order_pdf(did: str, user=Depends(get_current_user)):
+    return await _generic_doc_pdf(db.sale_orders, did, "Sale Order", "Customer", "customer", db.customers, "sale_order")
+
+@api.get("/delivery-challans")
+async def list_delivery_challans(user=Depends(get_current_user)):
+    return await list_collection(db.delivery_challans, sort_key="date")
+
+@api.get("/delivery-challans/{did}/pdf")
+async def delivery_challan_pdf(did: str, user=Depends(get_current_user)):
+    return await _generic_doc_pdf(db.delivery_challans, did, "Delivery Challan", "Ship To", "customer", db.customers, "delivery_challan")
+
+@api.get("/job-work-out")
+async def list_job_work_out(user=Depends(get_current_user)):
+    return await list_collection(db.job_work_out, sort_key="date")
+
+@api.get("/job-work-out/{did}/pdf")
+async def job_work_out_pdf(did: str, user=Depends(get_current_user)):
+    return await _generic_doc_pdf(db.job_work_out, did, "Job Work Out Challan", "Job Worker", "customer", db.customers, "job_work_out")
+
+@api.get("/credit-notes")
+async def list_credit_notes(user=Depends(get_current_user)):
+    return await list_collection(db.credit_notes, sort_key="date")
+
+@api.get("/credit-notes/{did}/pdf")
+async def credit_note_pdf(did: str, user=Depends(get_current_user)):
+    return await _generic_doc_pdf(db.credit_notes, did, "Credit Note", "Bill To", "customer", db.customers, "credit_note")
 
 # ---------- Indiamart pull leads ----------
 @api.post("/integrations/indiamart/sync")
@@ -2444,10 +2541,28 @@ def _vyb_inspect(path: Path) -> Dict[str, Any]:
             with zipfile.ZipFile(path) as z:
                 names = z.namelist()
                 out["tables"] = names[:50]
-                inner_sqlite = [n for n in names if n.endswith(".db") or n.endswith(".sqlite")]
-                out["notes"] = ("Archive contains: " + ", ".join(names[:10])) + (" (SQLite inside!)" if inner_sqlite else "")
+                inner_sqlite = [n for n in names if n.endswith(".db") or n.endswith(".sqlite") or n.endswith(".vyp")]
                 if inner_sqlite:
-                    out["inner_sqlite"] = inner_sqlite[0]
+                    out["notes"] = f"Vyapar backup container — extracting {inner_sqlite[0]} for inspection."
+                    # Extract the inner DB and recurse so we can preview the real tables
+                    import tempfile
+                    tmpd = Path(tempfile.mkdtemp())
+                    z.extract(inner_sqlite[0], tmpd)
+                    inner_path = tmpd / inner_sqlite[0]
+                    inner_info = _vyb_inspect(inner_path)
+                    if inner_info.get("kind") == "sqlite":
+                        # Replace the inspect result with the inner SQLite analysis but keep the
+                        # outer kind=zip so import logic knows it must unzip first.
+                        out["kind"] = "zip_sqlite"
+                        out["inner_sqlite"] = inner_sqlite[0]
+                        out["tables"] = inner_info.get("tables", [])
+                        out["counts"] = inner_info.get("counts", {})
+                        out["notes"] = ("Vyapar SQLite backup — " + (
+                            f"{out['counts'].get('kb_names', 0)} parties, "
+                            f"{out['counts'].get('kb_items', 0)} items, "
+                            f"{out['counts'].get('kb_transactions', 0)} transactions."))
+                else:
+                    out["notes"] = "Archive contains: " + ", ".join(names[:10])
         except Exception as e:
             out["notes"] = f"ZIP read failed: {e}"
         return out
@@ -2547,96 +2662,288 @@ async def vyapar_inspect(file: UploadFile = File(...), user=Depends(require_role
     })
     return info
 
-async def _do_import_sqlite(path: Path, opts: VyaparImportIn) -> Dict[str, Any]:
+async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company: bool = True) -> Dict[str, Any]:
+    """Import a Vyapar SQLite DB. Recognises kb_* tables (Vyapar's real schema)."""
+    import sqlite3
+    res = {"parties": 0, "items": 0, "sales": 0, "purchases": 0,
+           "quotations": 0, "sale_orders": 0, "purchase_orders": 0,
+           "delivery_challans": 0, "job_work_out": 0, "sale_returns": 0,
+           "company_seeded": False}
+    con = sqlite3.connect(str(path)); con.row_factory = sqlite3.Row
+    cur = con.cursor()
+
+    # --- Detect schema: native Vyapar (kb_*) vs generic ---
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    tables = {r[0].lower(): r[0] for r in cur.fetchall()}
+    is_vyapar = "kb_names" in tables and "kb_transactions" in tables and "kb_items" in tables
+
+    if not is_vyapar:
+        # Fall back to generic best-effort (unchanged behavior for non-Vyapar SQLite)
+        return await _do_import_generic_sqlite(path, opts)
+
+    # --- Auto-seed company from kb_firms (only if user hasn't already saved) ---
+    if auto_seed_company and "kb_firms" in tables:
+        try:
+            cur.execute('SELECT * FROM "kb_firms" LIMIT 1')
+            f = cur.fetchone()
+            if f:
+                f = {k: f[k] for k in f.keys()}
+                existing = await get_setting("integrations") or {}
+                # Only fill blanks; never overwrite something the user already set
+                payload: Dict[str, Any] = {**existing}
+                for src_key, dst_key in [
+                    ("firm_name", "company_name"),
+                    ("firm_phone", "company_phone"),
+                    ("firm_email", "company_email"),
+                    ("firm_address", "company_address"),
+                    ("firm_gstin_number", "company_gstin"),
+                    ("firm_state", "company_state"),
+                    ("firm_bank_name", "bank_name"),
+                    ("firm_bank_account_number", "bank_account_no"),
+                    ("firm_bank_ifsc_code", "bank_ifsc"),
+                ]:
+                    if not payload.get(dst_key) and f.get(src_key):
+                        payload[dst_key] = str(f[src_key])
+                # UDYAM is embedded in firm_address; extract if present and not set
+                if not payload.get("company_udyam") and f.get("firm_address"):
+                    m = re.search(r"UDYAM-[A-Z]+-\d+-\d+", str(f["firm_address"]))
+                    if m:
+                        payload["company_udyam"] = m.group(0)
+                if not opts.dry_run:
+                    await set_setting("integrations", payload)
+                    res["company_seeded"] = True
+        except Exception:
+            pass
+
+    # --- HSN tax-id → rate lookup (kb_tax_code) ---
+    tax_rate: Dict[int, float] = {}
+    if "kb_tax_code" in tables:
+        try:
+            cur.execute('SELECT tax_code_id, tax_rate FROM "kb_tax_code"')
+            for r in cur.fetchall():
+                tax_rate[int(r["tax_code_id"])] = float(r["tax_rate"] or 0)
+        except Exception:
+            pass
+
+    # --- Parties (kb_names) ---
+    if opts.parties:
+        # name_type: 1 = party (customer/supplier), 2 = other
+        cur.execute('SELECT * FROM "kb_names" WHERE name_type IN (1,2)')
+        for r in cur.fetchall():
+            full_name = (r["full_name"] or "").strip()
+            if not full_name:
+                continue
+            doc = {
+                "id": new_id(),
+                "name": full_name[:160],
+                "phone": str(r["phone_number"] or "").strip(),
+                "email": str(r["email"] or "").strip(),
+                "gstin": str(r["name_gstin_number"] or "").strip(),
+                "address": str(r["address"] or "").strip(),
+                "state": str(r["name_state"] or "").strip(),
+                "vyapar_id": str(r["name_id"]),
+                "source": "vyapar",
+                "created_at": str(r["date_created"] or now_iso()),
+            }
+            if not opts.dry_run:
+                # Vyapar doesn't distinguish C/S until used in txns; we'll route them by usage below.
+                await db.customers.update_one({"name": doc["name"]}, {"$setOnInsert": doc}, upsert=True)
+                await db.suppliers.update_one({"name": doc["name"]}, {"$setOnInsert": doc}, upsert=True)
+            res["parties"] += 1
+
+    # Build name_id -> party_name map for txn rows
+    name_lookup: Dict[int, str] = {}
+    try:
+        cur.execute('SELECT name_id, full_name FROM "kb_names"')
+        for r in cur.fetchall():
+            if r["full_name"]:
+                name_lookup[int(r["name_id"])] = r["full_name"].strip()
+    except Exception:
+        pass
+
+    # --- Items (kb_items) ---
+    if opts.items:
+        cur.execute('SELECT * FROM "kb_items" WHERE item_is_active IS NULL OR item_is_active != 0')
+        for r in cur.fetchall():
+            name = (r["item_name"] or "").strip()
+            if not name or name == "item 1":  # skip the default placeholder
+                continue
+            sku_raw = (r["item_code"] or f"VY-{r['item_id']}").strip()[:32] or f"VY-{r['item_id']}"
+            doc = {
+                "id": new_id(),
+                "sku": sku_raw,
+                "name": name[:200],
+                "category": "raw",
+                "uom": "pcs",
+                "qty_on_hand": float(r["item_stock_quantity"] or 0),
+                "qty_in_process": 0.0,
+                "reorder_level": float(r["item_min_stock_quantity"] or 0),
+                "unit_cost": float(r["item_purchase_unit_price"] or 0) or float(r["item_sale_unit_price"] or 0),
+                "hsn": str(r["item_hsn_sac_code"] or "").strip(),
+                "gst_rate": 18.0,
+                "location": "",
+                "sale_price": float(r["item_sale_unit_price"] or 0),
+                "description": str(r["item_description"] or "").strip(),
+                "vyapar_id": str(r["item_id"]),
+                "source": "vyapar",
+                "created_at": str(r["item_date_created"] or now_iso()),
+            }
+            if not opts.dry_run:
+                await db.items.update_one({"name": doc["name"]}, {"$setOnInsert": doc}, upsert=True)
+            res["items"] += 1
+
+    # Build item_id -> (name, hsn, rate) for line items
+    item_lookup: Dict[int, Dict[str, Any]] = {}
+    try:
+        cur.execute('SELECT item_id, item_name, item_hsn_sac_code, item_sale_unit_price FROM "kb_items"')
+        for r in cur.fetchall():
+            item_lookup[int(r["item_id"])] = {
+                "name": (r["item_name"] or "").strip(),
+                "hsn": (r["item_hsn_sac_code"] or "").strip(),
+                "rate": float(r["item_sale_unit_price"] or 0),
+            }
+    except Exception:
+        pass
+
+    # --- Line items pre-grouped by txn_id ---
+    lines_by_txn: Dict[int, List[Dict[str, Any]]] = {}
+    try:
+        cur.execute('SELECT * FROM "kb_lineitems"')
+        for r in cur.fetchall():
+            tx = int(r["lineitem_txn_id"])
+            it = item_lookup.get(int(r["item_id"]) if r["item_id"] is not None else -1, {})
+            qty = float(r["quantity"] or 0)
+            rate = float(r["priceperunit"] or 0)
+            disc_amt = float(r["lineitem_discount_amount"] or 0)
+            tax_amt = float(r["lineitem_tax_amount"] or 0)
+            taxable = max(qty * rate - disc_amt, 0.000001)
+            implied_gst_rate = round(tax_amt / taxable * 100, 2) if tax_amt else 0
+            lines_by_txn.setdefault(tx, []).append({
+                "description": (r["lineitem_description"] or it.get("name", "")).strip() or it.get("name", ""),
+                "hsn": it.get("hsn", ""),
+                "qty": qty,
+                "rate": rate,
+                "discount_amount": disc_amt,
+                "discount_pct": float(r["lineitem_discount_percent"] or 0),
+                "gst_rate": implied_gst_rate,
+                "gst_amount": tax_amt,
+            })
+    except Exception:
+        pass
+
+    # --- Transactions: route by txn_type ---
+    # Vyapar txn_type: 1=Sale, 2=Purchase, 7=Sale Return, 21=Estimate/Quotation,
+    # 23=Delivery Challan, 27=Purchase Order, 28=Sale Order, 30=Job Work Out
+    TYPE_ROUTES = {
+        1:  ("invoices", "sales", "customer", "Tax Invoice"),
+        2:  ("vendor_bills", "purchases", "supplier", "Purchase Bill"),
+        7:  ("credit_notes", "sale_returns", "customer", "Credit Note"),
+        21: ("quotations", "quotations", "customer", "Estimate"),
+        23: ("delivery_challans", "delivery_challans", "customer", "Delivery Challan"),
+        24: ("delivery_challans", "delivery_challans", "customer", "Delivery Challan"),
+        27: ("purchase_orders", "purchase_orders", "supplier", "Purchase Order"),
+        28: ("sale_orders", "sale_orders", "customer", "Sale Order"),
+        30: ("job_work_out", "job_work_out", "customer", "Job Work Out Challan"),
+    }
+    cur.execute("SELECT * FROM kb_transactions")
+    for r in cur.fetchall():
+        t = int(r["txn_type"]) if r["txn_type"] is not None else 0
+        route = TYPE_ROUTES.get(t)
+        if not route:
+            continue
+        collection_name, counter_key, party_kind, _title = route
+        # Honour user toggles
+        if party_kind == "customer" and (counter_key == "sales") and not opts.sales: continue
+        if party_kind == "supplier" and (counter_key == "purchases") and not opts.purchases: continue
+        if counter_key not in ("sales", "purchases") and not opts.sales and party_kind == "customer": continue
+
+        party_name = name_lookup.get(int(r["txn_name_id"]) if r["txn_name_id"] is not None else -1, "Unknown")
+        ref = (r["txn_ref_number_char"] or "").strip()
+        prefix = (r["txn_invoice_prefix"] or "").strip()
+        code = (f"{prefix}{ref}" if ref else f"VY-{r['txn_id']}").strip()
+        cash = float(r["txn_cash_amount"] or 0)
+        bal = float(r["txn_balance_amount"] or 0)
+        total = cash + bal
+        sub = max(total - float(r["txn_tax_amount"] or 0), 0)
+        ln = lines_by_txn.get(int(r["txn_id"]), [])
+        # Split GST based on place_of_supply vs firm_state (heuristic: if intra-state, half/half; if interstate, all IGST)
+        is_interstate = bool(r["txn_place_of_supply"]) and "gujarat" not in str(r["txn_place_of_supply"]).lower()
+        tax_total = float(r["txn_tax_amount"] or 0)
+        cgst = 0.0; sgst = 0.0; igst = 0.0
+        if is_interstate: igst = tax_total
+        else: cgst = sgst = tax_total / 2
+
+        doc: Dict[str, Any] = {
+            "id": new_id(),
+            "code": code,
+            "date": str(r["txn_date"] or "")[:19] or now_iso(),
+            "due_date": str(r["txn_due_date"] or "")[:10],
+            "lines": ln,
+            "subtotal": sub,
+            "total": total,
+            "notes": (r["txn_description"] or "").strip(),
+            "place_of_supply": (r["txn_place_of_supply"] or "").strip(),
+            "is_interstate": is_interstate,
+            "vyapar_id": str(r["txn_id"]),
+            "vyapar_txn_type": t,
+            "source": "vyapar",
+            "created_at": str(r["txn_date_created"] or now_iso()),
+        }
+        if party_kind == "customer":
+            doc["customer_id"] = ""
+            doc["customer_name"] = party_name
+            doc["cgst"] = cgst; doc["sgst"] = sgst; doc["igst"] = igst
+            doc["gst_total"] = tax_total
+            doc["status"] = "paid" if bal == 0 else "sent"
+        else:
+            doc["supplier_id"] = ""
+            doc["supplier_name"] = party_name
+            doc["gst_total"] = tax_total
+            doc["status"] = "received" if bal == 0 else "open"
+
+        if not opts.dry_run:
+            target = getattr(db, collection_name)
+            await target.update_one({"code": doc["code"], "vyapar_id": doc["vyapar_id"]},
+                                    {"$setOnInsert": doc}, upsert=True)
+        # Increment counter
+        if t == 1: res["sales"] += 1
+        elif t == 2: res["purchases"] += 1
+        elif t == 7: res["sale_returns"] += 1
+        elif t == 21: res["quotations"] += 1
+        elif t in (23, 24): res["delivery_challans"] += 1
+        elif t == 27: res["purchase_orders"] += 1
+        elif t == 28: res["sale_orders"] += 1
+        elif t == 30: res["job_work_out"] += 1
+
+    con.close()
+    return res
+
+async def _do_import_generic_sqlite(path: Path, opts: VyaparImportIn) -> Dict[str, Any]:
+    """Fallback for non-Vyapar SQLite DBs (e.g. an exported generic db). Best-effort."""
     import sqlite3
     res = {"parties": 0, "items": 0, "sales": 0, "purchases": 0}
     con = sqlite3.connect(str(path)); con.row_factory = sqlite3.Row
     cur = con.cursor()
     cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
     tables = {r[0].lower(): r[0] for r in cur.fetchall()}
-
     def _try_select(candidates: List[str]):
         for c in candidates:
             if c.lower() in tables:
                 try:
-                    cur.execute(f'SELECT * FROM "{tables[c.lower()]}"')
-                    return cur.fetchall()
-                except Exception:
-                    continue
+                    cur.execute(f'SELECT * FROM "{tables[c.lower()]}"'); return cur.fetchall()
+                except Exception: pass
         return None
-
     if opts.parties:
-        rows = _try_select(["parties", "party", "kb_parties", "tbl_parties"])
-        for r in rows or []:
-            d = {k: r[k] for k in r.keys()}
-            p = _map_row(d, PARTY_COLS)
+        for r in _try_select(["parties", "party"]) or []:
+            d = {k: r[k] for k in r.keys()}; p = _map_row(d, PARTY_COLS)
             if not p.get("name"): continue
-            doc = {"id": new_id(), "name": str(p["name"])[:120],
-                   "phone": str(p.get("phone","") or ""),
-                   "email": str(p.get("email","") or ""),
-                   "gstin": str(p.get("gstin","") or ""),
-                   "address": str(p.get("address","") or ""),
-                   "state": str(p.get("state","") or ""),
+            doc = {"id": new_id(), "name": str(p["name"])[:120], "phone": str(p.get("phone","") or ""),
+                   "email": str(p.get("email","") or ""), "gstin": str(p.get("gstin","") or ""),
+                   "address": str(p.get("address","") or ""), "state": str(p.get("state","") or ""),
                    "source": "vyapar", "created_at": now_iso()}
             if not opts.dry_run:
                 await db.customers.update_one({"name": doc["name"]}, {"$setOnInsert": doc}, upsert=True)
             res["parties"] += 1
-
-    if opts.items:
-        rows = _try_select(["items", "kb_items", "tbl_items", "products"])
-        for r in rows or []:
-            d = {k: r[k] for k in r.keys()}
-            it_ = _map_row(d, ITEM_COLS)
-            if not it_.get("name"): continue
-            doc = {"id": new_id(), "item_code": "VY-" + new_id()[:8].upper(),
-                   "name": str(it_["name"])[:160],
-                   "hsn": str(it_.get("hsn","") or ""),
-                   "unit": str(it_.get("unit","NOS") or "NOS"),
-                   "rate": float(it_.get("sale_price") or 0),
-                   "stock": float(it_.get("stock") or 0),
-                   "reorder_level": 0,
-                   "source": "vyapar", "created_at": now_iso()}
-            if not opts.dry_run:
-                await db.inventory_items.update_one({"name": doc["name"]}, {"$setOnInsert": doc}, upsert=True)
-            res["items"] += 1
-
-    if opts.sales:
-        rows = _try_select(["sales", "kb_sales", "tbl_sales", "invoices"]) or []
-        for r in rows or []:
-            d = {k: r[k] for k in r.keys()}
-            s = _map_row(d, SALE_COLS)
-            if not s.get("code"): continue
-            doc = {"id": new_id(),
-                   "code": "VY-" + str(s["code"]),
-                   "customer_id": "",
-                   "customer_name": str(s.get("customer_name","") or "Unknown"),
-                   "date": str(s.get("date") or now_iso())[:19],
-                   "lines": [], "subtotal": float(s.get("total") or 0),
-                   "cgst": 0, "sgst": 0, "igst": 0,
-                   "total": float(s.get("total") or 0),
-                   "status": "paid" if (float(s.get("balance") or 0) == 0) else "sent",
-                   "source": "vyapar", "created_at": now_iso()}
-            if not opts.dry_run:
-                await db.invoices.update_one({"code": doc["code"]}, {"$setOnInsert": doc}, upsert=True)
-            res["sales"] += 1
-    if opts.purchases:
-        rows = _try_select(["purchase", "purchases", "kb_purchases", "tbl_purchases"]) or []
-        for r in rows or []:
-            d = {k: r[k] for k in r.keys()}
-            p = _map_row(d, PURCHASE_COLS)
-            if not p.get("code"): continue
-            doc = {"id": new_id(),
-                   "code": "VY-" + str(p["code"]),
-                   "supplier_id": "",
-                   "supplier_name": str(p.get("supplier_name","") or "Unknown"),
-                   "date": str(p.get("date") or now_iso())[:19],
-                   "lines": [], "subtotal": float(p.get("total") or 0),
-                   "gst_total": 0, "total": float(p.get("total") or 0),
-                   "status": "received",
-                   "source": "vyapar", "created_at": now_iso()}
-            if not opts.dry_run:
-                await db.purchase_orders.update_one({"code": doc["code"]}, {"$setOnInsert": doc}, upsert=True)
-            res["purchases"] += 1
     con.close()
     return res
 
@@ -2679,7 +2986,7 @@ async def _do_import_xlsx(path: Path, opts: VyaparImportIn) -> Dict[str, Any]:
                        "rate": float(it_.get("sale_price") or 0), "stock": float(it_.get("stock") or 0),
                        "reorder_level": 0, "source": "vyapar", "created_at": now_iso()}
                 if not opts.dry_run:
-                    await db.inventory_items.update_one({"name": doc["name"]}, {"$setOnInsert": doc}, upsert=True)
+                    await db.items.update_one({"name": doc["name"]}, {"$setOnInsert": doc}, upsert=True)
                 res["items"] += 1
         elif kind == "sales" and opts.sales:
             for d in rows:
@@ -2721,12 +3028,12 @@ async def vyapar_import(payload: VyaparImportIn, user=Depends(require_roles("adm
     if not path.exists():
         raise HTTPException(404, "Uploaded file is no longer on disk. Please re-upload.")
     kind = meta.get("kind")
-    if kind == "zip":
+    if kind in ("zip", "zip_sqlite"):
         import zipfile, tempfile
         with zipfile.ZipFile(path) as z:
-            inner = [n for n in z.namelist() if n.endswith(".db") or n.endswith(".sqlite")]
+            inner = [n for n in z.namelist() if n.endswith(".db") or n.endswith(".sqlite") or n.endswith(".vyp")]
             if not inner:
-                raise HTTPException(400, "ZIP doesn't contain a SQLite database.")
+                raise HTTPException(400, "Archive doesn't contain a SQLite database.")
             tmpd = Path(tempfile.mkdtemp())
             z.extract(inner[0], tmpd)
             path = tmpd / inner[0]
@@ -2739,7 +3046,12 @@ async def vyapar_import(payload: VyaparImportIn, user=Depends(require_roles("adm
         raise HTTPException(400, f"Cannot import file kind '{kind}'. Please export an Excel file from Vyapar (Reports → Sale/Party/Item/Purchase Report → Excel icon).")
     await write_audit(user["name"], "vyapar_import", "import", payload.token,
                       {**details, "dry_run": payload.dry_run})
-    summary = f"{details['parties']} parties · {details['items']} items · {details['sales']} sales · {details['purchases']} purchases" + (" (dry run)" if payload.dry_run else "")
+    bits = [f"{details.get(k,0)} {k.replace('_',' ')}" for k in
+            ("parties","items","sales","purchases","quotations","sale_orders","purchase_orders","delivery_challans","job_work_out","sale_returns")
+            if details.get(k)]
+    summary = " · ".join(bits) or "nothing matched"
+    if payload.dry_run: summary += " (dry run)"
+    if details.get("company_seeded"): summary += " · company details auto-filled"
     return {"ok": True, "summary": summary, "details": details, "dry_run": payload.dry_run}
 
 

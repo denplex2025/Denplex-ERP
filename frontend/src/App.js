@@ -28,6 +28,7 @@ import Settings from "@/pages/Settings";
 import AuditLog from "@/pages/AuditLog";
 import Trial from "@/pages/Trial";
 import TrialRequests from "@/pages/TrialRequests";
+import DocList from "@/pages/DocList";
 
 function Protected({ children }) {
   const { user, loading } = useAuth();
@@ -55,6 +56,7 @@ function App() {
               <Route path="quotations" element={<Quotations />} />
               <Route path="purchase-orders" element={<PurchaseOrders />} />
               <Route path="invoices" element={<Invoices />} />
+              <Route path="docs/:kind" element={<DocList />} />
               <Route path="leads" element={<Leads />} />
               <Route path="customers" element={<Customers />} />
               <Route path="suppliers" element={<Suppliers />} />
