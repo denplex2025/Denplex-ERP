@@ -910,16 +910,25 @@ async def del_doc(did: str, user=Depends(get_current_user)):
 # ---------------- Dashboard ----------------
 @api.get("/dashboard/stats")
 async def dashboard_stats(user=Depends(get_current_user)):
-    items = await db.items.find({}, {"_id": 0}).to_list(5000)
-    low_stock = [i for i in items if i["qty_on_hand"] <= i.get("reorder_level", 0)]
+    # Projection-limited fetches to keep dashboard fast even with thousands of records
+    items = await db.items.find(
+        {}, {"_id": 0, "id": 1, "sku": 1, "name": 1, "qty_on_hand": 1, "reorder_level": 1, "uom": 1}
+    ).to_list(5000)
+    low_stock = [i for i in items if i.get("qty_on_hand", 0) <= i.get("reorder_level", 0)]
     open_wo = await db.work_orders.count_documents({"status": {"$in": ["planned", "in_progress"]}})
     qc_pending = await db.work_orders.count_documents({"status": "qc"})
     leads_open = await db.leads.count_documents({"status": {"$in": ["new", "contacted", "qualified"]}})
     customers = await db.customers.count_documents({})
-    invoices = await db.invoices.find({}, {"_id": 0}).to_list(2000)
-    revenue = sum([i.get("total", 0) for i in invoices if i.get("status") in ("paid", "sent")])
+    # Aggregate revenue at the DB layer instead of pulling 2000 docs into Python
+    rev_pipeline = [
+        {"$match": {"status": {"$in": ["paid", "sent"]}}},
+        {"$group": {"_id": None, "total": {"$sum": "$total"}}},
+    ]
+    rev_cursor = db.invoices.aggregate(rev_pipeline)
+    rev_doc = await rev_cursor.to_list(1)
+    revenue = float(rev_doc[0]["total"]) if rev_doc else 0.0
+    items_count = await db.items.count_documents({})
     repeat_customers = await db.customers.count_documents({"customer_type": "repeat"})
-    # recent wo
     recent = await db.work_orders.find({}, {"_id": 0}).sort("created_at", -1).to_list(8)
     return {
         "open_wo": open_wo,
@@ -930,7 +939,7 @@ async def dashboard_stats(user=Depends(get_current_user)):
         "customers": customers,
         "repeat_customers": repeat_customers,
         "revenue": round(revenue, 2),
-        "items_count": len(items),
+        "items_count": items_count,
         "recent_wo": recent,
     }
 
