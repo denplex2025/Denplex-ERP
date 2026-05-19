@@ -61,16 +61,30 @@ Modules requested: Manufacturing, BOM, Work Orders, Job Cards, Inventory, CRM, Q
 - **Admin Settings page** with Twilio + Resend + Indiamart + TradeIndia + Company GSTIN/address
 - **In-app PDF preview** (iframe) + quick download/email actions on every doc row
 
-### P3 (Denplex rebrand + Google + IMAP/SMTP)
+### P3 (Denplex rebrand + Google + IMAP/SMTP) — SUPERSEDED
 - **Denplex ERP rebrand** — red (#DC2626) + black (#0A0A0A) theme, Denplex logo in nav/login/portal/landing, favicon, page title
 - **Branded PDF letterhead** — Denplex logo top-left, red+black header band, "DENPLEX ENGINEERING COMPANY" tagline, red total bar, "Yours faithfully / Authorised Signatory · Managing Partner" footer
-- **Google OAuth (Drive + Gmail)** — per-user OAuth, /api/integrations/google/{auth-url,callback,status,disconnect}
-- **Drive backup** — /api/integrations/google/drive/upload + /backup-doc/{kind}/{id} for invoices/quotations/POs
-- **Gmail send** — /api/integrations/google/gmail/send (user's mailbox → ends up in their Sent folder, customer replies go to them)
-- **Gmail lead sync** — /api/integrations/google/gmail/sync-leads scans inbox, auto-creates leads, dedupes by message_id
-- **Generic IMAP/SMTP** — /api/integrations/email-account (per-user, password hidden in GET), /api/integrations/smtp/send, /api/integrations/imap/sync-leads
-- **Settings page tabs**: Company, Google (Drive+Gmail), Email Account (IMAP/SMTP), Twilio, Resend, Indiamart, TradeIndia, 2FA
-- **Per-row send buttons** (8 channels): Preview · Download · Gmail · SMTP · Resend · Drive backup · WhatsApp web · Twilio WhatsApp
+- ~~Google OAuth (Drive + Gmail)~~ — REMOVED Feb 2026 per user request (caused invalid_client friction)
+- ~~Microsoft Outlook OAuth~~ — REMOVED Feb 2026 per user request
+- ~~Resend integration~~ — REMOVED Feb 2026 per user request
+
+### P3.5 (Feb 2026 — Frictionless Email via App Password) ✅ CURRENT
+- **Email Accounts (Gmail/Outlook/Yahoo via App Password + SMTP/IMAP)**: Each user can connect multiple mailboxes (own + central company email like sales@denplex.co). Zero Google Cloud Console setup. Just paste email + 16-char App Password.
+- Endpoints:
+  - `POST /api/email/accounts` — add (auto-detects provider, real SMTP login test before persist)
+  - `GET /api/email/accounts` — list user's accounts (encrypted password never returned)
+  - `DELETE /api/email/accounts/{id}` — remove (auto-promotes next as default)
+  - `POST /api/email/accounts/{id}/default` — set as default sender
+  - `POST /api/email/accounts/{id}/test` — re-test SMTP + IMAP
+  - `POST /api/email/send` — send (optional `account_id`, uses default if blank)
+  - `GET /api/email/accounts/{id}/inbox?max=25` — read recent inbox (HTML snippets stripped)
+  - `POST /api/email/accounts/{id}/sync-leads` — convert recent inbox to leads
+  - `POST /api/email/sync-leads` — sync from ALL connected accounts (aggregated)
+- Provider auto-detect: Gmail / Outlook / Yahoo / Zoho presets (smtp/imap host+port).
+- Provider-aware error copy: Gmail-specific App Password URL for @gmail; Microsoft-specific URL for @outlook/@hotmail/@live; Yahoo-specific for @yahoo; etc.
+- Password encryption: Fernet (key derived from JWT_SECRET via SHA-256). Stored under user-scoped collection `email_accounts`.
+- **Per-row email button** consolidated to ONE icon (sends from default mailbox); WhatsApp web + Twilio WhatsApp buttons unchanged.
+- **Lead sync** consolidated to ONE "Sync Email" button (aggregates all user's mailboxes); Indiamart sync button preserved.
 
 ## Backlog
 ### P2 (deferred)

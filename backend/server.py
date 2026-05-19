@@ -1604,6 +1604,16 @@ def _autodetect(email_addr: str) -> Dict[str, Any]:
     dom = (email_addr or "").lower().split("@")[-1]
     return EMAIL_PROVIDERS.get(dom, DEFAULT_PROVIDER)
 
+def _app_pw_hint(label: str) -> str:
+    """Provider-specific hint shown in 4xx/5xx auth errors."""
+    if label == "Outlook":
+        return "Open https://account.microsoft.com/security → Advanced security → App passwords and paste the generated password here (2-Step Verification must be ON)."
+    if label == "Yahoo":
+        return "Open Yahoo → Account Info → Account security → Generate app password and paste it here."
+    if label == "Zoho":
+        return "Open Zoho Mail → Settings → Mail Accounts → App Specific Passwords and paste it here."
+    return "Make sure 2-Step Verification is ON in your Google Account, then create an App Password at https://myaccount.google.com/apppasswords and paste it here (spaces ok, we strip them)."
+
 class EmailAccountIn(BaseModel):
     email: EmailStr
     app_password: str
@@ -1676,11 +1686,12 @@ async def add_email_account(payload: EmailAccountIn, user=Depends(get_current_us
     pw = (payload.app_password or "").strip().replace(" ", "")  # Google shows spaces in groups of 4
     if not pw:
         raise HTTPException(400, "App password required")
+    label = preset["label"]
     # Test SMTP login synchronously before persisting (fail fast with a helpful message)
     try:
         await asyncio.to_thread(_smtp_test, smtp_host, smtp_port, str(payload.email), pw)
     except smtplib.SMTPAuthenticationError as e:
-        raise HTTPException(400, f"SMTP login failed. Make sure 2-Step Verification is ON in your Google Account, then create an App Password and paste it here (no spaces). ({e.smtp_code})")
+        raise HTTPException(400, f"SMTP login failed ({e.smtp_code}). {_app_pw_hint(label)}")
     except Exception as e:
         raise HTTPException(400, f"SMTP test failed: {e}")
     # Quick IMAP test (non-fatal — if IMAP is blocked we'll still allow sending)
@@ -1812,7 +1823,8 @@ async def email_send(payload: EmailSendIn, user=Depends(get_current_user)):
     try:
         await asyncio.to_thread(_do_send)
     except smtplib.SMTPAuthenticationError as e:
-        raise HTTPException(502, f"Login rejected by mail server. Your App Password may have expired. Regenerate in Google Account → Security → App Passwords. ({e.smtp_code})")
+        hint = _app_pw_hint(_autodetect(a["email"])["label"])
+        raise HTTPException(502, f"Login rejected by mail server ({e.smtp_code}). Your App Password may have expired. {hint}")
     except Exception as e:
         raise HTTPException(502, f"Email send failed: {e}")
     await write_audit(user["name"], "email_send", "email", None, {"from": a["email"], "to": payload.to, "subject": payload.subject})
@@ -1866,8 +1878,10 @@ def _fetch_inbox(host: str, port: int, email_addr: str, password: str, max_n: in
             except Exception:
                 date_iso = ""
             name, em_addr = parseaddr(frm_raw)
-            # Clean snippet
-            snippet_clean = re.sub(r"\s+", " ", snippet).strip()[:240]
+            # Clean snippet: strip HTML tags, collapse whitespace
+            snippet_text = re.sub(r"<[^>]+>", " ", snippet)
+            snippet_text = re.sub(r"&nbsp;|&zwnj;|&amp;|&lt;|&gt;|&quot;", " ", snippet_text)
+            snippet_clean = re.sub(r"\s+", " ", snippet_text).strip()[:240]
             out.append({
                 "uid": mid.decode("utf-8", errors="replace") if isinstance(mid, (bytes, bytearray)) else str(mid),
                 "from_name": name or (em_addr.split("@")[0] if em_addr else ""),
