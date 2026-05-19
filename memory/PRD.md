@@ -70,6 +70,14 @@ Modules requested: Manufacturing, BOM, Work Orders, Job Cards, Inventory, CRM, Q
 
 ### P3.5 (Feb 2026 — Frictionless Email via App Password) ✅ CURRENT
 - **Email Accounts (Gmail/Outlook/Yahoo via App Password + SMTP/IMAP)**: Each user can connect multiple mailboxes (own + central company email like sales@denplex.co). Zero Google Cloud Console setup. Just paste email + 16-char App Password.
+
+### P3.6 (Feb 2026 — Vyapar-style Invoices + Vyapar Data Import) ✅ CURRENT
+- **New Vyapar-style PDF generator** (`_build_doc_pdf`): top "ORIGINAL FOR RECIPIENT" label, company header card (logo + name + UDYAM + GSTIN + phone + email + state), Bill-To + Invoice Details two-column box, optional Ship-To, item table with HSN/SAC, Qty, Price/unit, Discount, GST, Amount, **HSN-wise Tax Summary** (CGST/SGST or IGST), Totals sidebar (Sub Total / Discount / Tax / Total in Denplex red), **Invoice Amount in Words** (Indian-English), Payment Mode, Description + Terms two-column box, Bank Details with **auto-generated UPI QR code** (via `qrcode` lib), and signatory image upload.
+- **Invoice Template settings** (`GET/PUT /api/settings/invoice-template`): 21 togglable visibility flags mirroring Vyapar's "Print → Regular Printer" panel + paper size / orientation / amount-in-words locale.
+- **Company settings extended**: company_phone, company_email, company_udyam, bank_name, bank_account_no, bank_ifsc, bank_branch, upi_id, signatory_image_b64, signatory_label, invoice_terms, invoice_description.
+- **Vyapar Import** (`POST /api/integrations/vyapar/inspect`, `POST /api/integrations/vyapar/import`): user uploads `.vyb` / `.xlsx` / `.csv` / `.zip` / `.db`. We auto-detect format: plain SQLite (extract directly), ZIP with inner SQLite (extract & import), XLSX (heuristic column-mapping per sheet), or encrypted-unsupported (show Excel-export instructions). Imports Parties → Customers, Items → Inventory, Sale Invoices, Purchase Invoices. Dry-run option available. Dedupes by name / invoice code.
+- **Frontend**: new Settings tabs "Invoice Template" (with live PDF preview iframe) and "Vyapar Import" (drag/drop upload + per-entity import toggles).
+- **Updated brand assets**: higher-resolution Denplex logo extracted from user's 2026 letterhead.docx.
 - Endpoints:
   - `POST /api/email/accounts` — add (auto-detects provider, real SMTP login test before persist)
   - `GET /api/email/accounts` — list user's accounts (encrypted password never returned)

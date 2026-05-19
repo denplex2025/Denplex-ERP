@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, Query, Request, Response
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, Query, Request, Response, UploadFile, File, Form
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import StreamingResponse
 from dotenv import load_dotenv
@@ -1137,6 +1137,21 @@ class IntegrationSettingsIn(BaseModel):
     company_state: Optional[str] = ""
     company_address: Optional[str] = ""
     company_tagline: Optional[str] = "Precision Engineered Solutions"
+    company_phone: Optional[str] = ""
+    company_email: Optional[str] = ""
+    company_udyam: Optional[str] = ""  # UDYAM / MSME registration shown on letterhead
+    # Bank / UPI block (printed on every invoice as per Vyapar layout)
+    bank_name: Optional[str] = ""
+    bank_account_no: Optional[str] = ""
+    bank_ifsc: Optional[str] = ""
+    bank_branch: Optional[str] = ""
+    upi_id: Optional[str] = ""  # e.g. denplex@axisbank — used to auto-generate QR
+    # Signatory image (base64 PNG/JPG, optional)
+    signatory_image_b64: Optional[str] = ""
+    signatory_label: Optional[str] = "Authorised Signatory"
+    # Terms & default sale description
+    invoice_terms: Optional[str] = "Thanks for doing business with us!"
+    invoice_description: Optional[str] = ""
 
 @api.get("/settings/integrations")
 async def get_integrations(user=Depends(require_roles("admin"))):
@@ -1146,6 +1161,46 @@ async def get_integrations(user=Depends(require_roles("admin"))):
 async def update_integrations(payload: IntegrationSettingsIn, user=Depends(require_roles("admin"))):
     data = payload.model_dump()
     await set_setting("integrations", data)
+    return data
+
+# ---------- Invoice Template (Vyapar-style toggles) ----------
+class InvoiceTemplateIn(BaseModel):
+    """Per-section visibility flags for the printed PDF (Vyapar's 'Print > Regular Printer' style)."""
+    show_company_logo: bool = True
+    show_company_address: bool = True
+    show_company_gstin: bool = True
+    show_company_email: bool = True
+    show_company_phone: bool = True
+    show_company_udyam: bool = True
+    show_ship_to: bool = True
+    show_due_date: bool = True
+    show_place_of_supply: bool = True
+    show_hsn_column: bool = True
+    show_discount_column: bool = True
+    show_tax_summary: bool = True            # HSN-wise CGST/SGST/IGST breakup
+    show_totals_sidebar: bool = True         # Sub Total / Discount / Tax / TCS / Total
+    show_amount_in_words: bool = True
+    show_payment_mode: bool = True
+    show_description: bool = True
+    show_terms: bool = True
+    show_bank_details: bool = True
+    show_upi_qr: bool = True
+    show_signatory_image: bool = True
+    print_original_duplicate: bool = True
+    paper_size: Literal["A4", "A5"] = "A4"
+    orientation: Literal["portrait", "landscape"] = "portrait"
+    amount_in_words_locale: Literal["en_IN", "en"] = "en_IN"
+
+@api.get("/settings/invoice-template")
+async def get_invoice_template(user=Depends(get_current_user)):
+    s = await get_setting("invoice_template")
+    # Merge with defaults so frontend always gets a full payload
+    return {**InvoiceTemplateIn().model_dump(), **(s or {})}
+
+@api.put("/settings/invoice-template")
+async def update_invoice_template(payload: InvoiceTemplateIn, user=Depends(require_roles("admin"))):
+    data = payload.model_dump()
+    await set_setting("invoice_template", data)
     return data
 
 # ---------- Audit log ----------
@@ -1217,117 +1272,455 @@ async def whatsapp_send(payload: WhatsAppSendIn, user=Depends(get_current_user))
 
 # ---------- Resend deprecated — using Gmail / Outlook OAuth instead ----------
 
-# ---------- PDF builders ----------
+# ---------- PDF builders (Vyapar-style with Denplex Red/Black branding) ----------
 def _money(n) -> str:
     try:
         return f"Rs. {float(n):,.2f}"
     except Exception:
         return f"Rs. {n}"
 
+def _amount_in_words(n: float, locale: str = "en_IN") -> str:
+    try:
+        from num2words import num2words
+        rupees = int(n)
+        paise = round((float(n) - rupees) * 100)
+        words_r = num2words(rupees, lang="en_IN" if locale == "en_IN" else "en").title()
+        out = f"{words_r} Rupees"
+        if paise:
+            out += f" and {num2words(paise, lang='en').title()} Paise"
+        return out + " only"
+    except Exception:
+        return ""
+
+def _upi_qr_png(upi_id: str, payee_name: str, amount: float = 0.0, note: str = "") -> Optional[bytes]:
+    """Generate UPI QR (BHIM/PhonePe/GPay scannable) as PNG bytes."""
+    if not upi_id:
+        return None
+    try:
+        import qrcode
+        from urllib.parse import urlencode, quote
+        params = {"pa": upi_id, "pn": payee_name or "Denplex", "cu": "INR"}
+        if amount and amount > 0:
+            params["am"] = f"{amount:.2f}"
+        if note:
+            params["tn"] = note[:50]
+        # Use quote_via to keep & encoded correctly
+        upi_url = "upi://pay?" + urlencode(params, quote_via=quote)
+        qr = qrcode.QRCode(box_size=3, border=1)
+        qr.add_data(upi_url); qr.make(fit=True)
+        img = qr.make_image(fill_color="#0A0A0A", back_color="#FFFFFF")
+        out = io.BytesIO(); img.save(out, format="PNG")
+        return out.getvalue()
+    except Exception:
+        return None
+
+def _hsn_tax_summary(lines: List[Dict[str, Any]], is_interstate: bool) -> List[Dict[str, Any]]:
+    """Aggregate per-HSN tax breakup like Vyapar's Tax Summary block."""
+    bucket: Dict[str, Dict[str, float]] = {}
+    for l in lines or []:
+        hsn = str(l.get("hsn") or "")
+        qty = float(l.get("qty", 0) or 0)
+        rate = float(l.get("rate", 0) or 0)
+        gst_rate = float(l.get("gst_rate", 0) or 0)
+        taxable = qty * rate
+        b = bucket.setdefault(hsn, {"taxable": 0.0, "cgst_amt": 0.0, "sgst_amt": 0.0, "igst_amt": 0.0, "cgst_rate": 0.0, "sgst_rate": 0.0, "igst_rate": 0.0})
+        b["taxable"] += taxable
+        if is_interstate:
+            b["igst_rate"] = gst_rate
+            b["igst_amt"] += taxable * gst_rate / 100
+        else:
+            b["cgst_rate"] = gst_rate / 2
+            b["sgst_rate"] = gst_rate / 2
+            b["cgst_amt"] += taxable * gst_rate / 200
+            b["sgst_amt"] += taxable * gst_rate / 200
+    rows = []
+    for hsn, v in bucket.items():
+        rows.append({"hsn": hsn, **v, "total_tax": v["cgst_amt"] + v["sgst_amt"] + v["igst_amt"]})
+    return rows
+
 def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, date_s: str,
                    lines: List[Dict[str, Any]], totals: Dict[str, float], gst_breakup: Optional[Dict[str, float]] = None,
-                   company: Optional[Dict[str, Any]] = None, notes: str = "") -> bytes:
+                   company: Optional[Dict[str, Any]] = None, notes: str = "",
+                   tpl: Optional[Dict[str, Any]] = None,
+                   party_extra: Optional[Dict[str, Any]] = None,
+                   ship_to: Optional[Dict[str, Any]] = None,
+                   doc_meta: Optional[Dict[str, Any]] = None,
+                   copy_label: str = "ORIGINAL FOR RECIPIENT") -> bytes:
+    """Vyapar-style invoice/quotation/PO PDF — Denplex Red+Black branded.
+    `tpl` overrides which sections are visible (defaults to all-on).
+    `party_extra` carries gstin/phone/state/address for the Bill-To party.
+    `ship_to` is an optional shipping address dict.
+    `doc_meta` may contain {due_date, place_of_supply, payment_mode, time}.
+    """
     from reportlab.platypus import Image as RLImage
-    buf = io.BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=A4, rightMargin=15*mm, leftMargin=15*mm, topMargin=14*mm, bottomMargin=14*mm)
-    styles = getSampleStyleSheet()
+    tpl = tpl or {}
+    def show(k: str, default: bool = True) -> bool:
+        v = tpl.get(k)
+        return default if v is None else bool(v)
+    party_extra = party_extra or {}
+    doc_meta = doc_meta or {}
+    company = company or {}
+    is_interstate = bool((doc_meta or {}).get("is_interstate")) or bool(gst_breakup and gst_breakup.get("igst"))
+
     RED = colors.HexColor("#DC2626")
     BLACK = colors.HexColor("#0A0A0A")
     GREY = colors.HexColor("#475569")
-    h_style = ParagraphStyle("h", parent=styles["Heading1"], fontSize=18, textColor=BLACK, spaceAfter=2)
-    title_style = ParagraphStyle("ttl", parent=styles["Heading1"], fontSize=22, textColor=RED, leading=24, alignment=2, spaceAfter=0)
-    sub_style = ParagraphStyle("sub", parent=styles["Normal"], fontSize=9, textColor=GREY)
-    small = ParagraphStyle("sm", parent=styles["Normal"], fontSize=9, textColor=BLACK)
-    company = company or {}
+    LIGHTGREY = colors.HexColor("#F1F5F9")
+    BORDER = colors.HexColor("#CBD5E1")
+
+    buf = io.BytesIO()
+    page_size = A4  # A5/landscape options can be added later
+    doc = SimpleDocTemplate(buf, pagesize=page_size, rightMargin=10*mm, leftMargin=10*mm, topMargin=8*mm, bottomMargin=10*mm)
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle("ttl", parent=styles["Heading1"], fontSize=18, textColor=BLACK, leading=20, alignment=1, spaceAfter=0)
+    h2_style = ParagraphStyle("h2", parent=styles["Heading2"], fontSize=14, textColor=BLACK, leading=16, spaceAfter=0)
+    small = ParagraphStyle("sm", parent=styles["Normal"], fontSize=8.5, textColor=BLACK, leading=11)
+    smallb = ParagraphStyle("smb", parent=small, fontName="Helvetica-Bold")
+    tiny = ParagraphStyle("ti", parent=styles["Normal"], fontSize=7.5, textColor=GREY, leading=10)
+    box_label = ParagraphStyle("bl", parent=smallb, fontSize=9, textColor=BLACK)
+    copy_lbl = ParagraphStyle("cl", parent=small, fontSize=8, textColor=GREY, alignment=2)
     flow = []
-    # Header band: logo left, title right
-    logo_path = str(ROOT_DIR / "logo.png")
-    try:
-        logo = RLImage(logo_path, width=28*mm, height=24*mm)
-    except Exception:
-        logo = Paragraph("<b>DENPLEX</b>", h_style)
-    company_block = [
-        Paragraph(f"<b><font color='#0A0A0A'>{company.get('company_name','Denplex Engineering Company').upper()}</font></b>", small),
-    ]
-    if company.get("company_tagline"):
-        company_block.append(Paragraph(f"<font color='#DC2626'>{company['company_tagline']}</font>", sub_style))
-    if company.get("company_address"):
-        company_block.append(Paragraph(company["company_address"], sub_style))
-    if company.get("company_gstin"):
-        company_block.append(Paragraph(f"GSTIN: <b>{company['company_gstin']}</b>", sub_style))
-    title_block = [Paragraph(title.upper(), title_style),
-                   Paragraph(f"<b>{code}</b>", ParagraphStyle('c', parent=small, alignment=2, fontSize=11)),
-                   Paragraph(f"Date: {date_s}", ParagraphStyle('d', parent=sub_style, alignment=2))]
-    header_tbl = Table([[logo, company_block, title_block]], colWidths=[32*mm, 90*mm, 58*mm])
+
+    # ---------- Top right "Original for Recipient" ----------
+    if show("print_original_duplicate") and copy_label:
+        flow.append(Paragraph(copy_label.upper(), copy_lbl))
+
+    # ---------- Title (centered) ----------
+    flow.append(Paragraph(f"<b>{title}</b>", title_style))
+    flow.append(Spacer(1, 3*mm))
+
+    # ---------- Company header card ----------
+    logo_cell = ""
+    if show("show_company_logo"):
+        logo_path = str(ROOT_DIR / "logo.png")
+        try:
+            logo_cell = RLImage(logo_path, width=22*mm, height=22*mm)
+        except Exception:
+            logo_cell = Paragraph("<b>DENPLEX</b>", h2_style)
+    company_lines = [Paragraph(f"<font size=13><b>{company.get('company_name','Denplex Engineering Company')}</b></font>", smallb)]
+    if show("show_company_udyam") and company.get("company_udyam"):
+        company_lines.append(Paragraph(f"<font color='#475569'>UDYAM: <b>{company['company_udyam']}</b></font>", tiny))
+    if show("show_company_address") and company.get("company_address"):
+        company_lines.append(Paragraph(company["company_address"], tiny))
+    # Phone + Email + State row
+    contact_bits = []
+    if show("show_company_phone") and company.get("company_phone"):
+        contact_bits.append(f"<b>Phone:</b> {company['company_phone']}")
+    if show("show_company_gstin") and company.get("company_gstin"):
+        contact_bits.append(f"<b>GSTIN:</b> {company['company_gstin']}")
+    if contact_bits:
+        company_lines.append(Paragraph(" &nbsp;&nbsp; ".join(contact_bits), tiny))
+    contact2 = []
+    if show("show_company_email") and company.get("company_email"):
+        contact2.append(f"<b>Email:</b> {company['company_email']}")
+    if company.get("company_state"):
+        contact2.append(f"<b>State:</b> {company['company_state']}")
+    if contact2:
+        company_lines.append(Paragraph(" &nbsp;&nbsp; ".join(contact2), tiny))
+
+    header_tbl = Table([[logo_cell, company_lines]], colWidths=[28*mm, 162*mm])
     header_tbl.setStyle(TableStyle([
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("LINEBELOW", (0, 0), (-1, -1), 1.5, RED),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
-    ]))
-    flow.append(header_tbl)
-    flow.append(Spacer(1, 6*mm))
-    # Party block
-    flow.append(Paragraph(f"<b>{party_label}:</b>", small))
-    flow.append(Paragraph(f"<font size=11><b>{party_name}</b></font>", small))
-    flow.append(Spacer(1, 5*mm))
-    # Lines
-    header = ["#", "Description", "Qty", "Rate", "GST%", "Amount (Rs.)"]
-    data = [header]
-    for i, l in enumerate(lines, 1):
-        qty = float(l.get("qty", 0) or 0)
-        rate = float(l.get("rate", 0) or 0)
-        amt = qty * rate
-        data.append([str(i), l.get("description", ""), f"{qty:g}", f"{rate:,.2f}", f"{l.get('gst_rate', 0)}", f"{amt:,.2f}"])
-    tbl = Table(data, colWidths=[10*mm, 78*mm, 16*mm, 22*mm, 14*mm, 30*mm])
-    tbl.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), BLACK),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 0), (-1, -1), 9),
-        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#E2E8F0")),
-        ("ALIGN", (2, 0), (-1, -1), "RIGHT"),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 4),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-        ("TOPPADDING", (0, 0), (-1, -1), 4),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#FAFAFA")]),
-    ]))
-    flow.append(tbl)
-    flow.append(Spacer(1, 4*mm))
-    # Totals
-    tot_rows = [["Subtotal", _money(totals.get("subtotal", 0))]]
-    if gst_breakup:
-        if gst_breakup.get("igst"):
-            tot_rows.append(["IGST", _money(gst_breakup.get("igst", 0))])
-        else:
-            tot_rows.append(["CGST", _money(gst_breakup.get("cgst", 0))])
-            tot_rows.append(["SGST", _money(gst_breakup.get("sgst", 0))])
-    else:
-        tot_rows.append(["GST", _money(totals.get("gst_total", 0))])
-    tot_rows.append(["Total", _money(totals.get("total", 0))])
-    tot_tbl = Table(tot_rows, colWidths=[60*mm, 40*mm], hAlign="RIGHT")
-    tot_tbl.setStyle(TableStyle([
-        ("FONTSIZE", (0, 0), (-1, -1), 10),
-        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
-        ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
-        ("BACKGROUND", (0, -1), (-1, -1), RED),
-        ("TEXTCOLOR", (0, -1), (-1, -1), colors.white),
-        ("LINEABOVE", (0, -1), (-1, -1), 1, BLACK),
-        ("TOPPADDING", (0, 0), (-1, -1), 4),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("BOX", (0, 0), (-1, -1), 0.75, BORDER),
         ("LEFTPADDING", (0, 0), (-1, -1), 6),
         ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
     ]))
-    flow.append(tot_tbl)
-    if notes:
-        flow.append(Spacer(1, 6*mm))
-        flow.append(Paragraph(f"<b>Notes:</b> {notes}", small))
-    flow.append(Spacer(1, 14*mm))
-    flow.append(Paragraph("Yours faithfully,", small))
-    flow.append(Spacer(1, 12*mm))
-    flow.append(Paragraph(f"<b>For {company.get('company_name','DENPLEX ENGINEERING COMPANY').upper()}</b>", small))
-    flow.append(Paragraph("<font color='#475569'>Authorised Signatory &nbsp;·&nbsp; Managing Partner</font>", sub_style))
+    flow.append(header_tbl)
+
+    # ---------- Bill To / Invoice Details (two-column box) ----------
+    bill_lines = [Paragraph(f"<b>{party_label}:</b>", box_label),
+                  Paragraph(f"<font size=10><b>{party_name}</b></font>", smallb)]
+    if party_extra.get("address"): bill_lines.append(Paragraph(party_extra["address"], tiny))
+    if party_extra.get("phone"):   bill_lines.append(Paragraph(f"Contact No.: <b>{party_extra['phone']}</b>", tiny))
+    if party_extra.get("gstin"):   bill_lines.append(Paragraph(f"GSTIN: <b>{party_extra['gstin']}</b>", tiny))
+    if party_extra.get("state"):   bill_lines.append(Paragraph(f"State: <b>{party_extra['state']}</b>", tiny))
+
+    meta_lines = [Paragraph(f"<b>{title.split()[0]} Details:</b>", box_label),
+                  Paragraph(f"{title.split()[0]} No.: <b>{code}</b>", smallb),
+                  Paragraph(f"Date: <b>{date_s}</b>", smallb)]
+    if show("show_due_date") and doc_meta.get("due_date"):
+        meta_lines.append(Paragraph(f"Due Date: <b>{doc_meta['due_date']}</b>", smallb))
+    if show("show_place_of_supply") and doc_meta.get("place_of_supply"):
+        meta_lines.append(Paragraph(f"Place of Supply: <b>{doc_meta['place_of_supply']}</b>", smallb))
+
+    bd_tbl = Table([[bill_lines, meta_lines]], colWidths=[95*mm, 95*mm])
+    bd_tbl.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("BOX", (0, 0), (-1, -1), 0.75, BORDER),
+        ("LINEAFTER", (0, 0), (0, -1), 0.5, BORDER),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+    ]))
+    flow.append(bd_tbl)
+
+    # ---------- Ship To ----------
+    if show("show_ship_to") and ship_to and (ship_to.get("name") or ship_to.get("address")):
+        ship_block = [Paragraph("<b>Ship To:</b>", box_label),
+                      Paragraph(ship_to.get("name", ""), smallb)]
+        if ship_to.get("address"):
+            ship_block.append(Paragraph(ship_to["address"], tiny))
+        ship_tbl = Table([[ship_block]], colWidths=[190*mm])
+        ship_tbl.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("BOX", (0, 0), (-1, -1), 0.75, BORDER),
+            ("LEFTPADDING", (0, 0), (-1, -1), 6),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+            ("TOPPADDING", (0, 0), (-1, -1), 5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ]))
+        flow.append(ship_tbl)
+
+    # ---------- Line items ----------
+    show_hsn = show("show_hsn_column")
+    show_disc = show("show_discount_column")
+    cols = ["#", "Item name"]
+    widths = [8*mm, 60*mm]
+    if show_hsn:
+        cols.append("HSN/SAC"); widths.append(20*mm)
+    cols += ["Qty", "Price/unit"]; widths += [16*mm, 22*mm]
+    if show_disc:
+        cols.append("Discount"); widths.append(22*mm)
+    cols += ["GST", "Amount"]; widths += [22*mm, 20*mm]
+
+    data = [cols]
+    subtotal = 0.0; total_discount = 0.0; total_gst = 0.0; total_amount = 0.0
+    for i, l in enumerate(lines or [], 1):
+        qty = float(l.get("qty", 0) or 0)
+        rate = float(l.get("rate", 0) or 0)
+        disc_amt = float(l.get("discount_amount") or 0)
+        disc_pct = float(l.get("discount_pct") or 0)
+        # If percent provided, derive amount; else, percent for display
+        gross = qty * rate
+        if disc_amt == 0 and disc_pct:
+            disc_amt = gross * disc_pct / 100
+        net = max(gross - disc_amt, 0)
+        gst_rate = float(l.get("gst_rate", 0) or 0)
+        gst_amt = net * gst_rate / 100
+        amt = net + gst_amt
+        subtotal += gross
+        total_discount += disc_amt
+        total_gst += gst_amt
+        total_amount += amt
+        row = [str(i), Paragraph(l.get("description", ""), small)]
+        if show_hsn:
+            row.append(str(l.get("hsn") or ""))
+        row += [f"{qty:g}", f"₹ {rate:,.2f}"]
+        if show_disc:
+            row.append(f"₹ {disc_amt:,.2f} ({disc_pct:g}%)" if disc_amt else "—")
+        row += [f"₹ {gst_amt:,.2f} ({gst_rate:g}%)" if gst_amt else "—", f"₹ {amt:,.2f}"]
+        data.append(row)
+    # Total row
+    tot_row = ["", Paragraph("<b>TOTAL</b>", smallb)]
+    if show_hsn: tot_row.append("")
+    tot_row += [f"{sum(float(l.get('qty',0) or 0) for l in (lines or [])):g}", ""]
+    if show_disc: tot_row.append(f"₹ {total_discount:,.2f}")
+    tot_row += [f"₹ {total_gst:,.2f}", f"₹ {total_amount:,.2f}"]
+    data.append(tot_row)
+
+    tbl = Table(data, colWidths=widths, repeatRows=1)
+    style = [
+        ("BACKGROUND", (0, 0), (-1, 0), LIGHTGREY),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 8.5),
+        ("ALIGN", (0, 0), (0, -1), "CENTER"),
+        ("ALIGN", (2 if show_hsn else 2, 0), (-1, -1), "RIGHT"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("GRID", (0, 0), (-1, -1), 0.4, BORDER),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        # Total row
+        ("BACKGROUND", (0, -1), (-1, -1), LIGHTGREY),
+        ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+        ("LINEABOVE", (0, -1), (-1, -1), 0.8, BLACK),
+    ]
+    tbl.setStyle(TableStyle(style))
+    flow.append(tbl)
+
+    # ---------- Tax Summary + Totals sidebar ----------
+    bottom_left_blocks = []
+    if show("show_tax_summary") and (lines or []):
+        rows = _hsn_tax_summary(lines or [], is_interstate)
+        if rows:
+            if is_interstate:
+                hdr = ["HSN/SAC", "Taxable Amount", "IGST Rate", "IGST Amount", "Total Tax Amount"]
+                t_data = [hdr]
+                ct = 0; gt_taxable = 0; gt_total_tax = 0
+                for r in rows:
+                    gt_taxable += r["taxable"]; ct += r["igst_amt"]; gt_total_tax += r["total_tax"]
+                    t_data.append([r["hsn"] or "—", f"₹ {r['taxable']:,.2f}", f"{r['igst_rate']:g}%", f"₹ {r['igst_amt']:,.2f}", f"₹ {r['total_tax']:,.2f}"])
+                t_data.append(["Total", f"₹ {gt_taxable:,.2f}", "", f"₹ {ct:,.2f}", f"₹ {gt_total_tax:,.2f}"])
+                widths_ts = [22*mm, 24*mm, 14*mm, 22*mm, 24*mm]
+            else:
+                hdr = ["HSN/SAC", "Taxable Amount", "CGST Rate", "CGST Amount", "SGST Rate", "SGST Amount", "Total Tax Amount"]
+                t_data = [hdr]
+                gt_taxable=0; gt_c=0; gt_s=0; gt_total_tax=0
+                for r in rows:
+                    gt_taxable += r["taxable"]; gt_c += r["cgst_amt"]; gt_s += r["sgst_amt"]; gt_total_tax += r["total_tax"]
+                    t_data.append([r["hsn"] or "—", f"₹ {r['taxable']:,.2f}", f"{r['cgst_rate']:g}%", f"₹ {r['cgst_amt']:,.2f}", f"{r['sgst_rate']:g}%", f"₹ {r['sgst_amt']:,.2f}", f"₹ {r['total_tax']:,.2f}"])
+                t_data.append(["Total", f"₹ {gt_taxable:,.2f}", "", f"₹ {gt_c:,.2f}", "", f"₹ {gt_s:,.2f}", f"₹ {gt_total_tax:,.2f}"])
+                widths_ts = [18*mm, 20*mm, 12*mm, 18*mm, 12*mm, 18*mm, 20*mm]
+            ts = Table(t_data, colWidths=widths_ts)
+            ts.setStyle(TableStyle([
+                ("BACKGROUND", (0,0), (-1,0), LIGHTGREY),
+                ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+                ("FONTSIZE", (0,0), (-1,-1), 7.5),
+                ("ALIGN", (1,0), (-1,-1), "RIGHT"),
+                ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+                ("GRID", (0,0), (-1,-1), 0.4, BORDER),
+                ("BACKGROUND", (0,-1), (-1,-1), LIGHTGREY),
+                ("FONTNAME", (0,-1), (-1,-1), "Helvetica-Bold"),
+                ("TOPPADDING", (0,0), (-1,-1), 3),
+                ("BOTTOMPADDING", (0,0), (-1,-1), 3),
+            ]))
+            bottom_left_blocks.append(Paragraph("<b>Tax Summary:</b>", smallb))
+            bottom_left_blocks.append(ts)
+
+    # Totals sidebar
+    sidebar = []
+    if show("show_totals_sidebar"):
+        sd = []
+        sd.append(["Sub Total", f"₹ {subtotal:,.2f}"])
+        if total_discount:
+            sd.append(["Discount", f"₹ {total_discount:,.2f}"])
+        if is_interstate:
+            sd.append(["IGST", f"₹ {(gst_breakup or {}).get('igst', total_gst):,.2f}"])
+        else:
+            cg = (gst_breakup or {}).get("cgst", total_gst/2)
+            sg = (gst_breakup or {}).get("sgst", total_gst/2)
+            sd.append(["CGST", f"₹ {cg:,.2f}"])
+            sd.append(["SGST", f"₹ {sg:,.2f}"])
+        sd.append(["Total", f"₹ {totals.get('total', total_amount):,.2f}"])
+        side = Table(sd, colWidths=[28*mm, 30*mm])
+        side.setStyle(TableStyle([
+            ("FONTSIZE", (0,0), (-1,-1), 9),
+            ("ALIGN", (1,0), (1,-1), "RIGHT"),
+            ("GRID", (0,0), (-1,-1), 0.4, BORDER),
+            ("FONTNAME", (0,-1), (-1,-1), "Helvetica-Bold"),
+            ("BACKGROUND", (0,-1), (-1,-1), RED),
+            ("TEXTCOLOR", (0,-1), (-1,-1), colors.white),
+            ("TOPPADDING", (0,0), (-1,-1), 4),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+            ("LEFTPADDING", (0,0), (-1,-1), 6),
+            ("RIGHTPADDING", (0,0), (-1,-1), 6),
+        ]))
+        sidebar.append(side)
+    # Amount in words (under totals)
+    if show("show_amount_in_words"):
+        words = _amount_in_words(float(totals.get("total", total_amount) or 0), tpl.get("amount_in_words_locale", "en_IN"))
+        if words:
+            sidebar.append(Spacer(1, 2*mm))
+            sidebar.append(Paragraph("<b>Invoice Amount In Words:</b>", tiny))
+            sidebar.append(Paragraph(words, smallb))
+
+    # Lay out [tax summary | sidebar]
+    if bottom_left_blocks or sidebar:
+        left_cell = bottom_left_blocks or [Spacer(1, 1)]
+        right_cell = sidebar or [Spacer(1, 1)]
+        ts_tbl = Table([[left_cell, right_cell]], colWidths=[125*mm, 65*mm])
+        ts_tbl.setStyle(TableStyle([
+            ("VALIGN", (0,0), (-1,-1), "TOP"),
+            ("LEFTPADDING", (0,0), (-1,-1), 0),
+            ("RIGHTPADDING", (0,0), (-1,-1), 0),
+            ("TOPPADDING", (0,0), (-1,-1), 4),
+        ]))
+        flow.append(ts_tbl)
+
+    # ---------- Payment Mode ----------
+    if show("show_payment_mode") and doc_meta.get("payment_mode"):
+        flow.append(Spacer(1, 2*mm))
+        pm = Table([[Paragraph("<b>Payment Mode:</b>", smallb), Paragraph(doc_meta["payment_mode"], small)]],
+                   colWidths=[35*mm, 155*mm])
+        pm.setStyle(TableStyle([("BOX",(0,0),(-1,-1),0.5,BORDER),("INNERGRID",(0,0),(-1,-1),0.4,BORDER),
+                                ("LEFTPADDING",(0,0),(-1,-1),5),("RIGHTPADDING",(0,0),(-1,-1),5),
+                                ("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4)]))
+        flow.append(pm)
+
+    # ---------- Description / Terms ----------
+    if show("show_description") or show("show_terms"):
+        desc_text = company.get("invoice_description", "") if show("show_description") else ""
+        terms_text = company.get("invoice_terms", "") if show("show_terms") else ""
+        if notes:
+            desc_text = (desc_text + "\n" + notes).strip() if desc_text else notes
+        if desc_text or terms_text:
+            cells_l = [Paragraph("<b>Description:</b>", smallb), Paragraph(desc_text or "—", small)]
+            cells_r = [Paragraph("<b>Terms &amp; Conditions:</b>", smallb), Paragraph(terms_text or "—", small)]
+            dt_tbl = Table([[cells_l, cells_r]], colWidths=[95*mm, 95*mm])
+            dt_tbl.setStyle(TableStyle([
+                ("VALIGN", (0,0), (-1,-1), "TOP"),
+                ("BOX", (0,0), (-1,-1), 0.5, BORDER),
+                ("LINEAFTER", (0,0), (0,-1), 0.4, BORDER),
+                ("LEFTPADDING", (0,0), (-1,-1), 6),
+                ("RIGHTPADDING", (0,0), (-1,-1), 6),
+                ("TOPPADDING", (0,0), (-1,-1), 5),
+                ("BOTTOMPADDING", (0,0), (-1,-1), 5),
+            ]))
+            flow.append(Spacer(1, 2*mm))
+            flow.append(dt_tbl)
+
+    # ---------- Bank details + QR + Signatory ----------
+    has_bank = show("show_bank_details") and any(company.get(k) for k in ("bank_name","bank_account_no","bank_ifsc","upi_id"))
+    has_sig = show("show_signatory_image")
+    if has_bank or has_sig:
+        # Bank cell with optional QR
+        bank_block = [Paragraph("<b>Bank Details:</b>", smallb)]
+        # QR
+        qr_img = None
+        if show("show_upi_qr") and company.get("upi_id"):
+            qr_png = _upi_qr_png(company.get("upi_id", ""), company.get("company_name", "Denplex"),
+                                 amount=float(totals.get("total", 0) or 0), note=code)
+            if qr_png:
+                qr_img = RLImage(io.BytesIO(qr_png), width=22*mm, height=22*mm)
+        bank_lines = []
+        if company.get("bank_name"): bank_lines.append(Paragraph(f"Bank Name: <b>{company['bank_name']}</b>", small))
+        if company.get("bank_account_no"): bank_lines.append(Paragraph(f"Bank Account No.: <b>{company['bank_account_no']}</b>", small))
+        if company.get("bank_ifsc"): bank_lines.append(Paragraph(f"Bank IFSC code: <b>{company['bank_ifsc']}</b>", small))
+        if company.get("bank_branch"): bank_lines.append(Paragraph(f"Branch: <b>{company['bank_branch']}</b>", small))
+        if company.get("upi_id"): bank_lines.append(Paragraph(f"UPI: <b>{company['upi_id']}</b>", small))
+        if qr_img:
+            left_bank = Table([[qr_img, bank_lines]], colWidths=[24*mm, 71*mm])
+            left_bank.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"TOP"),("LEFTPADDING",(0,0),(-1,-1),0),
+                                           ("RIGHTPADDING",(0,0),(-1,-1),4),("TOPPADDING",(0,0),(-1,-1),0),
+                                           ("BOTTOMPADDING",(0,0),(-1,-1),0)]))
+            bank_block.append(left_bank)
+        else:
+            bank_block.extend(bank_lines)
+
+        # Signatory cell
+        sig_block = [Paragraph(f"<b>For: {company.get('company_name','Denplex Engineering Company')}</b>", smallb)]
+        sig_b64 = company.get("signatory_image_b64") or ""
+        if has_sig and sig_b64:
+            try:
+                b = sig_b64.split(",",1)[1] if sig_b64.startswith("data:") else sig_b64
+                raw = base64.b64decode(b)
+                sig_img = RLImage(io.BytesIO(raw), width=40*mm, height=18*mm, kind="proportional")
+                sig_block.append(Spacer(1, 1*mm))
+                sig_block.append(sig_img)
+            except Exception:
+                sig_block.append(Spacer(1, 12*mm))
+        else:
+            sig_block.append(Spacer(1, 12*mm))
+        sig_block.append(Paragraph(f"<font color='#475569'>{company.get('signatory_label','Authorised Signatory')}</font>", tiny))
+
+        bs_tbl = Table([[bank_block, sig_block]], colWidths=[95*mm, 95*mm])
+        bs_tbl.setStyle(TableStyle([
+            ("VALIGN", (0,0), (-1,-1), "TOP"),
+            ("BOX", (0,0), (-1,-1), 0.5, BORDER),
+            ("LINEAFTER", (0,0), (0,-1), 0.4, BORDER),
+            ("LEFTPADDING", (0,0), (-1,-1), 6),
+            ("RIGHTPADDING", (0,0), (-1,-1), 6),
+            ("TOPPADDING", (0,0), (-1,-1), 5),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 5),
+            ("ALIGN", (1,0), (1,-1), "CENTER"),
+        ]))
+        flow.append(Spacer(1, 2*mm))
+        flow.append(bs_tbl)
+
     doc.build(flow)
     return buf.getvalue()
 
@@ -1338,14 +1731,25 @@ async def _resolve_doc(coll, doc_id: str, party_id_key: str, party_name_key: str
     return doc
 
 @api.get("/invoices/{iid}/pdf")
-async def invoice_pdf(iid: str, user=Depends(get_current_user)):
+async def invoice_pdf(iid: str, copy: Optional[str] = "ORIGINAL FOR RECIPIENT", user=Depends(get_current_user)):
     inv = await db.invoices.find_one({"id": iid}, {"_id": 0})
     if not inv: raise HTTPException(404, "Not found")
     company = await get_setting("integrations")
+    tpl = await get_setting("invoice_template")
+    # Fetch party details
+    party_extra = {}
+    if inv.get("customer_id"):
+        c = await db.customers.find_one({"id": inv["customer_id"]}, {"_id": 0}) or {}
+        party_extra = {"address": c.get("address",""), "phone": c.get("phone",""), "gstin": c.get("gstin",""), "state": c.get("state","")}
     pdf = _build_doc_pdf("Tax Invoice", inv.get("code", ""), "Bill To", inv.get("customer_name", ""), str(inv.get("date", ""))[:10],
-                         inv.get("lines", []), {"subtotal": inv.get("subtotal", 0), "total": inv.get("total", 0)},
+                         inv.get("lines", []),
+                         {"subtotal": inv.get("subtotal", 0), "total": inv.get("total", 0), "gst_total": inv.get("cgst",0)+inv.get("sgst",0)+inv.get("igst",0)},
                          gst_breakup={"cgst": inv.get("cgst", 0), "sgst": inv.get("sgst", 0), "igst": inv.get("igst", 0)},
-                         company=company, notes=inv.get("notes", ""))
+                         company=company, notes=inv.get("notes", ""), tpl=tpl,
+                         party_extra=party_extra,
+                         doc_meta={"due_date": str(inv.get("due_date",""))[:10], "place_of_supply": inv.get("place_of_supply",""),
+                                   "payment_mode": inv.get("payment_mode",""), "is_interstate": bool(inv.get("is_interstate"))},
+                         copy_label=copy or "ORIGINAL FOR RECIPIENT")
     return Response(content=pdf, media_type="application/pdf",
                     headers={"Content-Disposition": f'inline; filename="{inv.get("code","invoice")}.pdf"'})
 
@@ -1354,9 +1758,15 @@ async def quote_pdf(qid: str, user=Depends(get_current_user)):
     q = await db.quotations.find_one({"id": qid}, {"_id": 0})
     if not q: raise HTTPException(404, "Not found")
     company = await get_setting("integrations")
+    tpl = await get_setting("invoice_template")
+    party_extra = {}
+    if q.get("customer_id"):
+        c = await db.customers.find_one({"id": q["customer_id"]}, {"_id": 0}) or {}
+        party_extra = {"address": c.get("address",""), "phone": c.get("phone",""), "gstin": c.get("gstin",""), "state": c.get("state","")}
     pdf = _build_doc_pdf("Quotation", q.get("code", ""), "To", q.get("customer_name", ""), str(q.get("date", ""))[:10],
                          q.get("lines", []), {"subtotal": q.get("subtotal", 0), "gst_total": q.get("gst_total", 0), "total": q.get("total", 0)},
-                         company=company, notes=q.get("notes", ""))
+                         company=company, notes=q.get("notes", ""), tpl=tpl, party_extra=party_extra,
+                         copy_label="")
     return Response(content=pdf, media_type="application/pdf",
                     headers={"Content-Disposition": f'inline; filename="{q.get("code","quote")}.pdf"'})
 
@@ -1365,9 +1775,15 @@ async def po_pdf(pid: str, user=Depends(get_current_user)):
     p = await db.purchase_orders.find_one({"id": pid}, {"_id": 0})
     if not p: raise HTTPException(404, "Not found")
     company = await get_setting("integrations")
+    tpl = await get_setting("invoice_template")
+    party_extra = {}
+    if p.get("supplier_id"):
+        c = await db.suppliers.find_one({"id": p["supplier_id"]}, {"_id": 0}) or {}
+        party_extra = {"address": c.get("address",""), "phone": c.get("phone",""), "gstin": c.get("gstin",""), "state": c.get("state","")}
     pdf = _build_doc_pdf("Purchase Order", p.get("code", ""), "Supplier", p.get("supplier_name", ""), str(p.get("date", ""))[:10],
                          p.get("lines", []), {"subtotal": p.get("subtotal", 0), "gst_total": p.get("gst_total", 0), "total": p.get("total", 0)},
-                         company=company, notes=p.get("notes", ""))
+                         company=company, notes=p.get("notes", ""), tpl=tpl, party_extra=party_extra,
+                         copy_label="")
     return Response(content=pdf, media_type="application/pdf",
                     headers={"Content-Disposition": f'inline; filename="{p.get("code","po")}.pdf"'})
 
@@ -1967,6 +2383,364 @@ async def email_sync_all(max: int = 25, user=Depends(get_current_user)):
     await write_audit(user["name"], "email_sync_leads_all", "leads", None, {"added": total_added, "scanned": total_scanned})
     return {"added": total_added, "scanned": total_scanned, "per_account": per}
 
+
+
+
+# ================ Vyapar Import (.vyb / .xlsx / .csv) ================
+# Vyapar has no public API; we accept (a) Excel/CSV exports from Vyapar's
+# Reports menu (most reliable), or (b) a raw `.vyb` backup which we attempt
+# to identify (SQLite / ZIP / encrypted). Encrypted backups fall back to
+# instructions on how to do the Excel export.
+
+VYAPAR_UPLOAD_DIR = Path("/tmp/vyapar_uploads")
+VYAPAR_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+def _vyb_inspect(path: Path) -> Dict[str, Any]:
+    """Identify what's inside an uploaded file."""
+    import sqlite3, zipfile
+    out: Dict[str, Any] = {"kind": "unknown", "tables": [], "counts": {}, "notes": ""}
+    with open(path, "rb") as f:
+        head = f.read(64)
+    if head.startswith(b"SQLite format 3"):
+        out["kind"] = "sqlite"
+        try:
+            con = sqlite3.connect(str(path)); cur = con.cursor()
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+            tables = [r[0] for r in cur.fetchall()]
+            out["tables"] = tables
+            counts = {}
+            for t in tables:
+                try:
+                    cur.execute(f'SELECT COUNT(*) FROM "{t}"')
+                    counts[t] = cur.fetchone()[0]
+                except Exception:
+                    pass
+            out["counts"] = counts
+            con.close()
+            out["notes"] = "Plain SQLite database — Vyapar tables can be extracted directly."
+        except Exception as e:
+            out["notes"] = f"SQLite open failed: {e}"
+        return out
+    if head[:2] == b"PK":
+        # could be xlsx or zip — sniff by extension first
+        if path.suffix.lower() in (".xlsx", ".xls"):
+            out["kind"] = "xlsx"
+            try:
+                from openpyxl import load_workbook
+                wb = load_workbook(filename=str(path), read_only=True, data_only=True)
+                out["tables"] = wb.sheetnames
+                counts = {}
+                for s in wb.sheetnames:
+                    ws = wb[s]
+                    counts[s] = max(0, (ws.max_row or 1) - 1)
+                out["counts"] = counts
+                wb.close()
+                out["notes"] = "Excel workbook — sheets will be mapped to Parties / Items / Sales / Purchases by column heuristics."
+            except Exception as e:
+                out["notes"] = f"Excel read failed: {e}"
+            return out
+        out["kind"] = "zip"
+        try:
+            with zipfile.ZipFile(path) as z:
+                names = z.namelist()
+                out["tables"] = names[:50]
+                inner_sqlite = [n for n in names if n.endswith(".db") or n.endswith(".sqlite")]
+                out["notes"] = ("Archive contains: " + ", ".join(names[:10])) + (" (SQLite inside!)" if inner_sqlite else "")
+                if inner_sqlite:
+                    out["inner_sqlite"] = inner_sqlite[0]
+        except Exception as e:
+            out["notes"] = f"ZIP read failed: {e}"
+        return out
+    if path.suffix.lower() == ".csv":
+        out["kind"] = "csv"
+        try:
+            import csv as _csv
+            with open(path, "r", encoding="utf-8-sig", errors="replace", newline="") as f:
+                rdr = _csv.reader(f); rows = list(rdr)
+            if rows:
+                out["tables"] = [",".join(rows[0][:10])]
+                out["counts"] = {"rows": len(rows) - 1}
+            out["notes"] = "CSV file."
+        except Exception as e:
+            out["notes"] = f"CSV read failed: {e}"
+        return out
+    out["kind"] = "unsupported"
+    out["notes"] = ("This file is encrypted or in a proprietary Vyapar format we cannot decrypt without their internal keys. "
+                    "The reliable workaround is to export Excel files from Vyapar's Reports menu (Sale, Party, Item, Purchase). "
+                    "Re-upload the .xlsx file here.")
+    return out
+
+def _norm(s: Any) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(s or "").strip().lower())
+
+PARTY_COLS = {"name": ["name", "partyname", "customername", "suppliername"],
+              "phone": ["phone", "mobile", "phoneno", "mobileno", "contact", "contactno"],
+              "email": ["email", "emailid"],
+              "gstin": ["gstin", "gstno", "gst"],
+              "address": ["address", "billingaddress"],
+              "state": ["state", "billingstate"]}
+ITEM_COLS  = {"name": ["itemname", "name", "productname"],
+              "hsn": ["hsnsac", "hsn", "hsncode", "sac"],
+              "sale_price": ["saleprice", "price", "rate", "mrp"],
+              "purchase_price": ["purchaseprice", "cost"],
+              "stock": ["openingstock", "stock", "currentstock", "quantity"],
+              "unit": ["unit", "uom"]}
+SALE_COLS  = {"code": ["invoiceno", "saleinvoiceno", "billno", "refno"],
+              "date": ["date", "invoicedate"],
+              "customer_name": ["partyname", "customername"],
+              "total": ["totalamount", "amount", "total", "grandtotal"],
+              "balance": ["balance", "balancedue"],
+              "payment_type": ["paymentmode", "paymenttype"]}
+PURCHASE_COLS = {"code": ["billno", "purchaseno", "refno", "invoiceno"],
+                 "date": ["date", "billdate"],
+                 "supplier_name": ["partyname", "suppliername"],
+                 "total": ["totalamount", "amount", "total", "grandtotal"]}
+
+def _classify_sheet(headers: List[str]) -> str:
+    h = [_norm(x) for x in headers]
+    score = {"sales": 0, "purchases": 0, "items": 0, "parties": 0}
+    for col in h:
+        if col in {"invoiceno", "saleinvoiceno", "billno"}: score["sales"] += 2
+        if col in {"purchaseno"}: score["purchases"] += 2
+        if col in {"itemname", "hsnsac", "saleprice", "purchaseprice", "openingstock"}: score["items"] += 1
+        if col in {"partyname", "customername", "suppliername", "gstin", "mobileno"}: score["parties"] += 1
+        if col in {"totalamount", "grandtotal"} and "partyname" in h: score["sales"] += 1
+    best = max(score, key=score.get)
+    return best if score[best] > 0 else "unknown"
+
+def _map_row(row: Dict[str, Any], schema: Dict[str, List[str]]) -> Dict[str, Any]:
+    norm = {_norm(k): v for k, v in row.items()}
+    out: Dict[str, Any] = {}
+    for canonical, synonyms in schema.items():
+        for s in synonyms:
+            if s in norm and norm[s] not in (None, "", "—"):
+                out[canonical] = norm[s]
+                break
+    return out
+
+class VyaparImportIn(BaseModel):
+    token: str
+    parties: bool = True
+    items: bool = True
+    sales: bool = True
+    purchases: bool = True
+    dry_run: bool = False
+
+@api.post("/integrations/vyapar/inspect")
+async def vyapar_inspect(file: UploadFile = File(...), user=Depends(require_roles("admin"))):
+    if not file.filename:
+        raise HTTPException(400, "No file")
+    token = new_id()
+    safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", file.filename)[-80:]
+    path = VYAPAR_UPLOAD_DIR / f"{token}_{safe_name}"
+    raw = await file.read()
+    if len(raw) > 50 * 1024 * 1024:
+        raise HTTPException(400, "File too large (>50 MB)")
+    path.write_bytes(raw)
+    info = await asyncio.to_thread(_vyb_inspect, path)
+    info["token"] = token
+    info["filename"] = safe_name
+    info["size_bytes"] = len(raw)
+    await db.vyapar_uploads.insert_one({
+        "id": token, "user_id": user["id"], "filename": safe_name,
+        "path": str(path), "kind": info.get("kind"), "created_at": now_iso(),
+    })
+    return info
+
+async def _do_import_sqlite(path: Path, opts: VyaparImportIn) -> Dict[str, Any]:
+    import sqlite3
+    res = {"parties": 0, "items": 0, "sales": 0, "purchases": 0}
+    con = sqlite3.connect(str(path)); con.row_factory = sqlite3.Row
+    cur = con.cursor()
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    tables = {r[0].lower(): r[0] for r in cur.fetchall()}
+
+    def _try_select(candidates: List[str]):
+        for c in candidates:
+            if c.lower() in tables:
+                try:
+                    cur.execute(f'SELECT * FROM "{tables[c.lower()]}"')
+                    return cur.fetchall()
+                except Exception:
+                    continue
+        return None
+
+    if opts.parties:
+        rows = _try_select(["parties", "party", "kb_parties", "tbl_parties"])
+        for r in rows or []:
+            d = {k: r[k] for k in r.keys()}
+            p = _map_row(d, PARTY_COLS)
+            if not p.get("name"): continue
+            doc = {"id": new_id(), "name": str(p["name"])[:120],
+                   "phone": str(p.get("phone","") or ""),
+                   "email": str(p.get("email","") or ""),
+                   "gstin": str(p.get("gstin","") or ""),
+                   "address": str(p.get("address","") or ""),
+                   "state": str(p.get("state","") or ""),
+                   "source": "vyapar", "created_at": now_iso()}
+            if not opts.dry_run:
+                await db.customers.update_one({"name": doc["name"]}, {"$setOnInsert": doc}, upsert=True)
+            res["parties"] += 1
+
+    if opts.items:
+        rows = _try_select(["items", "kb_items", "tbl_items", "products"])
+        for r in rows or []:
+            d = {k: r[k] for k in r.keys()}
+            it_ = _map_row(d, ITEM_COLS)
+            if not it_.get("name"): continue
+            doc = {"id": new_id(), "item_code": "VY-" + new_id()[:8].upper(),
+                   "name": str(it_["name"])[:160],
+                   "hsn": str(it_.get("hsn","") or ""),
+                   "unit": str(it_.get("unit","NOS") or "NOS"),
+                   "rate": float(it_.get("sale_price") or 0),
+                   "stock": float(it_.get("stock") or 0),
+                   "reorder_level": 0,
+                   "source": "vyapar", "created_at": now_iso()}
+            if not opts.dry_run:
+                await db.inventory_items.update_one({"name": doc["name"]}, {"$setOnInsert": doc}, upsert=True)
+            res["items"] += 1
+
+    if opts.sales:
+        rows = _try_select(["sales", "kb_sales", "tbl_sales", "invoices"]) or []
+        for r in rows or []:
+            d = {k: r[k] for k in r.keys()}
+            s = _map_row(d, SALE_COLS)
+            if not s.get("code"): continue
+            doc = {"id": new_id(),
+                   "code": "VY-" + str(s["code"]),
+                   "customer_id": "",
+                   "customer_name": str(s.get("customer_name","") or "Unknown"),
+                   "date": str(s.get("date") or now_iso())[:19],
+                   "lines": [], "subtotal": float(s.get("total") or 0),
+                   "cgst": 0, "sgst": 0, "igst": 0,
+                   "total": float(s.get("total") or 0),
+                   "status": "paid" if (float(s.get("balance") or 0) == 0) else "sent",
+                   "source": "vyapar", "created_at": now_iso()}
+            if not opts.dry_run:
+                await db.invoices.update_one({"code": doc["code"]}, {"$setOnInsert": doc}, upsert=True)
+            res["sales"] += 1
+    if opts.purchases:
+        rows = _try_select(["purchase", "purchases", "kb_purchases", "tbl_purchases"]) or []
+        for r in rows or []:
+            d = {k: r[k] for k in r.keys()}
+            p = _map_row(d, PURCHASE_COLS)
+            if not p.get("code"): continue
+            doc = {"id": new_id(),
+                   "code": "VY-" + str(p["code"]),
+                   "supplier_id": "",
+                   "supplier_name": str(p.get("supplier_name","") or "Unknown"),
+                   "date": str(p.get("date") or now_iso())[:19],
+                   "lines": [], "subtotal": float(p.get("total") or 0),
+                   "gst_total": 0, "total": float(p.get("total") or 0),
+                   "status": "received",
+                   "source": "vyapar", "created_at": now_iso()}
+            if not opts.dry_run:
+                await db.purchase_orders.update_one({"code": doc["code"]}, {"$setOnInsert": doc}, upsert=True)
+            res["purchases"] += 1
+    con.close()
+    return res
+
+async def _do_import_xlsx(path: Path, opts: VyaparImportIn) -> Dict[str, Any]:
+    from openpyxl import load_workbook
+    res = {"parties": 0, "items": 0, "sales": 0, "purchases": 0}
+    wb = load_workbook(filename=str(path), read_only=True, data_only=True)
+    for sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        it = ws.iter_rows(values_only=True)
+        try:
+            headers_row = next(it)
+        except StopIteration:
+            continue
+        headers = [str(h or "").strip() for h in headers_row]
+        if not any(headers): continue
+        kind = _classify_sheet(headers)
+        rows = []
+        for r in it:
+            d = {headers[i]: (r[i] if i < len(r) else None) for i in range(len(headers))}
+            rows.append(d)
+        if kind == "parties" and opts.parties:
+            for d in rows:
+                p = _map_row(d, PARTY_COLS)
+                if not p.get("name"): continue
+                doc = {"id": new_id(), "name": str(p["name"])[:120],
+                       "phone": str(p.get("phone","") or ""), "email": str(p.get("email","") or ""),
+                       "gstin": str(p.get("gstin","") or ""), "address": str(p.get("address","") or ""),
+                       "state": str(p.get("state","") or ""), "source": "vyapar", "created_at": now_iso()}
+                if not opts.dry_run:
+                    await db.customers.update_one({"name": doc["name"]}, {"$setOnInsert": doc}, upsert=True)
+                res["parties"] += 1
+        elif kind == "items" and opts.items:
+            for d in rows:
+                it_ = _map_row(d, ITEM_COLS)
+                if not it_.get("name"): continue
+                doc = {"id": new_id(), "item_code": "VY-" + new_id()[:8].upper(),
+                       "name": str(it_["name"])[:160], "hsn": str(it_.get("hsn","") or ""),
+                       "unit": str(it_.get("unit","NOS") or "NOS"),
+                       "rate": float(it_.get("sale_price") or 0), "stock": float(it_.get("stock") or 0),
+                       "reorder_level": 0, "source": "vyapar", "created_at": now_iso()}
+                if not opts.dry_run:
+                    await db.inventory_items.update_one({"name": doc["name"]}, {"$setOnInsert": doc}, upsert=True)
+                res["items"] += 1
+        elif kind == "sales" and opts.sales:
+            for d in rows:
+                s = _map_row(d, SALE_COLS)
+                if not s.get("code"): continue
+                doc = {"id": new_id(), "code": "VY-" + str(s["code"]),
+                       "customer_id": "", "customer_name": str(s.get("customer_name","") or "Unknown"),
+                       "date": str(s.get("date") or now_iso())[:19],
+                       "lines": [], "subtotal": float(s.get("total") or 0),
+                       "cgst": 0, "sgst": 0, "igst": 0,
+                       "total": float(s.get("total") or 0),
+                       "status": "paid" if (float(s.get("balance") or 0) == 0) else "sent",
+                       "source": "vyapar", "created_at": now_iso()}
+                if not opts.dry_run:
+                    await db.invoices.update_one({"code": doc["code"]}, {"$setOnInsert": doc}, upsert=True)
+                res["sales"] += 1
+        elif kind == "purchases" and opts.purchases:
+            for d in rows:
+                p = _map_row(d, PURCHASE_COLS)
+                if not p.get("code"): continue
+                doc = {"id": new_id(), "code": "VY-" + str(p["code"]),
+                       "supplier_id": "", "supplier_name": str(p.get("supplier_name","") or "Unknown"),
+                       "date": str(p.get("date") or now_iso())[:19],
+                       "lines": [], "subtotal": float(p.get("total") or 0),
+                       "gst_total": 0, "total": float(p.get("total") or 0),
+                       "status": "received", "source": "vyapar", "created_at": now_iso()}
+                if not opts.dry_run:
+                    await db.purchase_orders.update_one({"code": doc["code"]}, {"$setOnInsert": doc}, upsert=True)
+                res["purchases"] += 1
+    wb.close()
+    return res
+
+@api.post("/integrations/vyapar/import")
+async def vyapar_import(payload: VyaparImportIn, user=Depends(require_roles("admin"))):
+    meta = await db.vyapar_uploads.find_one({"id": payload.token, "user_id": user["id"]}, {"_id": 0})
+    if not meta:
+        raise HTTPException(404, "Upload not found. Re-upload the file.")
+    path = Path(meta["path"])
+    if not path.exists():
+        raise HTTPException(404, "Uploaded file is no longer on disk. Please re-upload.")
+    kind = meta.get("kind")
+    if kind == "zip":
+        import zipfile, tempfile
+        with zipfile.ZipFile(path) as z:
+            inner = [n for n in z.namelist() if n.endswith(".db") or n.endswith(".sqlite")]
+            if not inner:
+                raise HTTPException(400, "ZIP doesn't contain a SQLite database.")
+            tmpd = Path(tempfile.mkdtemp())
+            z.extract(inner[0], tmpd)
+            path = tmpd / inner[0]
+            kind = "sqlite"
+    if kind == "sqlite":
+        details = await _do_import_sqlite(path, payload)
+    elif kind == "xlsx":
+        details = await _do_import_xlsx(path, payload)
+    else:
+        raise HTTPException(400, f"Cannot import file kind '{kind}'. Please export an Excel file from Vyapar (Reports → Sale/Party/Item/Purchase Report → Excel icon).")
+    await write_audit(user["name"], "vyapar_import", "import", payload.token,
+                      {**details, "dry_run": payload.dry_run})
+    summary = f"{details['parties']} parties · {details['items']} items · {details['sales']} sales · {details['purchases']} purchases" + (" (dry run)" if payload.dry_run else "")
+    return {"ok": True, "summary": summary, "details": details, "dry_run": payload.dry_run}
 
 
 # ---------------- Seed ----------------

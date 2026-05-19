@@ -18,9 +18,11 @@ click==8.3.3
 cryptography==48.0.0
 distro==1.9.0
 dnspython==2.8.0
+docopt==0.6.2
 ecdsa==0.19.2
 email-validator==2.3.0
 emergentintegrations==0.1.0
+et_xmlfile==2.0.0
 fastapi==0.110.1
 fastuuid==0.14.0
 filelock==3.29.0
@@ -65,9 +67,11 @@ motor==3.3.1
 multidict==6.7.1
 mypy==2.1.0
 mypy_extensions==1.1.0
+num2words==0.5.14
 numpy==2.4.4
 oauthlib==3.3.1
 openai==1.99.9
+openpyxl==3.1.5
 packaging==26.2
 pandas==3.0.3
 passlib==1.7.4
@@ -99,6 +103,7 @@ python-jose==3.5.0
 python-multipart==0.0.28
 pytokens==0.4.1
 PyYAML==6.0.3
+qrcode==8.2
 referencing==0.37.0
 regex==2026.5.9
 reportlab==4.5.1

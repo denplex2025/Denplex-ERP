@@ -8,7 +8,7 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { PageHeader, Card } from "@/components/erp/Primitives";
-import { Save, Copy, ShieldCheck, ShieldOff, Plus, Trash2, RefreshCw, Star, ExternalLink, Inbox } from "lucide-react";
+import { Save, Copy, ShieldCheck, ShieldOff, Plus, Trash2, RefreshCw, Star, ExternalLink, Inbox, Upload, FileText, Eye, FileSpreadsheet, Database } from "lucide-react";
 import { toast } from "sonner";
 
 export default function Settings() {
@@ -52,11 +52,13 @@ export default function Settings() {
 
   return (
     <div data-testid="settings-page">
-      <PageHeader overline="Administration" title="Settings & Integrations" subtitle="Connect email mailboxes (Gmail/Outlook/Yahoo), Twilio WhatsApp, Indiamart/TradeIndia, and manage 2FA." />
+      <PageHeader overline="Administration" title="Settings & Integrations" subtitle="Connect email mailboxes (Gmail/Outlook/Yahoo), Twilio WhatsApp, Indiamart/TradeIndia, customize your invoice template, and manage 2FA." />
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList className="rounded-sm bg-slate-100 mb-4 flex-wrap h-auto">
           <TabsTrigger value="company" className="rounded-sm" data-testid="tab-company">Company</TabsTrigger>
+          <TabsTrigger value="template" className="rounded-sm" data-testid="tab-template">Invoice Template</TabsTrigger>
           <TabsTrigger value="email" className="rounded-sm" data-testid="tab-email">Email Accounts</TabsTrigger>
+          <TabsTrigger value="vyapar" className="rounded-sm" data-testid="tab-vyapar">Vyapar Import</TabsTrigger>
           <TabsTrigger value="twilio" className="rounded-sm" data-testid="tab-twilio">Twilio WhatsApp</TabsTrigger>
           <TabsTrigger value="indiamart" className="rounded-sm" data-testid="tab-indiamart">Indiamart</TabsTrigger>
           <TabsTrigger value="tradeindia" className="rounded-sm" data-testid="tab-tradeindia">TradeIndia</TabsTrigger>
@@ -65,15 +67,44 @@ export default function Settings() {
 
         <TabsContent value="company">
           <Card className="p-6">
+            <h3 className="font-display text-lg font-semibold mb-4">Business identity</h3>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <Fld label="Company Name"><Input value={s.company_name || ""} onChange={e=>setF("company_name", e.target.value)} className="rounded-sm" /></Fld>
               <Fld label="Tagline"><Input value={s.company_tagline || ""} onChange={e=>setF("company_tagline", e.target.value)} className="rounded-sm" placeholder="Precision Engineered Solutions" /></Fld>
               <Fld label="Company GSTIN"><Input value={s.company_gstin || ""} onChange={e=>setF("company_gstin", e.target.value)} className="rounded-sm" /></Fld>
-              <Fld label="State"><Input value={s.company_state || ""} onChange={e=>setF("company_state", e.target.value)} className="rounded-sm" /></Fld>
-              <Fld label="Address"><Textarea rows={3} value={s.company_address || ""} onChange={e=>setF("company_address", e.target.value)} className="rounded-sm" /></Fld>
+              <Fld label="State"><Input value={s.company_state || ""} onChange={e=>setF("company_state", e.target.value)} className="rounded-sm" placeholder="24-Gujarat" /></Fld>
+              <Fld label="Phone"><Input value={s.company_phone || ""} onChange={e=>setF("company_phone", e.target.value)} className="rounded-sm" placeholder="9033338999" /></Fld>
+              <Fld label="Email"><Input value={s.company_email || ""} onChange={e=>setF("company_email", e.target.value)} className="rounded-sm" placeholder="denplexengineering@gmail.com" /></Fld>
+              <Fld label="UDYAM / MSME Registration"><Input value={s.company_udyam || ""} onChange={e=>setF("company_udyam", e.target.value)} className="rounded-sm" placeholder="UDYAM-GJ-09-0005351" /></Fld>
+              <Fld label="Address (full)"><Textarea rows={3} value={s.company_address || ""} onChange={e=>setF("company_address", e.target.value)} className="rounded-sm" /></Fld>
             </div>
-            <div className="mt-4"><Button onClick={save} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="save-company"><Save className="h-4 w-4 mr-1" /> Save</Button></div>
+
+            <h3 className="font-display text-lg font-semibold mt-8 mb-4">Bank & UPI (for invoice footer)</h3>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <Fld label="Bank Name"><Input value={s.bank_name || ""} onChange={e=>setF("bank_name", e.target.value)} className="rounded-sm font-mono-tech" /></Fld>
+              <Fld label="Bank Account No."><Input value={s.bank_account_no || ""} onChange={e=>setF("bank_account_no", e.target.value)} className="rounded-sm font-mono-tech" /></Fld>
+              <Fld label="IFSC Code"><Input value={s.bank_ifsc || ""} onChange={e=>setF("bank_ifsc", e.target.value)} className="rounded-sm font-mono-tech" /></Fld>
+              <Fld label="Branch"><Input value={s.bank_branch || ""} onChange={e=>setF("bank_branch", e.target.value)} className="rounded-sm" /></Fld>
+              <Fld label="UPI ID (for auto QR)"><Input value={s.upi_id || ""} onChange={e=>setF("upi_id", e.target.value)} className="rounded-sm font-mono-tech" placeholder="denplex@axisbank" /></Fld>
+            </div>
+
+            <h3 className="font-display text-lg font-semibold mt-8 mb-4">Signature & defaults</h3>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <Fld label="Signatory label"><Input value={s.signatory_label || "Authorised Signatory"} onChange={e=>setF("signatory_label", e.target.value)} className="rounded-sm" /></Fld>
+              <SignatoryUpload value={s.signatory_image_b64 || ""} onChange={(v)=>setF("signatory_image_b64", v)} />
+              <Fld label="Default Terms & Conditions (printed on every invoice)"><Textarea rows={3} value={s.invoice_terms || ""} onChange={e=>setF("invoice_terms", e.target.value)} className="rounded-sm" placeholder="Thanks for doing business with us!" /></Fld>
+              <Fld label="Default Sale Description"><Textarea rows={3} value={s.invoice_description || ""} onChange={e=>setF("invoice_description", e.target.value)} className="rounded-sm" /></Fld>
+            </div>
+            <div className="mt-6"><Button onClick={save} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="save-company"><Save className="h-4 w-4 mr-1" /> Save</Button></div>
           </Card>
+        </TabsContent>
+
+        <TabsContent value="template">
+          <InvoiceTemplatePanel />
+        </TabsContent>
+
+        <TabsContent value="vyapar">
+          <VyaparImportPanel />
         </TabsContent>
 
         <TabsContent value="email">
@@ -394,5 +425,248 @@ function ChangePasswordForm() {
         <Button type="submit" disabled={loading} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="save-password">{loading ? "Saving..." : "Change password"}</Button>
       </div>
     </form>
+  );
+}
+
+
+function SignatoryUpload({ value, onChange }) {
+  const onPick = (e) => {
+    const f = e.target.files?.[0]; if (!f) return;
+    if (f.size > 1024 * 1024) { toast.error("Image must be < 1 MB"); return; }
+    const r = new FileReader();
+    r.onload = () => onChange(String(r.result));
+    r.readAsDataURL(f);
+  };
+  return (
+    <Fld label="Signature image (PNG/JPG, optional)">
+      <div className="flex items-center gap-3">
+        {value ? (
+          <img src={value} alt="signatory" className="h-12 border border-slate-200 bg-white p-1 rounded-sm" />
+        ) : (
+          <div className="h-12 w-24 border border-dashed border-slate-300 grid place-items-center text-xs text-slate-400 rounded-sm">No signature</div>
+        )}
+        <label className="inline-flex items-center gap-2 cursor-pointer px-3 py-1.5 text-sm border border-slate-300 rounded-sm hover:bg-slate-50">
+          <Upload className="h-3.5 w-3.5" /> Upload
+          <input type="file" accept="image/png,image/jpeg" className="hidden" onChange={onPick} data-testid="signatory-upload" />
+        </label>
+        {value && <Button size="sm" variant="outline" className="rounded-sm text-red-600 border-red-300" onClick={()=>onChange("")}>Remove</Button>}
+      </div>
+    </Fld>
+  );
+}
+
+const TEMPLATE_TOGGLES = [
+  { key: "show_company_logo",         label: "Show company logo" },
+  { key: "show_company_address",      label: "Show company address" },
+  { key: "show_company_gstin",        label: "Show GSTIN on sale" },
+  { key: "show_company_email",        label: "Show company email" },
+  { key: "show_company_phone",        label: "Show company phone" },
+  { key: "show_company_udyam",        label: "Show UDYAM / MSME number" },
+  { key: "show_ship_to",              label: "Show Ship-To block" },
+  { key: "show_due_date",             label: "Show due date" },
+  { key: "show_place_of_supply",      label: "Show place of supply" },
+  { key: "show_hsn_column",           label: "Show HSN/SAC column in item table" },
+  { key: "show_discount_column",      label: "Show Discount column in item table" },
+  { key: "show_tax_summary",          label: "Show Tax Summary (HSN-wise breakup)" },
+  { key: "show_totals_sidebar",       label: "Show Totals sidebar (Sub Total / Tax / Total)" },
+  { key: "show_amount_in_words",      label: "Show Invoice Amount in Words" },
+  { key: "show_payment_mode",         label: "Show Payment Mode" },
+  { key: "show_description",          label: "Show Description block" },
+  { key: "show_terms",                label: "Show Terms & Conditions block" },
+  { key: "show_bank_details",         label: "Show Bank Details" },
+  { key: "show_upi_qr",               label: "Show UPI QR (auto-generated)" },
+  { key: "show_signatory_image",      label: "Show signature image" },
+  { key: "print_original_duplicate",  label: "Print 'Original for Recipient' label" },
+];
+
+function InvoiceTemplatePanel() {
+  const [t, setT] = useState(null);
+  const [previewUrl, setPreviewUrl] = useState("");
+  const [loading, setLoading] = useState(true);
+
+  const load = async () => {
+    setLoading(true);
+    try { const r = await api.get("/settings/invoice-template"); setT(r.data); }
+    catch (e) { toast.error("Admin only"); }
+    finally { setLoading(false); }
+  };
+  useEffect(() => { load(); }, []);
+
+  const save = async () => {
+    try { await api.put("/settings/invoice-template", t); toast.success("Template saved"); }
+    catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
+  };
+  const toggle = (k) => setT(p => ({ ...p, [k]: !p[k] }));
+
+  const livePreview = async () => {
+    try {
+      const inv = await api.get("/invoices");
+      const first = inv.data?.[0]; if (!first) { toast.error("Create at least one invoice to preview"); return; }
+      await api.put("/settings/invoice-template", t);
+      const r = await api.get(`/invoices/${first.id}/pdf`, { responseType: "blob" });
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+      setPreviewUrl(URL.createObjectURL(r.data));
+    } catch (e) { toast.error("Preview failed"); }
+  };
+
+  if (loading || !t) return <Card className="p-6"><div className="text-sm text-slate-500">Loading…</div></Card>;
+
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-5 gap-4" data-testid="invoice-template-panel">
+      <Card className="p-6 lg:col-span-2">
+        <div className="flex items-start justify-between gap-3 mb-4 flex-wrap">
+          <div>
+            <h3 className="font-display text-lg font-semibold">Invoice template</h3>
+            <p className="text-sm text-slate-600 mt-1">Toggle which blocks appear on your printed/PDF invoices. Mirrors Vyapar's "Print → Regular Printer" options.</p>
+          </div>
+          <div className="flex gap-2 shrink-0">
+            <Button size="sm" variant="outline" className="rounded-sm" onClick={livePreview} data-testid="preview-template"><Eye className="h-4 w-4 mr-1" /> Preview</Button>
+            <Button size="sm" className="rounded-sm bg-red-600 hover:bg-red-700" onClick={save} data-testid="save-template"><Save className="h-4 w-4 mr-1" /> Save</Button>
+          </div>
+        </div>
+        <div className="space-y-2 max-h-[70vh] overflow-y-auto -mx-2 px-2">
+          {TEMPLATE_TOGGLES.map(({ key, label }) => (
+            <label key={key} className="flex items-center justify-between gap-3 py-1.5 border-b border-slate-100 last:border-0 cursor-pointer">
+              <span className="text-sm text-slate-700">{label}</span>
+              <Switch checked={!!t[key]} onCheckedChange={()=>toggle(key)} data-testid={`tpl-${key}`} />
+            </label>
+          ))}
+        </div>
+      </Card>
+      <Card className="p-3 lg:col-span-3 bg-slate-50">
+        <div className="flex items-center justify-between mb-2 px-3">
+          <span className="text-xs uppercase tracking-wider text-slate-600">Live preview</span>
+          {previewUrl && <a href={previewUrl} target="_blank" rel="noreferrer" className="text-xs text-red-600 underline">Open in new tab</a>}
+        </div>
+        {previewUrl ? (
+          <iframe title="invoice-preview" src={previewUrl} className="w-full h-[78vh] bg-white border border-slate-200" data-testid="template-preview-iframe" />
+        ) : (
+          <div className="h-[78vh] grid place-items-center text-sm text-slate-500 border border-dashed border-slate-300">
+            <div className="text-center">
+              <FileText className="h-8 w-8 text-slate-400 mx-auto mb-2" />
+              Click <strong>Preview</strong> to render the first invoice with current settings.
+            </div>
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+function VyaparImportPanel() {
+  const [busy, setBusy] = useState(false);
+  const [analysis, setAnalysis] = useState(null);
+  const [opts, setOpts] = useState({ parties: true, items: true, sales: true, purchases: true, dry_run: false });
+  const [results, setResults] = useState(null);
+
+  const onPick = async (e) => {
+    const f = e.target.files?.[0]; if (!f) return;
+    setBusy(true); setAnalysis(null); setResults(null);
+    try {
+      const fd = new FormData(); fd.append("file", f);
+      const r = await api.post("/integrations/vyapar/inspect", fd, { headers: { "Content-Type": "multipart/form-data" } });
+      setAnalysis(r.data);
+      if (r.data.kind === "unsupported") toast.warning("This file format isn't directly importable. See guidance below.");
+      else toast.success(`Detected: ${r.data.kind}`);
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Inspect failed");
+    } finally { setBusy(false); e.target.value = ""; }
+  };
+
+  const runImport = async () => {
+    if (!analysis?.token) { toast.error("Upload a file first"); return; }
+    setBusy(true);
+    try {
+      const r = await api.post("/integrations/vyapar/import", { token: analysis.token, ...opts });
+      setResults(r.data);
+      toast.success(`Imported: ${r.data.summary || "done"}`);
+    } catch (e) { toast.error(e?.response?.data?.detail || "Import failed"); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div className="space-y-4" data-testid="vyapar-import-panel">
+      <Card className="p-6">
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div>
+            <h3 className="font-display text-lg font-semibold">Import from Vyapar</h3>
+            <p className="text-sm text-slate-600 mt-1 max-w-2xl">Upload your Vyapar Excel export (preferred) or your <code className="bg-slate-100 px-1">.vyb</code> backup file. We'll detect the format and pull in Parties, Items, Sale Invoices, and Purchase Invoices. Re-uploading is safe — invoices are deduped by their number.</p>
+          </div>
+          <label className="inline-flex items-center gap-2 cursor-pointer px-4 py-2 text-sm font-semibold bg-red-600 hover:bg-red-700 text-white rounded-sm">
+            <Upload className="h-4 w-4" /> {busy ? "Working…" : "Choose file"}
+            <input type="file" accept=".xlsx,.xls,.csv,.vyb,.vybnk,.zip,.db,.sqlite" className="hidden" onChange={onPick} disabled={busy} data-testid="vyapar-file-input" />
+          </label>
+        </div>
+
+        {analysis && (
+          <div className="mt-5 border border-slate-200 p-4 rounded-sm bg-slate-50/60 space-y-3" data-testid="vyapar-analysis">
+            <div className="text-sm">
+              <div><strong>Detected format:</strong> <code className="font-mono-tech text-xs">{analysis.kind}</code></div>
+              {analysis.notes && <div className="text-xs text-slate-600 mt-1">{analysis.notes}</div>}
+              {analysis.tables && (
+                <div className="mt-2"><strong>Tables/sheets found:</strong> <span className="font-mono-tech text-xs">{analysis.tables.join(", ")}</span></div>
+              )}
+              {analysis.counts && (
+                <div className="mt-2 grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+                  {Object.entries(analysis.counts).map(([k,v]) => (
+                    <div key={k} className="bg-white border border-slate-200 px-3 py-2 rounded-sm">
+                      <div className="text-slate-500 uppercase tracking-wider text-[10px]">{k}</div>
+                      <div className="font-mono-tech text-base text-slate-900">{v}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {analysis.kind !== "unsupported" && (
+              <>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 pt-2">
+                  <Toggle label="Parties (customers/suppliers)" checked={opts.parties} onChange={(v)=>setOpts({...opts, parties: v})} />
+                  <Toggle label="Items / Inventory" checked={opts.items} onChange={(v)=>setOpts({...opts, items: v})} />
+                  <Toggle label="Sale Invoices" checked={opts.sales} onChange={(v)=>setOpts({...opts, sales: v})} />
+                  <Toggle label="Purchase Invoices" checked={opts.purchases} onChange={(v)=>setOpts({...opts, purchases: v})} />
+                </div>
+                <div className="flex items-center gap-3 pt-2">
+                  <label className="flex items-center gap-2 text-xs text-slate-600">
+                    <Switch checked={opts.dry_run} onCheckedChange={(v)=>setOpts({...opts, dry_run: v})} /> Dry run (preview without writing)
+                  </label>
+                  <Button onClick={runImport} disabled={busy} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="run-vyapar-import">
+                    <Database className="h-4 w-4 mr-1" /> {busy ? "Importing…" : (opts.dry_run ? "Run dry import" : "Import into ERP")}
+                  </Button>
+                </div>
+              </>
+            )}
+
+            {analysis.kind === "unsupported" && (
+              <div className="text-xs text-slate-700 bg-amber-50 border border-amber-200 p-3 rounded-sm">
+                <p className="font-semibold mb-1">How to get a usable Excel export from Vyapar:</p>
+                <ol className="list-decimal pl-5 space-y-1">
+                  <li>Open Vyapar app → side menu → <strong>Reports</strong></li>
+                  <li>Choose <strong>Sale Report</strong> (or Item/Party/Purchase Report)</li>
+                  <li>Click the Excel icon (top-right) → save the <code>.xlsx</code> file</li>
+                  <li>Come back here and upload that <code>.xlsx</code> instead of the <code>.vyb</code></li>
+                </ol>
+              </div>
+            )}
+          </div>
+        )}
+
+        {results && (
+          <div className="mt-4 border border-emerald-200 p-4 bg-emerald-50 rounded-sm text-sm" data-testid="vyapar-results">
+            <div className="font-semibold text-emerald-800 mb-2">Import complete</div>
+            <pre className="text-xs whitespace-pre-wrap text-slate-700">{JSON.stringify(results.details || results, null, 2)}</pre>
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+function Toggle({ label, checked, onChange }) {
+  return (
+    <label className="flex items-center justify-between gap-2 px-3 py-2 border border-slate-200 bg-white rounded-sm cursor-pointer">
+      <span className="text-xs text-slate-700">{label}</span>
+      <Switch checked={checked} onCheckedChange={onChange} />
+    </label>
   );
 }
