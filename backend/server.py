@@ -21,7 +21,6 @@ from pathlib import Path
 from pydantic import BaseModel, Field, EmailStr, ConfigDict
 from typing import List, Optional, Literal, Any, Dict
 from datetime import datetime, timezone, timedelta
-from emergentintegrations.llm.chat import LlmChat, UserMessage, ImageContent
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -656,41 +655,7 @@ async def list_movements(user=Depends(get_current_user)):
 
 @api.post("/inventory/scan-bill")
 async def scan_bill(payload: BillScanIn, user=Depends(get_current_user)):
-    if not EMERGENT_LLM_KEY:
-        raise HTTPException(500, "LLM key not configured")
-    b64 = payload.image_base64
-    if "," in b64 and b64.startswith("data:"):
-        b64 = b64.split(",", 1)[1]
-    try:
-        chat = LlmChat(
-            api_key=EMERGENT_LLM_KEY,
-            session_id=f"bill-{new_id()}",
-            system_message="You are an expert at extracting structured data from Indian supplier purchase bills/invoices. Return ONLY valid JSON, no markdown fences."
-        ).with_model("anthropic", "claude-sonnet-4-5-20250929")
-        prompt = (
-            "Extract the bill into JSON with keys: supplier_name, supplier_gstin, bill_number, bill_date, "
-            "items (array of {description, hsn, qty, uom, rate, amount, gst_rate}), subtotal, cgst, sgst, igst, total. "
-            "Use empty string if a field is missing. Use 0 for missing numbers. Output ONLY the JSON object."
-        )
-        msg = UserMessage(text=prompt, file_contents=[ImageContent(image_base64=b64)])
-        resp = await chat.send_message(msg)
-        text = str(resp).strip()
-        if text.startswith("```"):
-            text = text.strip("`")
-            if text.lower().startswith("json"):
-                text = text[4:]
-            text = text.strip()
-        import json
-        try:
-            data = json.loads(text)
-        except Exception:
-            # try to find JSON substring
-            s = text.find("{"); e = text.rfind("}")
-            data = json.loads(text[s:e+1]) if s != -1 and e != -1 else {"raw": text}
-        return {"ok": True, "extracted": data}
-    except Exception as ex:
-        logger.exception("scan-bill failed")
-        raise HTTPException(500, f"AI extraction failed: {ex}")
+    raise HTTPException(503, "AI bill scanning is temporarily disabled. Please enter bill details manually for now. This feature will be re-enabled soon.")
 
 # ---------------- BOM ----------------
 @api.post("/bom")
