@@ -9,12 +9,13 @@ import { PageHeader, Card, Th, Td, Empty, fmtDate } from "@/components/erp/Primi
 import { Plus } from "lucide-react";
 import { toast } from "sonner";
 
-const ROLES = ["admin","manager","production","qc","accountant","ca","sales","employee"];
+const ROLES = ["admin","manager","production","qc","accountant","ca","sales","design","employee"];
+const UNITS = ["Unit 1","Unit 2","Unit 3","Unit 4"];
 
 export default function Users() {
   const [users, setUsers] = useState([]);
   const [open, setOpen] = useState(false);
-  const [form, setForm] = useState({ role: "employee" });
+  const [form, setForm] = useState({ role: "employee", unit: "Unit 1" });
 
   const load = async () => { try { const r = await api.get("/users"); setUsers(r.data); } catch (e) { toast.error("Only admins can manage users"); } };
   useEffect(() => { load(); }, []);
@@ -22,7 +23,7 @@ export default function Users() {
   const save = async () => {
     try {
       await api.post("/auth/register", form);
-      toast.success("User created"); setOpen(false); setForm({ role: "employee" }); load();
+      toast.success("User created"); setOpen(false); setForm({ role: "employee", unit: "Unit 1" }); load();
     } catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
   };
 
@@ -33,10 +34,10 @@ export default function Users() {
       <Card>
         {users.length === 0 ? <Empty label="No users." /> : (
           <table className="w-full">
-            <thead><tr><Th>Name</Th><Th>Email</Th><Th>Role</Th><Th>Created</Th></tr></thead>
+            <thead><tr><Th>Name</Th><Th>Email</Th><Th>Role</Th><Th>Unit</Th><Th>Created</Th></tr></thead>
             <tbody>
               {users.map(u => (
-                <tr key={u.id}><Td>{u.name}</Td><Td>{u.email}</Td><Td className="uppercase text-xs font-semibold">{u.role}</Td><Td>{fmtDate(u.created_at)}</Td></tr>
+                <tr key={u.id}><Td>{u.name}</Td><Td>{u.email}</Td><Td className="uppercase text-xs font-semibold">{u.role}</Td><Td className="text-xs">{u.unit || "Unit 1"}</Td><Td>{fmtDate(u.created_at)}</Td></tr>
               ))}
             </tbody>
           </table>
@@ -54,6 +55,12 @@ export default function Users() {
               <Select value={form.role} onValueChange={v=>setForm(p=>({...p,role:v}))}>
                 <SelectTrigger className="rounded-sm"><SelectValue /></SelectTrigger>
                 <SelectContent>{ROLES.map(r => <SelectItem key={r} value={r} className="uppercase">{r}</SelectItem>)}</SelectContent>
+              </Select>
+            </Field>
+            <Field label="Unit">
+              <Select value={form.unit || "Unit 1"} onValueChange={v=>setForm(p=>({...p,unit:v}))}>
+                <SelectTrigger className="rounded-sm"><SelectValue /></SelectTrigger>
+                <SelectContent>{UNITS.map(u => <SelectItem key={u} value={u}>{u}</SelectItem>)}</SelectContent>
               </Select>
             </Field>
           </div>
