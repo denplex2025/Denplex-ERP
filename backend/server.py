@@ -73,7 +73,47 @@ async def trial_write_guard(request: Request, call_next):
                 pass
     return await call_next(request)
 
-ROLES = ["admin", "manager", "production", "qc", "accountant", "ca", "sales", "employee", "trial"]
+# Audit middleware: log all successful writes (POST/PUT/PATCH/DELETE) on /api/* by authenticated users
+@app.middleware("http")
+async def audit_writes_mw(request: Request, call_next):
+    response = await call_next(request)
+    try:
+        path = request.url.path
+        method = request.method
+        if (method in ("POST", "PUT", "PATCH", "DELETE")
+                and path.startswith("/api/")
+                and not path.startswith("/api/auth/")
+                and not path.startswith("/api/audit")
+                and response.status_code < 400):
+            auth = request.headers.get("authorization", "")
+            user_name = "anonymous"
+            if auth.lower().startswith("bearer "):
+                try:
+                    token = auth.split(" ", 1)[1]
+                    p = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+                    u = await db.users.find_one({"id": p["sub"]}, {"_id": 0, "name": 1, "email": 1})
+                    if u:
+                        user_name = u.get("name") or u.get("email") or "unknown"
+                except Exception:
+                    pass
+            fwd = request.headers.get("x-forwarded-for", "")
+            ip = fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else "")
+            await db.audit_logs.insert_one({
+                "id": str(uuid.uuid4()),
+                "user": user_name,
+                "action": method.lower(),
+                "entity": "api",
+                "entity_id": path,
+                "details": {"status": response.status_code},
+                "ip": ip,
+                "user_agent": (request.headers.get("user-agent", "") or "")[:300],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+    except Exception as e:
+        logger.warning("audit writes mw failed: %s", e)
+    return response
+
+ROLES = ["admin", "manager", "production", "qc", "accountant", "ca", "sales", "design", "employee", "trial"]
 
 # ---------------- helpers ----------------
 def now_iso() -> str:
@@ -150,7 +190,8 @@ class RegisterIn(BaseModel):
     name: str
     email: EmailStr
     password: str
-    role: Literal["admin", "manager", "production", "qc", "accountant", "ca", "sales", "employee", "trial"] = "employee"
+    role: Literal["admin", "manager", "production", "qc", "accountant", "ca", "sales", "design", "employee", "trial"] = "employee"
+    unit: Optional[str] = "Unit 1"
 
 class TrialRequestIn(BaseModel):
     name: str
@@ -454,7 +495,7 @@ class DocRevIn(BaseModel):
 
 # ---------------- Auth ----------------
 @api.post("/auth/register")
-async def register(payload: RegisterIn, current=Depends(get_current_user)):
+async def register(payload: RegisterIn, request: Request, current=Depends(get_current_user)):
     if current["role"] != "admin":
         raise HTTPException(403, "Only admin can register users")
     if await db.users.find_one({"email": payload.email.lower()}):
@@ -464,17 +505,27 @@ async def register(payload: RegisterIn, current=Depends(get_current_user)):
         "name": payload.name,
         "email": payload.email.lower(),
         "role": payload.role,
+        "unit": (payload.unit or "Unit 1"),
         "password": hash_password(payload.password),
         "created_at": now_iso(),
     }
     await db.users.insert_one(user)
+    await write_audit(
+        current.get("name", "admin"),
+        "user_created",
+        "user",
+        user["id"],
+        {"email": user["email"], "role": user["role"], "unit": user["unit"]},
+        request=request,
+    )
     user.pop("_id", None); user.pop("password", None)
     return user
 
 @api.post("/auth/login")
-async def login(payload: LoginIn):
+async def login(payload: LoginIn, request: Request):
     user = await db.users.find_one({"email": payload.email.lower()})
     if not user or not verify_password(payload.password, user["password"]):
+        await write_audit(payload.email.lower(), "login_failed", "auth", "", {"reason": "invalid_credentials"}, request=request)
         raise HTTPException(401, "Invalid credentials")
     # Trial expiry check at login
     exp = user.get("trial_expires_at")
@@ -482,6 +533,7 @@ async def login(payload: LoginIn):
         try:
             exp_dt = datetime.fromisoformat(exp.replace("Z", "+00:00"))
             if datetime.now(timezone.utc) > exp_dt:
+                await write_audit(user.get("name") or payload.email.lower(), "login_failed", "auth", user["id"], {"reason": "trial_expired"}, request=request)
                 raise HTTPException(403, "Trial expired. Please contact admin@denplex.co to extend your access.")
         except HTTPException:
             raise
@@ -491,8 +543,10 @@ async def login(payload: LoginIn):
         if not payload.totp_code:
             raise HTTPException(401, "TOTP code required", headers={"X-2FA-Required": "1"})
         if not pyotp.TOTP(user.get("totp_secret", "")).verify(payload.totp_code, valid_window=1):
+            await write_audit(user.get("name") or payload.email.lower(), "login_failed", "auth", user["id"], {"reason": "invalid_totp"}, request=request)
             raise HTTPException(401, "Invalid TOTP code")
     token = create_token(user["id"], user["role"])
+    await write_audit(user.get("name") or payload.email.lower(), "login_success", "auth", user["id"], {"role": user["role"]}, request=request)
     return {
         "token": token,
         "user": {
@@ -1203,8 +1257,18 @@ async def update_invoice_template(payload: Dict[str, Any], user=Depends(require_
     return s
 
 # ---------- Audit log ----------
-async def write_audit(user_name: str, action: str, entity: str, entity_id: Optional[str] = None, details: Optional[Dict] = None):
+def get_client_ip(request: Optional[Request]) -> str:
+    if not request:
+        return ""
+    fwd = request.headers.get("x-forwarded-for", "")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.client.host if request.client else ""
+
+async def write_audit(user_name: str, action: str, entity: str, entity_id: Optional[str] = None, details: Optional[Dict] = None, request: Optional[Request] = None):
     try:
+        ip = get_client_ip(request)
+        ua = (request.headers.get("user-agent", "") if request else "")[:300]
         await db.audit_logs.insert_one({
             "id": new_id(),
             "user": user_name,
@@ -1212,6 +1276,8 @@ async def write_audit(user_name: str, action: str, entity: str, entity_id: Optio
             "entity": entity,
             "entity_id": entity_id or "",
             "details": details or {},
+            "ip": ip,
+            "user_agent": ua,
             "created_at": now_iso(),
         })
     except Exception as e:
