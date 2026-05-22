@@ -3029,31 +3029,7 @@ async def vyapar_import(payload: VyaparImportIn, user=Depends(require_roles("adm
     return {"ok": True, "summary": summary, "details": details, "dry_run": payload.dry_run}
 
 
-# ---------------- Seed ----------------
-@app.on_event("startup")
-async def startup():
-    # Owner admin (Denplex)
-    if not await db.users.find_one({"email": "admin@denplex.co"}):
-        await db.users.insert_one({
-            "id": new_id(),
-            "name": "Denplex Owner",
-            "email": "admin@denplex.co",
-            "role": "admin",
-            "password": hash_password("Shivganesh4$"),
-            "created_at": now_iso(),
-        })
-        logger.info("Seeded owner admin@denplex.co")
-    # Demo admin (trial sandbox login)
-    if not await db.users.find_one({"email": "admin@erp.com"}):
-        await db.users.insert_one({
-            "id": new_id(),
-            "name": "Demo Admin",
-            "email": "admin@erp.com",
-            "role": "admin",
-            "password": hash_password("Admin@123"),
-            "created_at": now_iso(),
-        })
-        logger.info("Seeded demo admin@erp.com / Admin@123")
+
 
 # ---------------- Trial Signup ----------------
 @api.post("/trial/request")
