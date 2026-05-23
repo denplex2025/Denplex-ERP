@@ -564,14 +564,14 @@ class ChangePwIn(BaseModel):
     new_password: str
 
 @api.post("/auth/change-password")
-async def change_password(payload: ChangePwIn, user=Depends(get_current_user)):
+async def change_password(payload: ChangePwIn, request: Request, user=Depends(get_current_user)):
     if len(payload.new_password) < 8:
         raise HTTPException(400, "New password must be at least 8 characters")
     u = await db.users.find_one({"id": user["id"]})
     if not u or not verify_password(payload.current_password, u["password"]):
         raise HTTPException(401, "Current password is incorrect")
     await db.users.update_one({"id": user["id"]}, {"$set": {"password": hash_password(payload.new_password)}})
-    await write_audit(user["name"], "password_changed", "user", user["id"])
+    await write_audit(user["name"], "password_changed", "user", user["id"], request=request)
     return {"ok": True}
 
 @api.get("/users")
@@ -2089,7 +2089,7 @@ async def totp_setup(user=Depends(get_current_user)):
     return {"secret": secret, "otpauth_url": uri}
 
 @api.post("/auth/2fa/enable")
-async def totp_enable(payload: TotpVerifyIn, user=Depends(get_current_user)):
+async def totp_enable(payload: TotpVerifyIn, request: Request, user=Depends(get_current_user)):
     u = await db.users.find_one({"id": user["id"]}, {"_id": 0})
     secret = u.get("totp_secret")
     if not secret:
@@ -2097,17 +2097,17 @@ async def totp_enable(payload: TotpVerifyIn, user=Depends(get_current_user)):
     if not pyotp.TOTP(secret).verify(payload.code, valid_window=1):
         raise HTTPException(400, "Invalid code")
     await db.users.update_one({"id": user["id"]}, {"$set": {"totp_enabled": True}})
-    await write_audit(user["name"], "2fa_enable", "user", user["id"])
+    await write_audit(user["name"], "2fa_enable", "user", user["id"], request=request)
     return {"ok": True}
 
 @api.post("/auth/2fa/disable")
-async def totp_disable(payload: TotpVerifyIn, user=Depends(get_current_user)):
+async def totp_disable(payload: TotpVerifyIn, request: Request, user=Depends(get_current_user)):
     u = await db.users.find_one({"id": user["id"]}, {"_id": 0})
     if not u.get("totp_enabled"): return {"ok": True}
     if not pyotp.TOTP(u["totp_secret"]).verify(payload.code, valid_window=1):
         raise HTTPException(400, "Invalid code")
     await db.users.update_one({"id": user["id"]}, {"$set": {"totp_enabled": False, "totp_secret": ""}})
-    await write_audit(user["name"], "2fa_disable", "user", user["id"])
+    await write_audit(user["name"], "2fa_disable", "user", user["id"], request=request)
     return {"ok": True}
 
 @api.get("/auth/2fa/status")
