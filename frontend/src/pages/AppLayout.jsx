@@ -5,36 +5,82 @@ import { Toaster } from "sonner";
 import {
   LayoutDashboard, Boxes, Layers, ClipboardList, FileText,
   ShoppingCart, Receipt, Users, UserPlus, Truck, ShieldCheck,
-  FileBox, Settings as SettingsIcon, LogOut, Cog, Menu, Calculator, UsersRound, Megaphone, Wrench, ScrollText, Ticket
+  FileBox, Settings as SettingsIcon, LogOut, Menu, Calculator, UsersRound, Megaphone, Wrench, ScrollText
 } from "lucide-react";
 import { useState } from "react";
 
-const NAV = [
-  { to: "/app", label: "Dashboard", icon: LayoutDashboard, end: true, testid: "nav-dashboard" },
-  { to: "/app/inventory", label: "Inventory", icon: Boxes, testid: "nav-inventory" },
-  { to: "/app/bom", label: "BOM", icon: Layers, testid: "nav-bom" },
-  { to: "/app/work-orders", label: "Work Orders", icon: ClipboardList, testid: "nav-work-orders" },
-  { to: "/app/job-cards", label: "Job Cards", icon: FileText, testid: "nav-job-cards" },
-  { to: "/app/quotations", label: "Quotations", icon: FileText, testid: "nav-quotations" },
-  { to: "/app/docs/sale-orders", label: "Sale Orders", icon: FileText, testid: "nav-sale-orders" },
-  { to: "/app/docs/delivery-challans", label: "Delivery Challans", icon: Truck, testid: "nav-delivery-challans" },
-  { to: "/app/docs/job-work-out", label: "Job Work Out", icon: Wrench, testid: "nav-job-work-out" },
-  { to: "/app/purchase-orders", label: "Purchase Orders", icon: ShoppingCart, testid: "nav-purchase-orders" },
-  { to: "/app/docs/vendor-bills", label: "Purchase Bills", icon: Receipt, testid: "nav-vendor-bills" },
-  { to: "/app/invoices", label: "Sale Invoices (GST)", icon: Receipt, testid: "nav-invoices" },
-  { to: "/app/docs/credit-notes", label: "Credit Notes", icon: Receipt, testid: "nav-credit-notes" },
-  { to: "/app/accounting", label: "Accounting", icon: Calculator, testid: "nav-accounting" },
-  { to: "/app/leads", label: "Leads", icon: UserPlus, testid: "nav-leads" },
-  { to: "/app/customers", label: "Customers", icon: Users, testid: "nav-customers" },
-  { to: "/app/suppliers", label: "Suppliers", icon: Truck, testid: "nav-suppliers" },
-  { to: "/app/qc", label: "QC Reports", icon: ShieldCheck, testid: "nav-qc" },
-  { to: "/app/documents", label: "Documents (ISO)", icon: FileBox, testid: "nav-documents" },
-  { to: "/app/hr", label: "HR", icon: UsersRound, testid: "nav-hr" },
-  { to: "/app/marketing", label: "Marketing", icon: Megaphone, testid: "nav-marketing" },
-  { to: "/app/trial-requests", label: "Trial Requests", icon: Ticket, testid: "nav-trial-requests", adminOnly: true },
-  { to: "/app/settings", label: "Settings", icon: Wrench, testid: "nav-settings", adminOnly: true },
-  { to: "/app/audit", label: "Audit Log", icon: ScrollText, testid: "nav-audit", adminOnly: true },
-  { to: "/app/users", label: "Users", icon: SettingsIcon, testid: "nav-users", adminOnly: true },
+// Grouped sidebar nav. To add a new department head, append a new group object below.
+const NAV_GROUPS = [
+  {
+    head: null, // standalone — no header
+    items: [
+      { to: "/app", label: "Dashboard", icon: LayoutDashboard, end: true, testid: "nav-dashboard" },
+    ],
+  },
+  {
+    head: "Sales",
+    items: [
+      { to: "/app/leads", label: "Leads", icon: UserPlus, testid: "nav-leads" },
+      { to: "/app/customers", label: "Customers", icon: Users, testid: "nav-customers" },
+      { to: "/app/quotations", label: "Quotations", icon: FileText, testid: "nav-quotations" },
+      { to: "/app/docs/sale-orders", label: "Sale Orders", icon: FileText, testid: "nav-sale-orders" },
+      { to: "/app/docs/delivery-challans", label: "Delivery Challans", icon: Truck, testid: "nav-delivery-challans" },
+    ],
+  },
+  {
+    head: "Accounts",
+    items: [
+      { to: "/app/invoices", label: "Sale Invoices (GST)", icon: Receipt, testid: "nav-invoices" },
+      { to: "/app/docs/credit-notes", label: "Credit Notes", icon: Receipt, testid: "nav-credit-notes" },
+      { to: "/app/docs/vendor-bills", label: "Purchase Bills", icon: Receipt, testid: "nav-vendor-bills" },
+      { to: "/app/accounting", label: "Accounting", icon: Calculator, testid: "nav-accounting" },
+    ],
+  },
+  {
+    head: "Production",
+    items: [
+      { to: "/app/bom", label: "BOM", icon: Layers, testid: "nav-bom" },
+      { to: "/app/work-orders", label: "Work Orders", icon: ClipboardList, testid: "nav-work-orders" },
+      { to: "/app/job-cards", label: "Job Cards", icon: FileText, testid: "nav-job-cards" },
+      { to: "/app/docs/job-work-out", label: "Job Work Out", icon: Wrench, testid: "nav-job-work-out" },
+      { to: "/app/inventory", label: "Inventory", icon: Boxes, testid: "nav-inventory" },
+    ],
+  },
+  {
+    head: "Purchase",
+    items: [
+      { to: "/app/suppliers", label: "Suppliers", icon: Truck, testid: "nav-suppliers" },
+      { to: "/app/purchase-orders", label: "Purchase Orders", icon: ShoppingCart, testid: "nav-purchase-orders" },
+    ],
+  },
+  {
+    head: "Quality",
+    items: [
+      { to: "/app/qc", label: "QC Reports", icon: ShieldCheck, testid: "nav-qc" },
+      { to: "/app/documents", label: "Documents (ISO)", icon: FileBox, testid: "nav-documents" },
+    ],
+  },
+  {
+    head: "Marketing",
+    items: [
+      { to: "/app/marketing", label: "Marketing", icon: Megaphone, testid: "nav-marketing" },
+    ],
+  },
+  {
+    head: "HR",
+    items: [
+      { to: "/app/hr", label: "HR", icon: UsersRound, testid: "nav-hr" },
+    ],
+  },
+  {
+    head: "Administration",
+    adminOnly: true,
+    items: [
+      { to: "/app/users", label: "Users", icon: SettingsIcon, testid: "nav-users" },
+      { to: "/app/settings", label: "Settings", icon: Wrench, testid: "nav-settings" },
+      { to: "/app/audit", label: "Audit Log", icon: ScrollText, testid: "nav-audit" },
+    ],
+  },
 ];
 
 export default function AppLayout() {
@@ -47,7 +93,7 @@ export default function AppLayout() {
     return null;
   }
 
-  const items = NAV.filter(n => !n.adminOnly || user.role === "admin");
+  const visibleGroups = NAV_GROUPS.filter(g => !g.adminOnly || user.role === "admin");
 
   const handleLogout = () => { logout(); nav("/"); };
 
@@ -61,22 +107,33 @@ export default function AppLayout() {
             <span className="font-display font-bold tracking-tight">DENPLEX ERP</span>
           </Link>
         </div>
-        <nav className="p-3 space-y-0.5 overflow-y-auto h-[calc(100vh-4rem-5rem)]">
-          {items.map((n) => (
-            <NavLink
-              key={n.to}
-              to={n.to}
-              end={n.end}
-              onClick={() => setOpen(false)}
-              data-testid={n.testid}
-              className={({ isActive }) =>
-                `flex items-center gap-2.5 px-3 py-2 text-sm rounded-sm transition-colors ${
-                  isActive ? "bg-red-50 text-red-700 font-medium" : "text-slate-700 hover:bg-slate-100"
-                }`
-              }
-            >
-              <n.icon className="h-4 w-4" /> {n.label}
-            </NavLink>
+        <nav className="p-3 overflow-y-auto h-[calc(100vh-4rem-5rem)]">
+          {visibleGroups.map((group, gi) => (
+            <div key={group.head || `group-${gi}`} className={gi > 0 ? "mt-4" : ""}>
+              {group.head && (
+                <div className="px-3 pb-1 text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
+                  {group.head}
+                </div>
+              )}
+              <div className="space-y-0.5">
+                {group.items.map((n) => (
+                  <NavLink
+                    key={n.to}
+                    to={n.to}
+                    end={n.end}
+                    onClick={() => setOpen(false)}
+                    data-testid={n.testid}
+                    className={({ isActive }) =>
+                      `flex items-center gap-2.5 px-3 py-2 text-sm rounded-sm transition-colors ${
+                        isActive ? "bg-red-50 text-red-700 font-medium" : "text-slate-700 hover:bg-slate-100"
+                      }`
+                    }
+                  >
+                    <n.icon className="h-4 w-4" /> {n.label}
+                  </NavLink>
+                ))}
+              </div>
+            </div>
           ))}
         </nav>
         <div className="absolute bottom-0 left-0 right-0 p-3 border-t border-slate-200 bg-white">
