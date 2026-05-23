@@ -62,7 +62,7 @@ export default function Login() {
           </Link>
           <div className="text-xs font-semibold uppercase tracking-[0.2em] text-red-600">Sign in</div>
           <h1 className="font-display text-3xl font-bold tracking-tight mt-2 text-slate-900">Welcome back.</h1>
-          <p className="text-sm text-slate-600 mt-2">Use the seeded admin account to explore.</p>
+          <p className="text-sm text-slate-600 mt-2">Sign in to your Denplex ERP workspace.</p>
 
           <form onSubmit={submit} className="mt-8 space-y-4" data-testid="login-form">
             <div>
