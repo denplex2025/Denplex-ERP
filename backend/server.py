@@ -51,11 +51,35 @@ load_dotenv(ROOT_DIR / '.env')
 _PDF_FONT_REGULAR = "Helvetica"
 _PDF_FONT_BOLD = "Helvetica-Bold"
 
+def _ensure_font_files_on_disk():
+    """Best-effort: if backend/fonts/DejaVu*.ttf is missing, fetch from CDN.
+    Runs once at startup; idempotent. Failures are non-fatal (we fall back to Helvetica)."""
+    try:
+        import urllib.request
+        target_dir = Path(__file__).parent / "fonts"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        urls = {
+            "DejaVuSans.ttf": "https://cdn.jsdelivr.net/npm/dejavu-sans-ttf@2.37.3/ttf/DejaVuSans.ttf",
+            "DejaVuSans-Bold.ttf": "https://cdn.jsdelivr.net/npm/dejavu-sans-ttf@2.37.3/ttf/DejaVuSans-Bold.ttf",
+        }
+        for name, url in urls.items():
+            tgt = target_dir / name
+            if tgt.exists() and tgt.stat().st_size > 100_000:
+                continue
+            try:
+                urllib.request.urlretrieve(url, str(tgt))
+            except Exception:
+                pass
+    except Exception:
+        pass
+
 def _try_register_pdf_fonts():
     global _PDF_FONT_REGULAR, _PDF_FONT_BOLD
     candidates = [
+        # System DejaVu (rare on Railway slim images but try anyway)
         ("DejaVuSans", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
          "DejaVuSans-Bold", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+        # Bundled / auto-downloaded into backend/fonts/
         ("DejaVuSans", str(Path(__file__).parent / "fonts" / "DejaVuSans.ttf"),
          "DejaVuSans-Bold", str(Path(__file__).parent / "fonts" / "DejaVuSans-Bold.ttf")),
         ("NotoSans", str(Path(__file__).parent / "fonts" / "NotoSans-Regular.ttf"),
@@ -74,6 +98,8 @@ def _try_register_pdf_fonts():
             continue
     return _PDF_FONT_REGULAR
 
+# Order matters: try to download then register
+_ensure_font_files_on_disk()
 _try_register_pdf_fonts()
 
 MONGO_URL = os.environ['MONGO_URL']
@@ -409,9 +435,13 @@ class PurchaseOrder(BaseModel):
 
 class InvoiceLine(BaseModel):
     description: str
+    item_code: Optional[str] = ""        # SKU / part number, shown as "Item Code" col
     hsn: Optional[str] = ""
     qty: float
+    unit: Optional[str] = "Nos"          # Mtr, Kg, Nos, etc.
     rate: float
+    discount_pct: float = 0.0
+    discount_amount: float = 0.0
     gst_rate: float = 18.0
 
 class Invoice(BaseModel):
@@ -425,6 +455,20 @@ class Invoice(BaseModel):
     is_interstate: bool = False
     date: str = Field(default_factory=now_iso)
     due_date: Optional[str] = ""
+    # Optional Ship To override (when shipping address ≠ billing address)
+    ship_to_name: Optional[str] = ""
+    ship_to_address: Optional[str] = ""
+    ship_to_gstin: Optional[str] = ""
+    # Optional Bill From / Ship From overrides (defaults derived from company settings)
+    bill_from_name: Optional[str] = ""
+    bill_from_address: Optional[str] = ""
+    ship_from_name: Optional[str] = ""        # e.g. "Unit - 1"
+    ship_from_address: Optional[str] = ""
+    # Vyapar-style PO meta
+    po_number: Optional[str] = ""
+    po_date: Optional[str] = ""
+    purchaser_name: Optional[str] = ""
+    payment_mode: Optional[str] = ""
     lines: List[InvoiceLine] = []
     subtotal: float = 0
     cgst: float = 0
@@ -1238,6 +1282,8 @@ class InvoiceTemplateIn(BaseModel):
     show_company_phone: bool = True
     show_company_udyam: bool = True
     show_ship_to: bool = True
+    show_bill_from: bool = False             # Off by default; auto-on when invoice has explicit bill_from
+    show_ship_from: bool = False             # Off by default; auto-on when invoice has explicit ship_from
     show_due_date: bool = True
     show_place_of_supply: bool = True
     show_hsn_column: bool = True
@@ -1452,7 +1498,9 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
                    party_extra: Optional[Dict[str, Any]] = None,
                    ship_to: Optional[Dict[str, Any]] = None,
                    doc_meta: Optional[Dict[str, Any]] = None,
-                   copy_label: str = "ORIGINAL FOR RECIPIENT") -> bytes:
+                   copy_label: str = "ORIGINAL FOR RECIPIENT",
+                   bill_from: Optional[Dict[str, Any]] = None,
+                   ship_from: Optional[Dict[str, Any]] = None) -> bytes:
     """Vyapar-style invoice/quotation/PO PDF — Denplex Red+Black branded.
     `tpl` overrides which sections are visible (defaults to all-on).
     `party_extra` carries gstin/phone/state/address for the Bill-To party.
@@ -1643,6 +1691,27 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
             ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
         ]))
         flow.append(ship_tbl)
+
+    # ---------- Bill From / Ship From (purchase docs or multi-unit shipments) ----------
+    def _addr_block(label, payload):
+        block = [Paragraph(f"<b>{label}:</b>", box_label),
+                 Paragraph(payload.get("name", ""), smallb)]
+        if payload.get("address"):
+            block.append(Paragraph(payload["address"], tiny))
+        tbl = Table([[block]], colWidths=[190*mm])
+        tbl.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("BOX", (0, 0), (-1, -1), 0.75, BORDER),
+            ("LEFTPADDING", (0, 0), (-1, -1), 6),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+            ("TOPPADDING", (0, 0), (-1, -1), 5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ]))
+        return tbl
+    if show("show_bill_from", False) and bill_from and (bill_from.get("name") or bill_from.get("address")):
+        flow.append(_addr_block("Bill From", bill_from))
+    if show("show_ship_from", False) and ship_from and (ship_from.get("name") or ship_from.get("address")):
+        flow.append(_addr_block("Ship From", ship_from))
 
     # ---------- Line items ----------
     show_hsn = show("show_hsn_column")
@@ -1922,15 +1991,41 @@ async def invoice_pdf(iid: str, copy: Optional[str] = "ORIGINAL FOR RECIPIENT", 
     if inv.get("customer_id"):
         c = await db.customers.find_one({"id": inv["customer_id"]}, {"_id": 0}) or {}
         party_extra = {"address": c.get("address",""), "phone": c.get("phone",""), "gstin": c.get("gstin",""), "state": c.get("state","")}
+    # Build optional Ship To: explicit on invoice wins; else fall back to customer address
+    ship_to = None
+    if inv.get("ship_to_address") or inv.get("ship_to_name"):
+        ship_to = {"name": inv.get("ship_to_name") or inv.get("customer_name", ""),
+                   "address": inv.get("ship_to_address", ""),
+                   "gstin": inv.get("ship_to_gstin", "")}
+    elif party_extra.get("address"):
+        ship_to = {"name": inv.get("customer_name", ""), "address": party_extra.get("address", ""),
+                   "gstin": party_extra.get("gstin", "")}
+    bill_from = None
+    if inv.get("bill_from_name") or inv.get("bill_from_address"):
+        bill_from = {"name": inv.get("bill_from_name", ""), "address": inv.get("bill_from_address", "")}
+    ship_from = None
+    if inv.get("ship_from_name") or inv.get("ship_from_address"):
+        ship_from = {"name": inv.get("ship_from_name", ""), "address": inv.get("ship_from_address", "")}
+    # Auto-enable bill_from / ship_from blocks when invoice has those fields
+    if bill_from: tpl = {**tpl, "show_bill_from": True}
+    if ship_from: tpl = {**tpl, "show_ship_from": True}
+    doc_meta = {
+        "due_date": str(inv.get("due_date",""))[:10],
+        "place_of_supply": inv.get("place_of_supply",""),
+        "payment_mode": inv.get("payment_mode",""),
+        "po_number": inv.get("po_number",""),
+        "po_date": inv.get("po_date",""),
+        "purchaser_name": inv.get("purchaser_name",""),
+        "is_interstate": bool(inv.get("is_interstate")),
+    }
     pdf = _build_doc_pdf("Tax Invoice", inv.get("code", ""), "Bill To", inv.get("customer_name", ""), str(inv.get("date", ""))[:10],
                          inv.get("lines", []),
                          {"subtotal": inv.get("subtotal", 0), "total": inv.get("total", 0), "gst_total": inv.get("cgst",0)+inv.get("sgst",0)+inv.get("igst",0)},
                          gst_breakup={"cgst": inv.get("cgst", 0), "sgst": inv.get("sgst", 0), "igst": inv.get("igst", 0)},
                          company=company, notes=inv.get("notes", ""), tpl=tpl,
-                         party_extra=party_extra,
-                         doc_meta={"due_date": str(inv.get("due_date",""))[:10], "place_of_supply": inv.get("place_of_supply",""),
-                                   "payment_mode": inv.get("payment_mode",""), "is_interstate": bool(inv.get("is_interstate"))},
-                         copy_label=copy or "ORIGINAL FOR RECIPIENT")
+                         party_extra=party_extra, ship_to=ship_to, doc_meta=doc_meta,
+                         copy_label=copy or "ORIGINAL FOR RECIPIENT",
+                         bill_from=bill_from, ship_from=ship_from)
     return Response(content=pdf, media_type="application/pdf",
                     headers={"Content-Disposition": f'inline; filename="{inv.get("code","invoice")}.pdf"'})
 
