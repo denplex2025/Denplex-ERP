@@ -38,9 +38,43 @@ import re
 import ssl
 import hashlib
 from cryptography.fernet import Fernet, InvalidToken
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
+
+# ---------------- PDF font registration ----------------
+# Helvetica (reportlab default) lacks proper rupee glyph + many UTF-8 symbols.
+# Try DejaVuSans (present on most Ubuntu/Debian + Railway), then a bundled
+# fallback in backend/fonts/, then give up and use Helvetica.
+_PDF_FONT_REGULAR = _PDF_FONT_REGULAR
+_PDF_FONT_BOLD = _PDF_FONT_BOLD
+
+def _try_register_pdf_fonts():
+    global _PDF_FONT_REGULAR, _PDF_FONT_BOLD
+    candidates = [
+        ("DejaVuSans", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+         "DejaVuSans-Bold", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+        ("DejaVuSans", str(Path(__file__).parent / "fonts" / "DejaVuSans.ttf"),
+         "DejaVuSans-Bold", str(Path(__file__).parent / "fonts" / "DejaVuSans-Bold.ttf")),
+        ("NotoSans", str(Path(__file__).parent / "fonts" / "NotoSans-Regular.ttf"),
+         "NotoSans-Bold", str(Path(__file__).parent / "fonts" / "NotoSans-Bold.ttf")),
+    ]
+    import os as _os
+    for name, path, name_b, path_b in candidates:
+        try:
+            if _os.path.exists(path) and _os.path.exists(path_b):
+                pdfmetrics.registerFont(TTFont(name, path))
+                pdfmetrics.registerFont(TTFont(name_b, path_b))
+                _PDF_FONT_REGULAR = name
+                _PDF_FONT_BOLD = name_b
+                return name
+        except Exception:
+            continue
+    return _PDF_FONT_REGULAR
+
+_try_register_pdf_fonts()
 
 MONGO_URL = os.environ['MONGO_URL']
 DB_NAME = os.environ['DB_NAME']
@@ -1164,6 +1198,9 @@ class IntegrationSettingsIn(BaseModel):
     company_gstin: Optional[str] = ""
     company_state: Optional[str] = ""
     company_address: Optional[str] = ""
+    # Multi-unit support: list of {name, address} dicts. Renders one block per unit
+    # in the PDF header. If empty, falls back to company_address.
+    company_units: Optional[List[Dict[str, str]]] = []
     company_tagline: Optional[str] = "Precision Engineered Solutions"
     company_phone: Optional[str] = ""
     company_email: Optional[str] = ""
@@ -1204,6 +1241,8 @@ class InvoiceTemplateIn(BaseModel):
     show_due_date: bool = True
     show_place_of_supply: bool = True
     show_hsn_column: bool = True
+    show_item_code_column: bool = True       # Item Code column (like Vyapar)
+    show_po_meta: bool = True                # PO Date / PO No / Purchaser Name in meta box
     show_discount_column: bool = True
     show_tax_summary: bool = True            # HSN-wise CGST/SGST/IGST breakup
     show_totals_sidebar: bool = True         # Sub Total / Discount / Tax / TCS / Total
@@ -1218,6 +1257,9 @@ class InvoiceTemplateIn(BaseModel):
     paper_size: Literal["A4", "A5"] = "A4"
     orientation: Literal["portrait", "landscape"] = "portrait"
     amount_in_words_locale: Literal["en_IN", "en"] = "en_IN"
+    # Style preset: "standard" = full Vyapar layout, "compact" = single-page minimal,
+    # "modern" = clean serif with accent lines and more whitespace.
+    template_style: Literal["standard", "compact", "modern"] = "standard"
 
 @api.get("/settings/invoice-template")
 async def get_invoice_template(doc_type: Optional[str] = None, user=Depends(get_current_user)):
@@ -1419,8 +1461,14 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
     """
     from reportlab.platypus import Image as RLImage
     tpl = tpl or {}
+    # Compact preset turns off heavy blocks by default; user toggles still win.
+    _COMPACT_OFF_BY_DEFAULT = {"show_tax_summary", "show_bank_details", "show_upi_qr",
+                                "show_signatory_image", "show_description", "show_terms"}
+    _style_default = (tpl.get("template_style") or "standard").lower()
     def show(k: str, default: bool = True) -> bool:
         v = tpl.get(k)
+        if v is None and _style_default == "compact" and k in _COMPACT_OFF_BY_DEFAULT:
+            return False
         return default if v is None else bool(v)
     party_extra = party_extra or {}
     doc_meta = doc_meta or {}
@@ -1433,26 +1481,60 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
     LIGHTGREY = colors.HexColor("#F1F5F9")
     BORDER = colors.HexColor("#CBD5E1")
 
+    # ---- Style preset (standard / compact / modern) ----
+    style_preset = (tpl.get("template_style") or "standard").lower()
+    if style_preset == "compact":
+        _margin = 6*mm; _body = 7.5; _title_sz = 16; _company_sz = 12; _border_w = 0.4
+        _accent = colors.HexColor("#475569")  # slate grey accent
+    elif style_preset == "modern":
+        _margin = 14*mm; _body = 9.0; _title_sz = 22; _company_sz = 14; _border_w = 0.0  # no full borders
+        _accent = colors.HexColor("#1E293B")  # near-black accent
+    else:  # standard (Vyapar)
+        _margin = 10*mm; _body = 8.5; _title_sz = 18; _company_sz = 13; _border_w = 0.75
+        _accent = RED
+
+    # Pick fonts: use registered TTF (e.g. DejaVuSans) for proper ₹ rendering
+    _FONT = _PDF_FONT_REGULAR
+    _FONT_B = _PDF_FONT_BOLD
+    _TITLE_FONT = _FONT_B if style_preset != "modern" else (_FONT_B)  # serif if available later
+
     buf = io.BytesIO()
-    page_size = A4  # A5/landscape options can be added later
-    doc = SimpleDocTemplate(buf, pagesize=page_size, rightMargin=10*mm, leftMargin=10*mm, topMargin=8*mm, bottomMargin=10*mm)
+    page_size = A4
+    doc = SimpleDocTemplate(buf, pagesize=page_size,
+                            rightMargin=_margin, leftMargin=_margin,
+                            topMargin=max(_margin - 2*mm, 6*mm),
+                            bottomMargin=_margin)
     styles = getSampleStyleSheet()
-    title_style = ParagraphStyle("ttl", parent=styles["Heading1"], fontSize=18, textColor=BLACK, leading=20, alignment=1, spaceAfter=0)
-    h2_style = ParagraphStyle("h2", parent=styles["Heading2"], fontSize=14, textColor=BLACK, leading=16, spaceAfter=0)
-    small = ParagraphStyle("sm", parent=styles["Normal"], fontSize=8.5, textColor=BLACK, leading=11)
-    smallb = ParagraphStyle("smb", parent=small, fontName="Helvetica-Bold")
-    tiny = ParagraphStyle("ti", parent=styles["Normal"], fontSize=7.5, textColor=GREY, leading=10)
-    box_label = ParagraphStyle("bl", parent=smallb, fontSize=9, textColor=BLACK)
-    copy_lbl = ParagraphStyle("cl", parent=small, fontSize=8, textColor=GREY, alignment=2)
+    title_style = ParagraphStyle("ttl", parent=styles["Heading1"], fontName=_TITLE_FONT,
+                                 fontSize=_title_sz, textColor=BLACK, leading=_title_sz+2,
+                                 alignment=(0 if style_preset == "modern" else 1), spaceAfter=0)
+    h2_style = ParagraphStyle("h2", parent=styles["Heading2"], fontName=_FONT_B,
+                              fontSize=14, textColor=BLACK, leading=16, spaceAfter=0)
+    small = ParagraphStyle("sm", parent=styles["Normal"], fontName=_FONT,
+                           fontSize=_body, textColor=BLACK, leading=_body+2.5)
+    smallb = ParagraphStyle("smb", parent=small, fontName=_FONT_B)
+    tiny = ParagraphStyle("ti", parent=styles["Normal"], fontName=_FONT,
+                          fontSize=max(_body-1, 6.5), textColor=GREY, leading=max(_body, 8.5))
+    box_label = ParagraphStyle("bl", parent=smallb, fontSize=_body+0.5, textColor=BLACK)
+    copy_lbl = ParagraphStyle("cl", parent=small, fontSize=_body-0.5, textColor=GREY, alignment=2)
     flow = []
+
+    # Modern style: render an accent line under title later
+    _is_modern = (style_preset == "modern")
+    _is_compact = (style_preset == "compact")
 
     # ---------- Top right "Original for Recipient" ----------
     if show("print_original_duplicate") and copy_label:
         flow.append(Paragraph(copy_label.upper(), copy_lbl))
 
-    # ---------- Title (centered) ----------
+    # ---------- Title ----------
     flow.append(Paragraph(f"<b>{title}</b>", title_style))
-    flow.append(Spacer(1, 3*mm))
+    if _is_modern:
+        # Accent line beneath the title
+        from reportlab.platypus import HRFlowable
+        flow.append(HRFlowable(width="100%", thickness=1.2, color=_accent, spaceBefore=2, spaceAfter=4))
+    else:
+        flow.append(Spacer(1, 3*mm))
 
     # ---------- Company header card ----------
     logo_cell = ""
@@ -1465,8 +1547,22 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
     company_lines = [Paragraph(f"<font size=13><b>{company.get('company_name','Denplex Engineering Company')}</b></font>", smallb)]
     if show("show_company_udyam") and company.get("company_udyam"):
         company_lines.append(Paragraph(f"<font color='#475569'>UDYAM: <b>{company['company_udyam']}</b></font>", tiny))
-    if show("show_company_address") and company.get("company_address"):
-        company_lines.append(Paragraph(company["company_address"], tiny))
+    # Multi-unit address takes priority; fall back to single company_address
+    _units = company.get("company_units") or []
+    if show("show_company_address"):
+        if _units and isinstance(_units, list):
+            for u in _units:
+                if not isinstance(u, dict): continue
+                u_name = (u.get("name") or "").strip()
+                u_addr = (u.get("address") or "").strip()
+                if not (u_name or u_addr):
+                    continue
+                if u_name:
+                    company_lines.append(Paragraph(f"<b>{u_name}:</b> {u_addr}", tiny))
+                else:
+                    company_lines.append(Paragraph(u_addr, tiny))
+        elif company.get("company_address"):
+            company_lines.append(Paragraph(company["company_address"], tiny))
     # Phone + Email + State row
     contact_bits = []
     if show("show_company_phone") and company.get("company_phone"):
@@ -1486,7 +1582,8 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
     header_tbl = Table([[logo_cell, company_lines]], colWidths=[28*mm, 162*mm])
     header_tbl.setStyle(TableStyle([
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("BOX", (0, 0), (-1, -1), 0.75, BORDER),
+        ("BOX", (0, 0), (-1, -1), _border_w, BORDER) if _border_w > 0 else
+        ("LINEBELOW", (0, 0), (-1, -1), 0.5, BORDER),
         ("LEFTPADDING", (0, 0), (-1, -1), 6),
         ("RIGHTPADDING", (0, 0), (-1, -1), 6),
         ("TOPPADDING", (0, 0), (-1, -1), 6),
@@ -1509,6 +1606,14 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
         meta_lines.append(Paragraph(f"Due Date: <b>{doc_meta['due_date']}</b>", smallb))
     if show("show_place_of_supply") and doc_meta.get("place_of_supply"):
         meta_lines.append(Paragraph(f"Place of Supply: <b>{doc_meta['place_of_supply']}</b>", smallb))
+    # PO meta (Vyapar-style): PO Date, PO No, Purchaser Name
+    if show("show_po_meta"):
+        if doc_meta.get("po_date"):
+            meta_lines.append(Paragraph(f"PO Date: <b>{doc_meta['po_date']}</b>", smallb))
+        if doc_meta.get("po_number") or doc_meta.get("po_no"):
+            meta_lines.append(Paragraph(f"PO No: <b>{doc_meta.get('po_number') or doc_meta.get('po_no')}</b>", smallb))
+        if doc_meta.get("purchaser_name"):
+            meta_lines.append(Paragraph(f"Purchaser Name: <b>{doc_meta['purchaser_name']}</b>", smallb))
 
     bd_tbl = Table([[bill_lines, meta_lines]], colWidths=[95*mm, 95*mm])
     bd_tbl.setStyle(TableStyle([
@@ -1541,14 +1646,17 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
 
     # ---------- Line items ----------
     show_hsn = show("show_hsn_column")
+    show_code = show("show_item_code_column")
     show_disc = show("show_discount_column")
     cols = ["#", "Item name"]
-    widths = [8*mm, 60*mm]
+    widths = [7*mm, 50*mm]
+    if show_code:
+        cols.append("Item Code"); widths.append(20*mm)
     if show_hsn:
-        cols.append("HSN/SAC"); widths.append(20*mm)
-    cols += ["Qty", "Price/unit"]; widths += [16*mm, 22*mm]
+        cols.append("HSN/SAC"); widths.append(18*mm)
+    cols += ["Qty", "Price/unit"]; widths += [14*mm, 20*mm]
     if show_disc:
-        cols.append("Discount"); widths.append(22*mm)
+        cols.append("Discount"); widths.append(20*mm)
     cols += ["GST", "Amount"]; widths += [22*mm, 20*mm]
 
     data = [cols]
@@ -1571,6 +1679,8 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
         total_gst += gst_amt
         total_amount += amt
         row = [str(i), Paragraph(l.get("description", ""), small)]
+        if show_code:
+            row.append(str(l.get("item_code") or l.get("code") or ""))
         if show_hsn:
             row.append(str(l.get("hsn") or ""))
         row += [f"{qty:g}", f"₹ {rate:,.2f}"]
@@ -1580,6 +1690,7 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
         data.append(row)
     # Total row
     tot_row = ["", Paragraph("<b>TOTAL</b>", smallb)]
+    if show_code: tot_row.append("")
     if show_hsn: tot_row.append("")
     tot_row += [f"{sum(float(l.get('qty',0) or 0) for l in (lines or [])):g}", ""]
     if show_disc: tot_row.append(f"₹ {total_discount:,.2f}")
@@ -1589,7 +1700,7 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
     tbl = Table(data, colWidths=widths, repeatRows=1)
     style = [
         ("BACKGROUND", (0, 0), (-1, 0), LIGHTGREY),
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTNAME", (0, 0), (-1, 0), _PDF_FONT_BOLD),
         ("FONTSIZE", (0, 0), (-1, -1), 8.5),
         ("ALIGN", (0, 0), (0, -1), "CENTER"),
         ("ALIGN", (2 if show_hsn else 2, 0), (-1, -1), "RIGHT"),
@@ -1601,7 +1712,7 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
         ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
         # Total row
         ("BACKGROUND", (0, -1), (-1, -1), LIGHTGREY),
-        ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+        ("FONTNAME", (0, -1), (-1, -1), _PDF_FONT_BOLD),
         ("LINEABOVE", (0, -1), (-1, -1), 0.8, BLACK),
     ]
     tbl.setStyle(TableStyle(style))
@@ -1633,13 +1744,13 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
             ts = Table(t_data, colWidths=widths_ts)
             ts.setStyle(TableStyle([
                 ("BACKGROUND", (0,0), (-1,0), LIGHTGREY),
-                ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+                ("FONTNAME", (0,0), (-1,0), _PDF_FONT_BOLD),
                 ("FONTSIZE", (0,0), (-1,-1), 7.5),
                 ("ALIGN", (1,0), (-1,-1), "RIGHT"),
                 ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
                 ("GRID", (0,0), (-1,-1), 0.4, BORDER),
                 ("BACKGROUND", (0,-1), (-1,-1), LIGHTGREY),
-                ("FONTNAME", (0,-1), (-1,-1), "Helvetica-Bold"),
+                ("FONTNAME", (0,-1), (-1,-1), _PDF_FONT_BOLD),
                 ("TOPPADDING", (0,0), (-1,-1), 3),
                 ("BOTTOMPADDING", (0,0), (-1,-1), 3),
             ]))
@@ -1666,7 +1777,7 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
             ("FONTSIZE", (0,0), (-1,-1), 9),
             ("ALIGN", (1,0), (1,-1), "RIGHT"),
             ("GRID", (0,0), (-1,-1), 0.4, BORDER),
-            ("FONTNAME", (0,-1), (-1,-1), "Helvetica-Bold"),
+            ("FONTNAME", (0,-1), (-1,-1), _PDF_FONT_BOLD),
             ("BACKGROUND", (0,-1), (-1,-1), RED),
             ("TEXTCOLOR", (0,-1), (-1,-1), colors.white),
             ("TOPPADDING", (0,0), (-1,-1), 4),
