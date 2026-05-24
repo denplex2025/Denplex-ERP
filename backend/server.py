@@ -59,8 +59,8 @@ def _ensure_font_files_on_disk():
         target_dir = Path(__file__).parent / "fonts"
         target_dir.mkdir(parents=True, exist_ok=True)
         urls = {
-            "DejaVuSans.ttf": "https://cdn.jsdelivr.net/npm/dejavu-sans-ttf@2.37.3/ttf/DejaVuSans.ttf",
-            "DejaVuSans-Bold.ttf": "https://cdn.jsdelivr.net/npm/dejavu-sans-ttf@2.37.3/ttf/DejaVuSans-Bold.ttf",
+            "DejaVuSans.ttf": "https://cdn.jsdelivr.net/npm/dejavu-fonts-ttf@2.37.3/ttf/DejaVuSans.ttf",
+            "DejaVuSans-Bold.ttf": "https://cdn.jsdelivr.net/npm/dejavu-fonts-ttf@2.37.3/ttf/DejaVuSans-Bold.ttf",
         }
         for name, url in urls.items():
             tgt = target_dir / name
