@@ -48,8 +48,8 @@ load_dotenv(ROOT_DIR / '.env')
 # Helvetica (reportlab default) lacks proper rupee glyph + many UTF-8 symbols.
 # Try DejaVuSans (present on most Ubuntu/Debian + Railway), then a bundled
 # fallback in backend/fonts/, then give up and use Helvetica.
-_PDF_FONT_REGULAR = _PDF_FONT_REGULAR
-_PDF_FONT_BOLD = _PDF_FONT_BOLD
+_PDF_FONT_REGULAR = "Helvetica"
+_PDF_FONT_BOLD = "Helvetica-Bold"
 
 def _try_register_pdf_fonts():
     global _PDF_FONT_REGULAR, _PDF_FONT_BOLD
