@@ -76,8 +76,12 @@ export default function Settings() {
               <Fld label="Phone"><Input value={s.company_phone || ""} onChange={e=>setF("company_phone", e.target.value)} className="rounded-sm" placeholder="9033338999" /></Fld>
               <Fld label="Email"><Input value={s.company_email || ""} onChange={e=>setF("company_email", e.target.value)} className="rounded-sm" placeholder="denplexengineering@gmail.com" /></Fld>
               <Fld label="UDYAM / MSME Registration"><Input value={s.company_udyam || ""} onChange={e=>setF("company_udyam", e.target.value)} className="rounded-sm" placeholder="UDYAM-GJ-09-0005351" /></Fld>
-              <Fld label="Address (full)"><Textarea rows={3} value={s.company_address || ""} onChange={e=>setF("company_address", e.target.value)} className="rounded-sm" /></Fld>
+              <Fld label="Address (single — fallback if no units below)"><Textarea rows={3} value={s.company_address || ""} onChange={e=>setF("company_address", e.target.value)} className="rounded-sm" /></Fld>
             </div>
+
+            <h3 className="font-display text-lg font-semibold mt-8 mb-2">Manufacturing units</h3>
+            <p className="text-sm text-slate-600 mb-3">Add each unit/factory. The PDF header will render every unit listed here. If empty, falls back to the single address above.</p>
+            <UnitsEditor units={s.company_units || []} onChange={(arr)=>setF("company_units", arr)} />
 
             <h3 className="font-display text-lg font-semibold mt-8 mb-4">Bank & UPI (for invoice footer)</h3>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -466,6 +470,8 @@ const TEMPLATE_TOGGLES = [
   { key: "show_due_date",             label: "Show due date" },
   { key: "show_place_of_supply",      label: "Show place of supply" },
   { key: "show_hsn_column",           label: "Show HSN/SAC column in item table" },
+  { key: "show_item_code_column",     label: "Show Item Code column in item table" },
+  { key: "show_po_meta",              label: "Show PO Date / PO No / Purchaser Name" },
   { key: "show_discount_column",      label: "Show Discount column in item table" },
   { key: "show_tax_summary",          label: "Show Tax Summary (HSN-wise breakup)" },
   { key: "show_totals_sidebar",       label: "Show Totals sidebar (Sub Total / Tax / Total)" },
@@ -567,6 +573,20 @@ function InvoiceTemplatePanel() {
           >
             {DOC_TYPES.map(d => <option key={d.key} value={d.key}>{d.label}</option>)}
           </select>
+        </div>
+        <div className="mb-4">
+          <Label className="text-xs uppercase tracking-wider text-slate-600">Style preset</Label>
+          <select
+            value={t.template_style || "standard"}
+            onChange={(e)=>setAllTpl(p => ({ ...p, [docType]: { ...(p?.[docType] || {}), template_style: e.target.value } }))}
+            data-testid="template-style-select"
+            className="mt-1.5 w-full h-9 border border-slate-300 rounded-sm px-2 text-sm bg-white"
+          >
+            <option value="standard">Standard — Vyapar-style full layout</option>
+            <option value="compact">Compact — single-page minimal</option>
+            <option value="modern">Modern — clean accents, more whitespace</option>
+          </select>
+          <p className="text-xs text-slate-500 mt-1">Compact auto-hides tax summary, bank, signature, terms unless toggled on below.</p>
         </div>
         <div className="flex gap-2 mb-3">
           <Button size="sm" variant="outline" className="rounded-sm" onClick={livePreview} data-testid="preview-template"><Eye className="h-4 w-4 mr-1" /> Preview</Button>
@@ -717,5 +737,43 @@ function Toggle({ label, checked, onChange }) {
       <span className="text-xs text-slate-700">{label}</span>
       <Switch checked={checked} onCheckedChange={onChange} />
     </label>
+  );
+}
+
+
+function UnitsEditor({ units, onChange }) {
+  const arr = Array.isArray(units) ? units : [];
+  const update = (i, key, val) => {
+    const copy = arr.map((u, idx) => idx === i ? { ...u, [key]: val } : u);
+    onChange(copy);
+  };
+  const add = () => onChange([...arr, { name: `Unit - ${arr.length + 1}`, address: "" }]);
+  const remove = (i) => onChange(arr.filter((_, idx) => idx !== i));
+  return (
+    <div className="space-y-3" data-testid="units-editor">
+      {arr.length === 0 && (
+        <div className="text-sm text-slate-500 italic">No units configured yet.</div>
+      )}
+      {arr.map((u, i) => (
+        <div key={i} className="grid grid-cols-1 md:grid-cols-12 gap-2 items-start border border-slate-200 rounded-sm p-3 bg-slate-50">
+          <div className="md:col-span-3">
+            <Label className="text-xs uppercase tracking-wider text-slate-600">Unit name</Label>
+            <Input value={u.name || ""} onChange={e=>update(i, "name", e.target.value)} className="mt-1 rounded-sm" placeholder={`Unit - ${i+1}`} data-testid={`unit-name-${i}`} />
+          </div>
+          <div className="md:col-span-8">
+            <Label className="text-xs uppercase tracking-wider text-slate-600">Address</Label>
+            <Textarea rows={2} value={u.address || ""} onChange={e=>update(i, "address", e.target.value)} className="mt-1 rounded-sm" placeholder="Shed No. , Estate, City, State PIN" data-testid={`unit-address-${i}`} />
+          </div>
+          <div className="md:col-span-1 flex md:justify-end md:items-end h-full">
+            <Button type="button" variant="outline" size="icon" onClick={()=>remove(i)} className="rounded-sm h-9 w-9 mt-1 md:mt-6" data-testid={`unit-remove-${i}`}>
+              <Trash2 className="h-4 w-4" />
+            </Button>
+          </div>
+        </div>
+      ))}
+      <Button type="button" variant="outline" size="sm" onClick={add} className="rounded-sm" data-testid="unit-add">
+        <Plus className="h-4 w-4 mr-1" /> Add unit
+      </Button>
+    </div>
   );
 }
