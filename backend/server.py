@@ -76,10 +76,8 @@ def _ensure_font_files_on_disk():
 def _try_register_pdf_fonts():
     global _PDF_FONT_REGULAR, _PDF_FONT_BOLD
     candidates = [
-        # System DejaVu (rare on Railway slim images but try anyway)
         ("DejaVuSans", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
          "DejaVuSans-Bold", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
-        # Bundled / auto-downloaded into backend/fonts/
         ("DejaVuSans", str(Path(__file__).parent / "fonts" / "DejaVuSans.ttf"),
          "DejaVuSans-Bold", str(Path(__file__).parent / "fonts" / "DejaVuSans-Bold.ttf")),
         ("NotoSans", str(Path(__file__).parent / "fonts" / "NotoSans-Regular.ttf"),
@@ -91,8 +89,20 @@ def _try_register_pdf_fonts():
             if _os.path.exists(path) and _os.path.exists(path_b):
                 pdfmetrics.registerFont(TTFont(name, path))
                 pdfmetrics.registerFont(TTFont(name_b, path_b))
+                # Override Helvetica so table body cells (which inherit reportlab's default)
+                # also pick up ₹ and other Unicode glyphs.
+                try:
+                    pdfmetrics.registerFont(TTFont("Helvetica", path))
+                    pdfmetrics.registerFont(TTFont("Helvetica-Bold", path_b))
+                except Exception:
+                    pass
                 _PDF_FONT_REGULAR = name
                 _PDF_FONT_BOLD = name_b
+                try:
+                    import logging as _l
+                    _l.getLogger(__name__).info("PDF fonts registered: %s / %s (also aliased as Helvetica)", name, name_b)
+                except Exception:
+                    pass
                 return name
         except Exception:
             continue
@@ -1715,8 +1725,14 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
 
     # ---------- Line items ----------
     show_hsn = show("show_hsn_column")
-    show_code = show("show_item_code_column")
-    show_disc = show("show_discount_column")
+    # Item Code: respect explicit toggle, but if user hasn't explicitly enabled and no line has a code, hide it
+    _explicit_code = tpl.get("show_item_code_column")
+    _any_code = any((l.get("item_code") or l.get("code")) for l in (lines or []))
+    show_code = bool(_explicit_code) if _explicit_code is not None else _any_code
+    # Discount column: same logic — only show if any line has a discount
+    _explicit_disc = tpl.get("show_discount_column")
+    _any_disc = any(float(l.get("discount_amount") or 0) > 0 or float(l.get("discount_pct") or 0) > 0 for l in (lines or []))
+    show_disc = bool(_explicit_disc) if _explicit_disc is not None else _any_disc
     cols = ["#", "Item name"]
     widths = [7*mm, 50*mm]
     if show_code:
@@ -1800,7 +1816,7 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
                     gt_taxable += r["taxable"]; ct += r["igst_amt"]; gt_total_tax += r["total_tax"]
                     t_data.append([r["hsn"] or "—", f"₹ {r['taxable']:,.2f}", f"{r['igst_rate']:g}%", f"₹ {r['igst_amt']:,.2f}", f"₹ {r['total_tax']:,.2f}"])
                 t_data.append(["Total", f"₹ {gt_taxable:,.2f}", "", f"₹ {ct:,.2f}", f"₹ {gt_total_tax:,.2f}"])
-                widths_ts = [22*mm, 24*mm, 14*mm, 22*mm, 24*mm]
+                widths_ts = [22*mm, 28*mm, 18*mm, 28*mm, 30*mm]
             else:
                 hdr = ["HSN/SAC", "Taxable Amount", "CGST Rate", "CGST Amount", "SGST Rate", "SGST Amount", "Total Tax Amount"]
                 t_data = [hdr]
@@ -1809,7 +1825,7 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
                     gt_taxable += r["taxable"]; gt_c += r["cgst_amt"]; gt_s += r["sgst_amt"]; gt_total_tax += r["total_tax"]
                     t_data.append([r["hsn"] or "—", f"₹ {r['taxable']:,.2f}", f"{r['cgst_rate']:g}%", f"₹ {r['cgst_amt']:,.2f}", f"{r['sgst_rate']:g}%", f"₹ {r['sgst_amt']:,.2f}", f"₹ {r['total_tax']:,.2f}"])
                 t_data.append(["Total", f"₹ {gt_taxable:,.2f}", "", f"₹ {gt_c:,.2f}", "", f"₹ {gt_s:,.2f}", f"₹ {gt_total_tax:,.2f}"])
-                widths_ts = [18*mm, 20*mm, 12*mm, 18*mm, 12*mm, 18*mm, 20*mm]
+                widths_ts = [20*mm, 26*mm, 14*mm, 22*mm, 14*mm, 22*mm, 24*mm]
             ts = Table(t_data, colWidths=widths_ts)
             ts.setStyle(TableStyle([
                 ("BACKGROUND", (0,0), (-1,0), LIGHTGREY),
@@ -1840,7 +1856,15 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
             sg = (gst_breakup or {}).get("sgst", total_gst/2)
             sd.append(["CGST", f"₹ {cg:,.2f}"])
             sd.append(["SGST", f"₹ {sg:,.2f}"])
-        sd.append(["Total", f"₹ {totals.get('total', total_amount):,.2f}"])
+        # Round-off (Vyapar-style): round total to whole rupees
+        raw_total = float(totals.get('total', total_amount) or 0)
+        rounded_total = round(raw_total)
+        round_off = rounded_total - raw_total
+        if abs(round_off) > 0.005:
+            sd.append(["Round Off", f"{'+' if round_off > 0 else '-'} ₹ {abs(round_off):,.2f}"])
+        sd.append(["Total", f"₹ {rounded_total:,.2f}"])
+        # Stash for amount-in-words
+        totals["__rounded_total"] = rounded_total
         side = Table(sd, colWidths=[28*mm, 30*mm])
         side.setStyle(TableStyle([
             ("FONTSIZE", (0,0), (-1,-1), 9),
@@ -1857,7 +1881,9 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
         sidebar.append(side)
     # Amount in words (under totals)
     if show("show_amount_in_words"):
-        words = _amount_in_words(float(totals.get("total", total_amount) or 0), tpl.get("amount_in_words_locale", "en_IN"))
+        # Prefer the rounded total if available (set above by sidebar logic)
+        words_value = float(totals.get("__rounded_total") or totals.get("total", total_amount) or 0)
+        words = _amount_in_words(round(words_value), tpl.get("amount_in_words_locale", "en_IN"))
         if words:
             sidebar.append(Spacer(1, 2*mm))
             sidebar.append(Paragraph("<b>Invoice Amount In Words:</b>", tiny))
@@ -1892,21 +1918,49 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
         terms_text = company.get("invoice_terms", "") if show("show_terms") else ""
         if notes:
             desc_text = (desc_text + "\n" + notes).strip() if desc_text else notes
-        if desc_text or terms_text:
-            cells_l = [Paragraph("<b>Description:</b>", smallb), Paragraph(desc_text or "—", small)]
-            cells_r = [Paragraph("<b>Terms &amp; Conditions:</b>", smallb), Paragraph(terms_text or "—", small)]
-            dt_tbl = Table([[cells_l, cells_r]], colWidths=[95*mm, 95*mm])
-            dt_tbl.setStyle(TableStyle([
-                ("VALIGN", (0,0), (-1,-1), "TOP"),
-                ("BOX", (0,0), (-1,-1), 0.5, BORDER),
-                ("LINEAFTER", (0,0), (0,-1), 0.4, BORDER),
-                ("LEFTPADDING", (0,0), (-1,-1), 6),
-                ("RIGHTPADDING", (0,0), (-1,-1), 6),
-                ("TOPPADDING", (0,0), (-1,-1), 5),
-                ("BOTTOMPADDING", (0,0), (-1,-1), 5),
-            ]))
-            flow.append(Spacer(1, 2*mm))
-            flow.append(dt_tbl)
+        # Build single-cell or two-cell layout depending on what content exists
+        has_desc = bool(desc_text)
+        has_terms = bool(terms_text)
+        if has_desc and has_terms:
+            cells_l = [Paragraph("<b>Description:</b>", smallb), Paragraph(desc_text, small)]
+            cells_r = [Paragraph("<b>Terms &amp; Conditions:</b>", smallb), Paragraph(terms_text, small)]
+        elif has_terms:
+            cells_l = [Paragraph("<b>Terms &amp; Conditions:</b>", smallb), Paragraph(terms_text, small)]
+            cells_r = []
+        elif has_desc:
+            cells_l = [Paragraph("<b>Description:</b>", smallb), Paragraph(desc_text, small)]
+            cells_r = []
+        else:
+            cells_l = None
+            cells_r = None
+            if cells_l is None:
+                pass  # nothing to render
+            elif not cells_r:
+                # Single-column layout
+                dt_tbl = Table([[cells_l]], colWidths=[190*mm])
+                dt_tbl.setStyle(TableStyle([
+                    ("VALIGN", (0,0), (-1,-1), "TOP"),
+                    ("BOX", (0,0), (-1,-1), 0.5, BORDER),
+                    ("LEFTPADDING", (0,0), (-1,-1), 6),
+                    ("RIGHTPADDING", (0,0), (-1,-1), 6),
+                    ("TOPPADDING", (0,0), (-1,-1), 5),
+                    ("BOTTOMPADDING", (0,0), (-1,-1), 5),
+                ]))
+                flow.append(Spacer(1, 2*mm))
+                flow.append(dt_tbl)
+            else:
+                dt_tbl = Table([[cells_l, cells_r]], colWidths=[95*mm, 95*mm])
+                dt_tbl.setStyle(TableStyle([
+                    ("VALIGN", (0,0), (-1,-1), "TOP"),
+                    ("BOX", (0,0), (-1,-1), 0.5, BORDER),
+                    ("LINEAFTER", (0,0), (0,-1), 0.4, BORDER),
+                    ("LEFTPADDING", (0,0), (-1,-1), 6),
+                    ("RIGHTPADDING", (0,0), (-1,-1), 6),
+                    ("TOPPADDING", (0,0), (-1,-1), 5),
+                    ("BOTTOMPADDING", (0,0), (-1,-1), 5),
+                ]))
+                flow.append(Spacer(1, 2*mm))
+                flow.append(dt_tbl)
 
     # ---------- Bank details + QR + Signatory ----------
     has_bank = show("show_bank_details") and any(company.get(k) for k in ("bank_name","bank_account_no","bank_ifsc","upi_id"))
