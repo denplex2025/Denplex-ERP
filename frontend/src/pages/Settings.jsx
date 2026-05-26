@@ -459,7 +459,7 @@ function SignatoryUpload({ value, onChange }) {
   );
 }
 
-// Sectioned toggles, matching Vyapar's Print Settings layout
+// Sectioned print settings toggles
 const TEMPLATE_SECTIONS = [
   {
     title: "Header",
@@ -491,7 +491,7 @@ const TEMPLATE_SECTIONS = [
       { key: "show_hsn_column",         label: "HSN / SAC column" },
       { key: "show_unit_column",        label: "Unit column (Mtr/Nos/Kg)" },
       { key: "show_discount_column",    label: "Discount column" },
-      { key: "show_inline_gst_column",  label: "Inline GST column (Vyapar shows GST only in Tax Summary)" },
+      { key: "show_inline_gst_column",  label: "Inline GST column (off = GST only in Tax Summary)" },
     ],
   },
   {
@@ -517,7 +517,7 @@ const TEMPLATE_SECTIONS = [
     items: [
       { key: "show_bank_details",       label: "Print Bank Details block" },
       { key: "show_upi_qr",             label: "Print UPI QR (auto-generated from UPI ID)" },
-      { key: "show_bank_on_new_page",   label: "Print Bank/Signature on a new page (Vyapar default)" },
+      { key: "show_bank_on_new_page",   label: "Print Bank/Signature on a new page" },
     ],
   },
 ];
@@ -621,7 +621,7 @@ function InvoiceTemplatePanel() {
             data-testid="template-style-select"
             className="mt-1.5 w-full h-9 border border-slate-300 rounded-sm px-2 text-sm bg-white"
           >
-            <option value="standard">Standard — Vyapar-style full layout</option>
+            <option value="standard">Standard — full tax-invoice layout</option>
             <option value="compact">Compact — single-page minimal</option>
             <option value="modern">Modern — clean accents, more whitespace</option>
           </select>
