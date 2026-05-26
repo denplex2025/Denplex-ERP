@@ -65,7 +65,7 @@ export default function PaymentOut() {
       </div>
 
       <Card>
-        {rows.length === 0 ? <Empty label="No payments received yet." /> : (
+        {rows.length === 0 ? <Empty label="No payments made yet." /> : (
           <table className="w-full">
             <thead>
               <tr><Th>Date</Th><Th>Ref.</Th><Th>Party Name</Th><Th>Amount</Th><Th>Received via</Th><Th>Status</Th></tr>
