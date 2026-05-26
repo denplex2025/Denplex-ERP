@@ -78,7 +78,7 @@ export default function Expenses() {
       <PageHeader
         overline="Purchase & Expense"
         title="Expenses"
-        subtitle="Track business expenses by category (Courier, Salary, Rent, etc.) — matches Vyapar."
+        subtitle="Track business expenses by category (Courier, Salary, Rent, etc.)."
         actions={
           <>
             <Button onClick={() => setOpenCat(true)} variant="outline" className="rounded-sm" data-testid="add-expense-category">
