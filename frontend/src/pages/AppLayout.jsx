@@ -36,6 +36,7 @@ const NAV_GROUPS = [
       { to: "/app/docs/credit-notes", label: "Credit Notes", icon: Receipt, testid: "nav-credit-notes" },
       { to: "/app/docs/vendor-bills", label: "Purchase Bills", icon: Receipt, testid: "nav-vendor-bills" },
       { to: "/app/accounting", label: "Accounting", icon: Calculator, testid: "nav-accounting" },
+      { to: "/app/statements", label: "Account Statements", icon: ScrollText, testid: "nav-statements" },
     ],
   },
   {
