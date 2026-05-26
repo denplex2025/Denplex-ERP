@@ -5,7 +5,8 @@ import { Toaster } from "sonner";
 import {
   LayoutDashboard, Boxes, Layers, ClipboardList, FileText,
   ShoppingCart, Receipt, Users, UserPlus, Truck, ShieldCheck,
-  FileBox, Settings as SettingsIcon, LogOut, Menu, Calculator, UsersRound, Megaphone, Wrench, ScrollText
+  FileBox, Settings as SettingsIcon, LogOut, Menu, Calculator, UsersRound, Megaphone, Wrench, ScrollText,
+  ArrowDownToLine, ArrowUpFromLine, Banknote
 } from "lucide-react";
 import { useState } from "react";
 
@@ -25,6 +26,7 @@ const NAV_GROUPS = [
       { to: "/app/quotations", label: "Quotations", icon: FileText, testid: "nav-quotations" },
       { to: "/app/docs/sale-orders", label: "Sale Orders", icon: FileText, testid: "nav-sale-orders" },
       { to: "/app/docs/delivery-challans", label: "Delivery Challans", icon: Truck, testid: "nav-delivery-challans" },
+      { to: "/app/payments-in", label: "Payment-In", icon: ArrowDownToLine, testid: "nav-payments-in" },
     ],
   },
   {
@@ -47,10 +49,12 @@ const NAV_GROUPS = [
     ],
   },
   {
-    head: "Purchase",
+    head: "Purchase & Expense",
     items: [
       { to: "/app/suppliers", label: "Suppliers", icon: Truck, testid: "nav-suppliers" },
       { to: "/app/purchase-orders", label: "Purchase Orders", icon: ShoppingCart, testid: "nav-purchase-orders" },
+      { to: "/app/payments-out", label: "Payment-Out", icon: ArrowUpFromLine, testid: "nav-payments-out" },
+      { to: "/app/expenses", label: "Expenses", icon: Banknote, testid: "nav-expenses" },
     ],
   },
   {
