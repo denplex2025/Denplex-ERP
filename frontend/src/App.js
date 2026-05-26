@@ -41,6 +41,7 @@ function Protected({ children }) {
 import PaymentIn from "./pages/PaymentIn";
 import PaymentOut from "./pages/PaymentOut";
 import Expenses from "./pages/Expenses";
+import PartyStatement from "./pages/PartyStatement";
 
 function App() {
   return (
@@ -77,6 +78,7 @@ function App() {
               <Route path="payments-in" element={<PaymentIn />} />
               <Route path="payments-out" element={<PaymentOut />} />
               <Route path="expenses" element={<Expenses />} />
+              <Route path="statements" element={<PartyStatement />} />
             </Route>
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
