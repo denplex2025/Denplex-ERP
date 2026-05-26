@@ -37,6 +37,11 @@ function Protected({ children }) {
   return children;
 }
 
+
+import PaymentIn from "./pages/PaymentIn";
+import PaymentOut from "./pages/PaymentOut";
+import Expenses from "./pages/Expenses";
+
 function App() {
   return (
     <div className="App">
@@ -69,6 +74,9 @@ function App() {
               <Route path="audit" element={<AuditLog />} />
               <Route path="trial-requests" element={<TrialRequests />} />
               <Route path="users" element={<Users />} />
+              <Route path="payments-in" element={<PaymentIn />} />
+              <Route path="payments-out" element={<PaymentOut />} />
+              <Route path="expenses" element={<Expenses />} />
             </Route>
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
