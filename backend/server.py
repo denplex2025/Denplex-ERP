@@ -489,6 +489,78 @@ class Invoice(BaseModel):
     notes: Optional[str] = ""
     created_at: str = Field(default_factory=now_iso)
 
+# ---------------- Payment In / Out + Expenses (Vyapar parity Phase A) ----------------
+class PaymentAllocation(BaseModel):
+    """A single allocation of a payment to an invoice/bill."""
+    document_id: str
+    document_code: Optional[str] = ""
+    document_type: Literal["invoice", "vendor_bill", "expense", "credit_note", "debit_note"] = "invoice"
+    amount: float
+
+class PaymentIn(BaseModel):
+    """Money received from a customer. Can be unallocated, partially allocated,
+    or fully allocated to one or more sale invoices / credit notes."""
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    code: Optional[str] = None  # e.g. PMT-IN-26-0001
+    party_id: str
+    party_name: str
+    date: str = Field(default_factory=now_iso)
+    amount: float                                # Total received in this payment
+    allocated_amount: float = 0                  # Sum of allocations applied
+    payment_type: Literal["Cash", "Bank Transfer", "UPI", "Cheque", "Card", "Other"] = "Cash"
+    ref_no: Optional[str] = ""                   # cheque no / UPI ref / txn id
+    bank_name: Optional[str] = ""
+    notes: Optional[str] = ""
+    allocations: List[PaymentAllocation] = []
+    status: Literal["Unused", "Partially Used", "Used"] = "Unused"
+    created_at: str = Field(default_factory=now_iso)
+
+class PaymentOut(BaseModel):
+    """Money paid to a supplier or for an expense. Same shape as PaymentIn."""
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    code: Optional[str] = None
+    party_id: str
+    party_name: str
+    date: str = Field(default_factory=now_iso)
+    amount: float
+    allocated_amount: float = 0
+    payment_type: Literal["Cash", "Bank Transfer", "UPI", "Cheque", "Card", "Other"] = "Cash"
+    ref_no: Optional[str] = ""
+    bank_name: Optional[str] = ""
+    notes: Optional[str] = ""
+    allocations: List[PaymentAllocation] = []
+    status: Literal["Unused", "Partially Used", "Used"] = "Unused"
+    created_at: str = Field(default_factory=now_iso)
+
+class ExpenseCategory(BaseModel):
+    """An expense bucket (Courier, Salary, Rent, etc.). Direct vs Indirect for accounting."""
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    name: str
+    classification: Literal["direct", "indirect"] = "indirect"
+    created_at: str = Field(default_factory=now_iso)
+
+class Expense(BaseModel):
+    """A business expense entry."""
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    code: Optional[str] = None
+    category_id: str
+    category_name: Optional[str] = ""
+    party_id: Optional[str] = ""                 # Optional vendor
+    party_name: Optional[str] = ""
+    date: str = Field(default_factory=now_iso)
+    amount: float
+    paid_amount: float = 0                       # 0 = Unpaid, == amount = Paid
+    payment_type: Literal["Cash", "Bank Transfer", "UPI", "Cheque", "Card", "Other"] = "Cash"
+    ref_no: Optional[str] = ""
+    notes: Optional[str] = ""
+    status: Literal["Paid", "Unpaid", "Partial"] = "Unpaid"
+    created_at: str = Field(default_factory=now_iso)
+
+
 class QCReport(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: str = Field(default_factory=new_id)
@@ -1613,7 +1685,9 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
             logo_cell = Paragraph("<b>DENPLEX</b>", h2_style)
     company_lines = [Paragraph(f"<font size=13><b>{company.get('company_name','Denplex Engineering Company')}</b></font>", smallb)]
     if show("show_company_udyam") and company.get("company_udyam"):
-        company_lines.append(Paragraph(f"<font color='#475569'>UDYAM: <b>{company['company_udyam']}</b></font>", tiny))
+        company_lines.append(Spacer(1, 1.5*mm))
+        company_lines.append(Paragraph(f"<font size=8 color='#475569'>™ UDYAM REGISTRATION NUMBER - <b>{company['company_udyam']}</b></font>", tiny))
+        company_lines.append(Spacer(1, 1*mm))
     # Multi-unit address takes priority; fall back to single company_address
     _units = company.get("company_units") or []
     if show("show_company_address"):
@@ -1790,11 +1864,13 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
         net = max(gross - disc_amt, 0)
         gst_rate = float(l.get("gst_rate", 0) or 0)
         gst_amt = net * gst_rate / 100
-        amt = net + gst_amt
+        # Vyapar-style Amount = net (qty*rate - disc). GST captured separately in Tax Summary.
+        # When inline GST column is on, Amount = net + GST (Vyapar's optional behavior).
+        amt_display = (net + gst_amt) if tpl.get("show_inline_gst_column") else net
         subtotal += gross
         total_discount += disc_amt
         total_gst += gst_amt
-        total_amount += amt
+        total_amount += amt_display
         row = [str(i), Paragraph(l.get("description", ""), small)]
         if show_code:
             row.append(str(l.get("item_code") or l.get("code") or ""))
@@ -1808,17 +1884,16 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
             row.append(f"₹ {disc_amt:,.2f} ({disc_pct:g}%)" if disc_amt else "—")
         if show_inline_gst:
             row.append(f"₹ {gst_amt:,.2f} ({gst_rate:g}%)" if gst_amt else "—")
-        # Vyapar's Amount column = net + GST (line total including tax)
-        row.append(f"₹ {amt:,.2f}")
+        row.append(f"₹ {amt_display:,.2f}")
         data.append(row)
     # Total row
-    tot_row = ["", Paragraph("<b>TOTAL</b>", smallb)]
+    tot_row = ["", Paragraph("<b>Total</b>", smallb)]
     if show_code: tot_row.append("")
     if show_hsn: tot_row.append("")
     tot_row.append(f"{sum(float(l.get('qty',0) or 0) for l in (lines or [])):g}")
     if show_unit: tot_row.append("")
-    tot_row.append("")  # Price/Unit total = blank
-    if show_disc: tot_row.append(f"₹ {total_discount:,.2f}")
+    tot_row.append("")  # Price/Unit total cell — Vyapar leaves blank
+    if show_disc: tot_row.append(f"₹ {total_discount:,.2f}" if total_discount else "")
     if show_inline_gst: tot_row.append(f"₹ {total_gst:,.2f}")
     tot_row.append(f"₹ {total_amount:,.2f}")
     data.append(tot_row)
@@ -1901,7 +1976,9 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
     sidebar = []
     if show("show_totals_sidebar"):
         sd = []
-        sd.append(["Sub Total", f"₹ {subtotal:,.2f}"])
+        # Sub Total = sum of nets (Vyapar) — same as total_amount when inline GST off
+        st_value = (subtotal - total_discount) if not tpl.get("show_inline_gst_column") else (subtotal - total_discount + total_gst)
+        sd.append(["Sub Total", f"₹ {st_value:,.2f}"])
         if total_discount:
             sd.append(["Discount", f"₹ {total_discount:,.2f}"])
         _split_tax = bool(tpl.get("show_split_tax_in_sidebar"))  # default off (Vyapar-style combined)
@@ -1926,8 +2003,10 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
             else:
                 label = "Tax"
             sd.append([label, f"₹ {total_gst:,.2f}"])
-        # Round-off (Vyapar-style): round total to whole rupees
-        raw_total = float(totals.get('total', total_amount) or 0)
+        # Round-off (Vyapar-style): round total to whole rupees.
+        # The grand total = net + tax; total_amount may be net-only when inline GST is off.
+        grand_total_raw = (total_amount + total_gst) if not tpl.get("show_inline_gst_column") else total_amount
+        raw_total = float(totals.get('total') or grand_total_raw)
         rounded_total = round(raw_total)
         round_off = rounded_total - raw_total
         if abs(round_off) > 0.005:
@@ -3522,6 +3601,227 @@ async def reject_trial(rid: str, payload: TrialApproveIn, user=Depends(require_r
 async def del_trial_request(rid: str, user=Depends(require_roles("admin"))):
     await db.trial_requests.delete_one({"id": rid})
     return {"ok": True}
+
+
+# ---------------- Payment In / Out / Expenses endpoints ----------------
+def _recalc_payment_status(p: Dict[str, Any]) -> Dict[str, Any]:
+    """Compute allocated_amount + status from allocations list."""
+    allocs = p.get("allocations") or []
+    total_alloc = sum(float(a.get("amount") or 0) for a in allocs)
+    total = float(p.get("amount") or 0)
+    p["allocated_amount"] = total_alloc
+    if total_alloc <= 0.01:
+        p["status"] = "Unused"
+    elif total_alloc < total - 0.01:
+        p["status"] = "Partially Used"
+    else:
+        p["status"] = "Used"
+    return p
+
+@api.post("/payments-in")
+async def create_payment_in(p: PaymentIn, user=Depends(get_current_user)):
+    doc = p.model_dump()
+    doc["code"] = doc.get("code") or await gen_code("PMT-IN", "payment_in")
+    _recalc_payment_status(doc)
+    await db.payments_in.insert_one(doc)
+    serialize(doc)
+    await write_audit(user.get("name", ""), "payment_in_created", "payment_in", doc["id"], {"amount": doc["amount"], "party": doc["party_name"]})
+    return doc
+
+@api.get("/payments-in")
+async def list_payments_in(user=Depends(get_current_user)):
+    return await list_collection(db.payments_in)
+
+@api.put("/payments-in/{pid}")
+async def update_payment_in(pid: str, p: PaymentIn, user=Depends(get_current_user)):
+    data = p.model_dump(); data.pop("id", None); data.pop("created_at", None)
+    _recalc_payment_status(data)
+    await db.payments_in.update_one({"id": pid}, {"$set": data})
+    return {"ok": True}
+
+@api.delete("/payments-in/{pid}")
+async def del_payment_in(pid: str, user=Depends(require_roles("admin", "accountant", "ca"))):
+    await db.payments_in.delete_one({"id": pid})
+    return {"ok": True}
+
+@api.post("/payments-out")
+async def create_payment_out(p: PaymentOut, user=Depends(get_current_user)):
+    doc = p.model_dump()
+    doc["code"] = doc.get("code") or await gen_code("PMT-OUT", "payment_out")
+    _recalc_payment_status(doc)
+    await db.payments_out.insert_one(doc)
+    await write_audit(user.get("name", ""), "payment_out_created", "payment_out", doc["id"], {"amount": doc["amount"], "party": doc["party_name"]})
+    return doc
+
+@api.get("/payments-out")
+async def list_payments_out(user=Depends(get_current_user)):
+    return await list_collection(db.payments_out)
+
+@api.put("/payments-out/{pid}")
+async def update_payment_out(pid: str, p: PaymentOut, user=Depends(get_current_user)):
+    data = p.model_dump(); data.pop("id", None); data.pop("created_at", None)
+    _recalc_payment_status(data)
+    await db.payments_out.update_one({"id": pid}, {"$set": data})
+    return {"ok": True}
+
+@api.delete("/payments-out/{pid}")
+async def del_payment_out(pid: str, user=Depends(require_roles("admin", "accountant", "ca"))):
+    await db.payments_out.delete_one({"id": pid})
+    return {"ok": True}
+
+# Expense categories
+@api.post("/expense-categories")
+async def create_expense_category(c: ExpenseCategory, user=Depends(require_roles("admin", "accountant", "ca", "manager"))):
+    doc = c.model_dump()
+    if await db.expense_categories.find_one({"name": doc["name"]}):
+        raise HTTPException(400, "Category already exists")
+    await db.expense_categories.insert_one(doc)
+    return doc
+
+@api.get("/expense-categories")
+async def list_expense_categories(user=Depends(get_current_user)):
+    rows = await db.expense_categories.find({}, {"_id": 0}).sort("name", 1).to_list(500)
+    # Seed defaults if empty (Vyapar-style)
+    if not rows:
+        defaults = ["Courier", "Salary", "Rent", "Petrol", "Tea", "Transport", "Labour Bill", "Other"]
+        for name in defaults:
+            d = ExpenseCategory(name=name).model_dump()
+            await db.expense_categories.insert_one(d)
+        rows = await db.expense_categories.find({}, {"_id": 0}).sort("name", 1).to_list(500)
+    return rows
+
+@api.delete("/expense-categories/{cid}")
+async def del_expense_category(cid: str, user=Depends(require_roles("admin", "accountant", "ca"))):
+    # Refuse if expenses exist under this category
+    if await db.expenses.count_documents({"category_id": cid}) > 0:
+        raise HTTPException(400, "Cannot delete: expenses exist under this category")
+    await db.expense_categories.delete_one({"id": cid})
+    return {"ok": True}
+
+# Expenses
+@api.post("/expenses")
+async def create_expense(e: Expense, user=Depends(get_current_user)):
+    doc = e.model_dump()
+    doc["code"] = doc.get("code") or await gen_code("EXP", "expense")
+    # Auto-set status from paid_amount
+    if doc.get("paid_amount", 0) >= doc.get("amount", 0) - 0.01:
+        doc["status"] = "Paid"
+    elif doc.get("paid_amount", 0) > 0.01:
+        doc["status"] = "Partial"
+    else:
+        doc["status"] = "Unpaid"
+    # Fill category_name
+    if doc.get("category_id") and not doc.get("category_name"):
+        cat = await db.expense_categories.find_one({"id": doc["category_id"]}, {"_id": 0, "name": 1})
+        doc["category_name"] = (cat or {}).get("name", "")
+    await db.expenses.insert_one(doc)
+    await write_audit(user.get("name", ""), "expense_created", "expense", doc["id"], {"amount": doc["amount"], "category": doc.get("category_name")})
+    return doc
+
+@api.get("/expenses")
+async def list_expenses_v2(category_id: Optional[str] = None, user=Depends(get_current_user)):
+    q = {"category_id": category_id} if category_id else {}
+    return await list_collection(db.expenses, q)
+
+@api.put("/expenses/{eid}")
+async def update_expense(eid: str, e: Expense, user=Depends(get_current_user)):
+    data = e.model_dump(); data.pop("id", None); data.pop("created_at", None)
+    if data.get("paid_amount", 0) >= data.get("amount", 0) - 0.01:
+        data["status"] = "Paid"
+    elif data.get("paid_amount", 0) > 0.01:
+        data["status"] = "Partial"
+    else:
+        data["status"] = "Unpaid"
+    await db.expenses.update_one({"id": eid}, {"$set": data})
+    return {"ok": True}
+
+@api.delete("/expenses/{eid}")
+async def del_expense_v2(eid: str, user=Depends(require_roles("admin", "accountant", "ca"))):
+    await db.expenses.delete_one({"id": eid})
+    return {"ok": True}
+
+# Dashboard rollup endpoints
+@api.get("/dashboard/receivable-payable")
+async def dashboard_receivable_payable(user=Depends(get_current_user)):
+    """Computes total receivable (from open invoices) and payable (from open vendor bills)."""
+    # Receivable: invoices where status != 'paid'
+    open_invoices = await db.invoices.find({"status": {"$ne": "paid"}}, {"_id": 0, "total": 1, "customer_id": 1}).to_list(10000)
+    # Subtract allocated payments
+    payments_in = await db.payments_in.find({}, {"_id": 0, "allocations": 1}).to_list(10000)
+    allocated_per_inv: Dict[str, float] = {}
+    for p in payments_in:
+        for a in (p.get("allocations") or []):
+            if a.get("document_type") == "invoice":
+                allocated_per_inv[a["document_id"]] = allocated_per_inv.get(a["document_id"], 0) + float(a.get("amount") or 0)
+    receivable_total = 0.0
+    receivable_parties = set()
+    for inv in open_invoices:
+        outstanding = float(inv.get("total", 0)) - allocated_per_inv.get(inv.get("id", ""), 0)
+        if outstanding > 0.01:
+            receivable_total += outstanding
+            if inv.get("customer_id"):
+                receivable_parties.add(inv["customer_id"])
+
+    # Payable: vendor bills where balance > 0
+    bills = await db.vendor_bills.find({}, {"_id": 0, "total": 1, "supplier_id": 1, "status": 1, "id": 1}).to_list(10000)
+    payments_out = await db.payments_out.find({}, {"_id": 0, "allocations": 1}).to_list(10000)
+    allocated_per_bill: Dict[str, float] = {}
+    for p in payments_out:
+        for a in (p.get("allocations") or []):
+            if a.get("document_type") == "vendor_bill":
+                allocated_per_bill[a["document_id"]] = allocated_per_bill.get(a["document_id"], 0) + float(a.get("amount") or 0)
+    payable_total = 0.0
+    payable_parties = set()
+    for b in bills:
+        if b.get("status") == "paid":
+            continue
+        outstanding = float(b.get("total", 0)) - allocated_per_bill.get(b.get("id", ""), 0)
+        if outstanding > 0.01:
+            payable_total += outstanding
+            if b.get("supplier_id"):
+                payable_parties.add(b["supplier_id"])
+
+    return {
+        "receivable_total": round(receivable_total, 2),
+        "receivable_parties_count": len(receivable_parties),
+        "payable_total": round(payable_total, 2),
+        "payable_parties_count": len(payable_parties),
+    }
+
+@api.get("/dashboard/sales-trend")
+async def dashboard_sales_trend(days: int = 30, user=Depends(get_current_user)):
+    """Daily sale totals for the last N days. For the Home chart."""
+    from datetime import timedelta as _td
+    cutoff = (datetime.now(timezone.utc) - _td(days=days)).isoformat()
+    invoices = await db.invoices.find({"date": {"$gte": cutoff[:10]}}, {"_id": 0, "date": 1, "total": 1}).to_list(50000)
+    by_day: Dict[str, float] = {}
+    for inv in invoices:
+        d = str(inv.get("date", ""))[:10]
+        by_day[d] = by_day.get(d, 0) + float(inv.get("total", 0) or 0)
+    return {"days": days, "series": [{"date": k, "total": round(v, 2)} for k, v in sorted(by_day.items())]}
+
+@api.get("/parties/{pid}/statement")
+async def party_statement(pid: str, period: str = "this_year", user=Depends(get_current_user)):
+    """Per-party ledger: opening balance + transactions + closing balance."""
+    party = await db.customers.find_one({"id": pid}, {"_id": 0}) or await db.suppliers.find_one({"id": pid}, {"_id": 0})
+    if not party:
+        raise HTTPException(404, "Party not found")
+    invoices = await db.invoices.find({"customer_id": pid}, {"_id": 0}).sort("date", 1).to_list(5000)
+    pmts = await db.payments_in.find({"party_id": pid}, {"_id": 0}).sort("date", 1).to_list(5000)
+    credit_notes = await db.credit_notes.find({"customer_id": pid}, {"_id": 0}).sort("date", 1).to_list(5000) if hasattr(db, "credit_notes") else []
+    # Build transaction list with running balance
+    txns = []
+    for inv in invoices:
+        txns.append({"date": inv.get("date"), "type": "Sale", "ref": inv.get("code"), "debit": float(inv.get("total", 0)), "credit": 0})
+    for p in pmts:
+        txns.append({"date": p.get("date"), "type": "Payment In", "ref": p.get("code"), "debit": 0, "credit": float(p.get("amount", 0))})
+    txns.sort(key=lambda t: str(t.get("date", "")))
+    running = 0.0
+    for t in txns:
+        running += t["debit"] - t["credit"]
+        t["running"] = round(running, 2)
+    return {"party": party, "opening_balance": 0, "transactions": txns, "closing_balance": round(running, 2)}
+
 
 # ---------------- App config ----------------
 app.include_router(api)
