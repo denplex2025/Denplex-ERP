@@ -459,31 +459,70 @@ function SignatoryUpload({ value, onChange }) {
   );
 }
 
-const TEMPLATE_TOGGLES = [
-  { key: "show_company_logo",         label: "Show company logo" },
-  { key: "show_company_address",      label: "Show company address" },
-  { key: "show_company_gstin",        label: "Show GSTIN on sale" },
-  { key: "show_company_email",        label: "Show company email" },
-  { key: "show_company_phone",        label: "Show company phone" },
-  { key: "show_company_udyam",        label: "Show UDYAM / MSME number" },
-  { key: "show_ship_to",              label: "Show Ship-To block" },
-  { key: "show_due_date",             label: "Show due date" },
-  { key: "show_place_of_supply",      label: "Show place of supply" },
-  { key: "show_hsn_column",           label: "Show HSN/SAC column in item table" },
-  { key: "show_item_code_column",     label: "Show Item Code column in item table" },
-  { key: "show_po_meta",              label: "Show PO Date / PO No / Purchaser Name" },
-  { key: "show_discount_column",      label: "Show Discount column in item table" },
-  { key: "show_tax_summary",          label: "Show Tax Summary (HSN-wise breakup)" },
-  { key: "show_totals_sidebar",       label: "Show Totals sidebar (Sub Total / Tax / Total)" },
-  { key: "show_amount_in_words",      label: "Show Invoice Amount in Words" },
-  { key: "show_payment_mode",         label: "Show Payment Mode" },
-  { key: "show_description",          label: "Show Description block" },
-  { key: "show_terms",                label: "Show Terms & Conditions block" },
-  { key: "show_bank_details",         label: "Show Bank Details" },
-  { key: "show_upi_qr",               label: "Show UPI QR (auto-generated)" },
-  { key: "show_signatory_image",      label: "Show signature image" },
-  { key: "print_original_duplicate",  label: "Print 'Original for Recipient' label" },
+// Sectioned toggles, matching Vyapar's Print Settings layout
+const TEMPLATE_SECTIONS = [
+  {
+    title: "Header",
+    items: [
+      { key: "show_company_logo",        label: "Print company logo" },
+      { key: "show_company_address",     label: "Print company address" },
+      { key: "show_company_gstin",       label: "Print company GSTIN" },
+      { key: "show_company_email",       label: "Print company email" },
+      { key: "show_company_phone",       label: "Print company phone" },
+      { key: "show_company_udyam",       label: "Print UDYAM / MSME number" },
+      { key: "print_original_duplicate", label: "Print 'Original / Duplicate / Triplicate' label" },
+    ],
+  },
+  {
+    title: "Party (Bill To / Ship To)",
+    items: [
+      { key: "show_ship_to",      label: "Print Ship-To block (when different from Bill-To)" },
+      { key: "show_bill_from",    label: "Print Bill-From block" },
+      { key: "show_ship_from",    label: "Print Ship-From block" },
+      { key: "show_due_date",     label: "Print due date" },
+      { key: "show_place_of_supply", label: "Print place of supply" },
+      { key: "show_po_meta",      label: "Print PO Date / PO No / Purchaser Name" },
+    ],
+  },
+  {
+    title: "Items Table",
+    items: [
+      { key: "show_item_code_column",   label: "Item Code column" },
+      { key: "show_hsn_column",         label: "HSN / SAC column" },
+      { key: "show_unit_column",        label: "Unit column (Mtr/Nos/Kg)" },
+      { key: "show_discount_column",    label: "Discount column" },
+      { key: "show_inline_gst_column",  label: "Inline GST column (Vyapar shows GST only in Tax Summary)" },
+    ],
+  },
+  {
+    title: "Totals & Taxes",
+    items: [
+      { key: "show_tax_summary",          label: "Tax Summary table (HSN-wise CGST/SGST breakup)" },
+      { key: "show_totals_sidebar",       label: "Totals sidebar (Sub Total / Tax / Round Off / Total)" },
+      { key: "show_split_tax_in_sidebar", label: "Split CGST + SGST in sidebar (off = combined 'Tax (X%)' line)" },
+      { key: "show_amount_in_words",      label: "Print invoice amount in words" },
+    ],
+  },
+  {
+    title: "Footer",
+    items: [
+      { key: "show_payment_mode",       label: "Print Payment Mode" },
+      { key: "show_description",        label: "Print Description (sale note)" },
+      { key: "show_terms",              label: "Print Terms & Conditions" },
+      { key: "show_signatory_image",    label: "Print signature image" },
+    ],
+  },
+  {
+    title: "Bank & UPI",
+    items: [
+      { key: "show_bank_details",       label: "Print Bank Details block" },
+      { key: "show_upi_qr",             label: "Print UPI QR (auto-generated from UPI ID)" },
+      { key: "show_bank_on_new_page",   label: "Print Bank/Signature on a new page (Vyapar default)" },
+    ],
+  },
 ];
+// Flat list still used in some places (back-compat)
+const TEMPLATE_TOGGLES = TEMPLATE_SECTIONS.flatMap(s => s.items);
 
 const DOC_TYPES = [
   { key: "default",          label: "Default (all docs)" },
@@ -593,13 +632,42 @@ function InvoiceTemplatePanel() {
           <Button size="sm" className="rounded-sm bg-red-600 hover:bg-red-700" onClick={save} data-testid="save-template"><Save className="h-4 w-4 mr-1" /> Save</Button>
           {docType !== "default" && <Button size="sm" variant="outline" className="rounded-sm" onClick={resetThis}>Reset to default</Button>}
         </div>
-        <div className="space-y-1 max-h-[60vh] overflow-y-auto -mx-2 px-2">
-          {TEMPLATE_TOGGLES.map(({ key, label }) => (
-            <label key={key} className="flex items-center justify-between gap-3 py-1.5 border-b border-slate-100 last:border-0 cursor-pointer">
-              <span className="text-sm text-slate-700">{label}</span>
-              <Switch checked={!!t[key]} onCheckedChange={()=>setFlag(key)} data-testid={`tpl-${key}`} />
-            </label>
+        <div className="space-y-5 max-h-[65vh] overflow-y-auto -mx-2 px-2">
+          {TEMPLATE_SECTIONS.map((sec) => (
+            <div key={sec.title}>
+              <div className="text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-500 mb-1.5 sticky top-0 bg-white py-1 border-b border-slate-200">
+                {sec.title}
+              </div>
+              <div className="space-y-0">
+                {sec.items.map(({ key, label }) => (
+                  <label key={key} className="flex items-center justify-between gap-3 py-1.5 border-b border-slate-100 last:border-0 cursor-pointer">
+                    <span className="text-sm text-slate-700 leading-tight">{label}</span>
+                    <Switch checked={!!t[key]} onCheckedChange={()=>setFlag(key)} data-testid={`tpl-${key}`} />
+                  </label>
+                ))}
+              </div>
+            </div>
           ))}
+          {/* Numeric / text fields */}
+          <div>
+            <div className="text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-500 mb-1.5 border-b border-slate-200 pb-1">
+              Other Settings
+            </div>
+            <div className="space-y-3 mt-2">
+              <div>
+                <Label className="text-xs uppercase tracking-wider text-slate-600">Amount in Words locale</Label>
+                <select
+                  value={t.amount_in_words_locale || "en_IN"}
+                  onChange={(e)=>setAllTpl(p => ({ ...p, [docType]: { ...(p?.[docType] || {}), amount_in_words_locale: e.target.value } }))}
+                  className="mt-1 w-full h-9 border border-slate-300 rounded-sm px-2 text-sm bg-white"
+                  data-testid="tpl-locale"
+                >
+                  <option value="en_IN">Indian (Lakh / Crore)</option>
+                  <option value="en">English (Million / Billion)</option>
+                </select>
+              </div>
+            </div>
+          </div>
         </div>
       </Card>
       <Card className="p-3 lg:col-span-3 bg-slate-50">
