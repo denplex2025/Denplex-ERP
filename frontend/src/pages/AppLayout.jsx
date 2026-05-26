@@ -23,7 +23,8 @@ const NAV_GROUPS = [
     items: [
       { to: "/app/leads", label: "Leads", icon: UserPlus, testid: "nav-leads" },
       { to: "/app/customers", label: "Customers", icon: Users, testid: "nav-customers" },
-      { to: "/app/quotations", label: "Quotations", icon: FileText, testid: "nav-quotations" },
+      { to: "/app/quotations", label: "Estimate / Quotation", icon: FileText, testid: "nav-quotations" },
+      { to: "/app/proforma", label: "Proforma Invoice", icon: FileText, testid: "nav-proforma" },
       { to: "/app/docs/sale-orders", label: "Sale Orders", icon: FileText, testid: "nav-sale-orders" },
       { to: "/app/docs/delivery-challans", label: "Delivery Challans", icon: Truck, testid: "nav-delivery-challans" },
       { to: "/app/payments-in", label: "Payment-In", icon: ArrowDownToLine, testid: "nav-payments-in" },
