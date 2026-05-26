@@ -421,6 +421,96 @@ class Quotation(BaseModel):
     notes: Optional[str] = ""
     created_at: str = Field(default_factory=now_iso)
 
+class ProformaInvoice(BaseModel):
+    """Formal pre-invoice with terms — distinct from informal Estimate/Quotation.
+    Convertible into a Sale Invoice once accepted."""
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    code: Optional[str] = None
+    customer_id: str
+    customer_name: str
+    customer_gstin: Optional[str] = ""
+    place_of_supply: Optional[str] = ""
+    is_interstate: bool = False
+    date: str = Field(default_factory=now_iso)
+    valid_until: Optional[str] = ""
+    ship_to_name: Optional[str] = ""
+    ship_to_address: Optional[str] = ""
+    ship_to_gstin: Optional[str] = ""
+    po_number: Optional[str] = ""
+    po_date: Optional[str] = ""
+    purchaser_name: Optional[str] = ""
+    payment_mode: Optional[str] = ""
+    lines: List[InvoiceLine] = []
+    subtotal: float = 0
+    cgst: float = 0
+    sgst: float = 0
+    igst: float = 0
+    total: float = 0
+    status: Literal["draft", "sent", "accepted", "rejected", "converted"] = "draft"
+    converted_invoice_id: Optional[str] = ""
+    notes: Optional[str] = ""
+    created_at: str = Field(default_factory=now_iso)
+
+class ReturnLine(BaseModel):
+    description: str
+    item_code: Optional[str] = ""
+    hsn: Optional[str] = ""
+    qty: float
+    unit: Optional[str] = "Nos"
+    rate: float
+    gst_rate: float = 18.0
+    reason: Optional[str] = ""
+
+class SaleReturn(BaseModel):
+    """Inventory + accounting reversal for sold goods returned by customer.
+    Creates a Credit Note + optionally restores inventory."""
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    code: Optional[str] = None
+    customer_id: str
+    customer_name: str
+    customer_gstin: Optional[str] = ""
+    original_invoice_id: Optional[str] = ""
+    original_invoice_code: Optional[str] = ""
+    date: str = Field(default_factory=now_iso)
+    lines: List[ReturnLine] = []
+    subtotal: float = 0
+    cgst: float = 0
+    sgst: float = 0
+    igst: float = 0
+    total: float = 0
+    restore_inventory: bool = True
+    credit_note_id: Optional[str] = ""
+    reason: Optional[str] = ""
+    status: Literal["draft", "issued", "settled"] = "draft"
+    notes: Optional[str] = ""
+    created_at: str = Field(default_factory=now_iso)
+
+class PurchaseReturn(BaseModel):
+    """Reversal for goods returned to supplier. Creates a Debit Note + reduces inventory."""
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    code: Optional[str] = None
+    supplier_id: str
+    supplier_name: str
+    supplier_gstin: Optional[str] = ""
+    original_bill_id: Optional[str] = ""
+    original_bill_code: Optional[str] = ""
+    date: str = Field(default_factory=now_iso)
+    lines: List[ReturnLine] = []
+    subtotal: float = 0
+    cgst: float = 0
+    sgst: float = 0
+    igst: float = 0
+    total: float = 0
+    reduce_inventory: bool = True
+    debit_note_id: Optional[str] = ""
+    reason: Optional[str] = ""
+    status: Literal["draft", "issued", "settled"] = "draft"
+    notes: Optional[str] = ""
+    created_at: str = Field(default_factory=now_iso)
+
 class POLine(BaseModel):
     description: str
     qty: float
@@ -3822,6 +3912,171 @@ async def party_statement(pid: str, period: str = "this_year", user=Depends(get_
         t["running"] = round(running, 2)
     return {"party": party, "opening_balance": 0, "transactions": txns, "closing_balance": round(running, 2)}
 
+
+# ---------------- Proforma Invoice (Phase B.1) ----------------
+@api.post("/proforma-invoices")
+async def create_proforma(p: ProformaInvoice, user=Depends(get_current_user)):
+    doc = p.model_dump()
+    doc["code"] = doc.get("code") or await gen_code("PFI", "proforma")
+    doc.update(compute_invoice_totals(doc["lines"], doc.get("is_interstate", False)))
+    await db.proforma_invoices.insert_one(doc)
+    return serialize(doc)
+
+@api.get("/proforma-invoices")
+async def list_proforma(user=Depends(get_current_user)):
+    return await list_collection(db.proforma_invoices)
+
+@api.put("/proforma-invoices/{pid}")
+async def update_proforma(pid: str, p: ProformaInvoice, user=Depends(get_current_user)):
+    data = p.model_dump(); data.pop("id", None); data.pop("created_at", None)
+    data.update(compute_invoice_totals(data["lines"], data.get("is_interstate", False)))
+    await db.proforma_invoices.update_one({"id": pid}, {"$set": data})
+    return {"ok": True}
+
+@api.delete("/proforma-invoices/{pid}")
+async def del_proforma(pid: str, user=Depends(require_roles("admin", "manager", "accountant", "ca", "sales"))):
+    await db.proforma_invoices.delete_one({"id": pid})
+    return {"ok": True}
+
+@api.post("/proforma-invoices/{pid}/convert")
+async def convert_proforma(pid: str, user=Depends(get_current_user)):
+    pf = await db.proforma_invoices.find_one({"id": pid}, {"_id": 0})
+    if not pf: raise HTTPException(404, "Proforma not found")
+    if pf.get("status") == "converted": raise HTTPException(400, "Already converted")
+    inv_data = {k: v for k, v in pf.items() if k not in ("id", "code", "created_at", "status", "converted_invoice_id", "valid_until")}
+    inv_data["status"] = "draft"
+    inv = Invoice(**inv_data).model_dump()
+    inv["code"] = await gen_code("INV", "invoice")
+    inv.update(compute_invoice_totals(inv["lines"], inv.get("is_interstate", False)))
+    await db.invoices.insert_one(inv)
+    await db.proforma_invoices.update_one({"id": pid}, {"$set": {"status": "converted", "converted_invoice_id": inv["id"]}})
+    await write_audit(user.get("name", ""), "proforma_converted", "proforma_invoice", pid, {"invoice_id": inv["id"]})
+    return {"ok": True, "invoice_id": inv["id"], "invoice_code": inv["code"]}
+
+@api.get("/proforma-invoices/{pid}/pdf")
+async def proforma_pdf(pid: str, user=Depends(get_current_user)):
+    pf = await db.proforma_invoices.find_one({"id": pid}, {"_id": 0})
+    if not pf: raise HTTPException(404, "Not found")
+    company = await get_setting("integrations")
+    tpl = await _tpl_for("proforma")
+    party_extra = {}
+    if pf.get("customer_id"):
+        c = await db.customers.find_one({"id": pf["customer_id"]}, {"_id": 0}) or {}
+        party_extra = {"address": c.get("address",""), "phone": c.get("phone",""), "gstin": c.get("gstin",""), "state": c.get("state","")}
+    doc_meta = {
+        "due_date": pf.get("valid_until", ""),
+        "place_of_supply": pf.get("place_of_supply", ""),
+        "po_number": pf.get("po_number", ""),
+        "po_date": pf.get("po_date", ""),
+        "purchaser_name": pf.get("purchaser_name", ""),
+        "payment_mode": pf.get("payment_mode", ""),
+        "is_interstate": bool(pf.get("is_interstate")),
+    }
+    pdf = _build_doc_pdf("Proforma Invoice", pf.get("code", ""), "To", pf.get("customer_name", ""), str(pf.get("date", ""))[:10],
+                         pf.get("lines", []), {"total": pf.get("total", 0)},
+                         gst_breakup={"cgst": pf.get("cgst", 0), "sgst": pf.get("sgst", 0), "igst": pf.get("igst", 0)},
+                         company=company, notes=pf.get("notes", ""), tpl=tpl,
+                         party_extra=party_extra, doc_meta=doc_meta,
+                         copy_label="PROFORMA INVOICE")
+    return Response(content=pdf, media_type="application/pdf",
+                    headers={"Content-Disposition": f'inline; filename="{pf.get("code","proforma")}.pdf"'})
+
+# ---------------- Sale Return / Purchase Return (Phase B.2) ----------------
+@api.post("/sale-returns")
+async def create_sale_return(r: SaleReturn, user=Depends(get_current_user)):
+    doc = r.model_dump()
+    doc["code"] = doc.get("code") or await gen_code("SR", "sale_return")
+    subtotal = sum(float(l.get("qty", 0) or 0) * float(l.get("rate", 0) or 0) for l in doc["lines"])
+    gst_total = sum(float(l.get("qty", 0) or 0) * float(l.get("rate", 0) or 0) * float(l.get("gst_rate", 0) or 0) / 100 for l in doc["lines"])
+    doc["subtotal"] = subtotal; doc["total"] = subtotal + gst_total
+    is_interstate = False
+    if doc.get("original_invoice_id"):
+        orig = await db.invoices.find_one({"id": doc["original_invoice_id"]}, {"_id": 0}) or {}
+        is_interstate = bool(orig.get("is_interstate"))
+    if is_interstate:
+        doc["igst"] = gst_total; doc["cgst"] = 0; doc["sgst"] = 0
+    else:
+        doc["cgst"] = gst_total / 2; doc["sgst"] = gst_total / 2; doc["igst"] = 0
+    if doc.get("restore_inventory"):
+        for line in doc["lines"]:
+            code = (line.get("item_code") or "").strip()
+            if not code: continue
+            await db.items.update_one({"code": code}, {"$inc": {"stock": float(line.get("qty", 0) or 0)}})
+    cn_doc = {
+        "id": new_id(),
+        "code": await gen_code("CN", "credit_note"),
+        "customer_id": doc.get("customer_id"),
+        "customer_name": doc.get("customer_name"),
+        "date": doc.get("date"),
+        "lines": [{"description": l.get("description"), "qty": l.get("qty"), "rate": l.get("rate"), "gst_rate": l.get("gst_rate")} for l in doc["lines"]],
+        "total": doc["total"],
+        "cgst": doc.get("cgst"), "sgst": doc.get("sgst"), "igst": doc.get("igst"),
+        "notes": f"Auto-generated from Sale Return {doc['code']}",
+        "source_doc_id": doc["id"], "source_doc_type": "sale_return",
+        "created_at": now_iso(),
+    }
+    await db.credit_notes.insert_one(cn_doc)
+    doc["credit_note_id"] = cn_doc["id"]
+    doc["status"] = "issued"
+    await db.sale_returns.insert_one(doc)
+    await write_audit(user.get("name", ""), "sale_return_created", "sale_return", doc["id"], {"customer": doc.get("customer_name"), "total": doc["total"]})
+    return serialize(doc)
+
+@api.get("/sale-returns")
+async def list_sale_returns(user=Depends(get_current_user)):
+    return await list_collection(db.sale_returns)
+
+@api.delete("/sale-returns/{rid}")
+async def del_sale_return(rid: str, user=Depends(require_roles("admin", "manager", "accountant", "ca"))):
+    r = await db.sale_returns.find_one({"id": rid}, {"_id": 0})
+    if r and r.get("credit_note_id"):
+        await db.credit_notes.delete_one({"id": r["credit_note_id"]})
+    await db.sale_returns.delete_one({"id": rid})
+    return {"ok": True}
+
+@api.post("/purchase-returns")
+async def create_purchase_return(r: PurchaseReturn, user=Depends(get_current_user)):
+    doc = r.model_dump()
+    doc["code"] = doc.get("code") or await gen_code("PR", "purchase_return")
+    subtotal = sum(float(l.get("qty", 0) or 0) * float(l.get("rate", 0) or 0) for l in doc["lines"])
+    gst_total = sum(float(l.get("qty", 0) or 0) * float(l.get("rate", 0) or 0) * float(l.get("gst_rate", 0) or 0) / 100 for l in doc["lines"])
+    doc["subtotal"] = subtotal; doc["total"] = subtotal + gst_total
+    doc["cgst"] = gst_total / 2; doc["sgst"] = gst_total / 2; doc["igst"] = 0
+    if doc.get("reduce_inventory"):
+        for line in doc["lines"]:
+            code = (line.get("item_code") or "").strip()
+            if not code: continue
+            await db.items.update_one({"code": code}, {"$inc": {"stock": -float(line.get("qty", 0) or 0)}})
+    dn_doc = {
+        "id": new_id(),
+        "code": await gen_code("DN", "debit_note"),
+        "supplier_id": doc.get("supplier_id"),
+        "supplier_name": doc.get("supplier_name"),
+        "date": doc.get("date"),
+        "lines": [{"description": l.get("description"), "qty": l.get("qty"), "rate": l.get("rate"), "gst_rate": l.get("gst_rate")} for l in doc["lines"]],
+        "total": doc["total"],
+        "notes": f"Auto-generated from Purchase Return {doc['code']}",
+        "source_doc_id": doc["id"], "source_doc_type": "purchase_return",
+        "created_at": now_iso(),
+    }
+    await db.debit_notes.insert_one(dn_doc)
+    doc["debit_note_id"] = dn_doc["id"]
+    doc["status"] = "issued"
+    await db.purchase_returns.insert_one(doc)
+    await write_audit(user.get("name", ""), "purchase_return_created", "purchase_return", doc["id"], {"supplier": doc.get("supplier_name"), "total": doc["total"]})
+    return serialize(doc)
+
+@api.get("/purchase-returns")
+async def list_purchase_returns(user=Depends(get_current_user)):
+    return await list_collection(db.purchase_returns)
+
+@api.delete("/purchase-returns/{rid}")
+async def del_purchase_return(rid: str, user=Depends(require_roles("admin", "manager", "accountant", "ca"))):
+    r = await db.purchase_returns.find_one({"id": rid}, {"_id": 0})
+    if r and r.get("debit_note_id"):
+        await db.debit_notes.delete_one({"id": r["debit_note_id"]})
+    await db.purchase_returns.delete_one({"id": rid})
+    return {"ok": True}
 
 # ---------------- App config ----------------
 app.include_router(api)
