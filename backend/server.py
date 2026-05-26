@@ -1269,7 +1269,12 @@ class IntegrationSettingsIn(BaseModel):
     signatory_image_b64: Optional[str] = ""
     signatory_label: Optional[str] = "Authorised Signatory"
     # Terms & default sale description
-    invoice_terms: Optional[str] = "Thanks for doing business with us!"
+    invoice_terms: Optional[str] = ("*Subject to Ahmedabad jurisdiction only\n"
+                                    "1) The bill must be paid within due date otherwise interest @18% will be charged extra\n"
+                                    "2) Goods once sold will not be taken back.\n"
+                                    "3) Our responsibility ceases on delivery the goods to the carries.\n"
+                                    "4) Payment requested by CASH/CHEQUE/Bank Transfer only\n"
+                                    "5) If any rejection or rework occurs please notify withing 10 days of material receipt after that it won't be accepted.")
     invoice_description: Optional[str] = ""
 
 @api.get("/settings/integrations")
@@ -1309,6 +1314,10 @@ class InvoiceTemplateIn(BaseModel):
     show_bank_details: bool = True
     show_upi_qr: bool = True
     show_signatory_image: bool = True
+    show_bank_on_new_page: bool = True       # Vyapar-style: bank details + signature on page 2
+    show_unit_column: bool = True            # Unit column in items table (Mtr/Nos/Kg)
+    show_inline_gst_column: bool = False     # Off by default — Vyapar puts GST in Tax Summary only
+    show_split_tax_in_sidebar: bool = False  # Off = single "Tax (X%)" line; on = CGST + SGST split
     print_original_duplicate: bool = True
     paper_size: Literal["A4", "A5"] = "A4"
     orientation: Literal["portrait", "landscape"] = "portrait"
@@ -1657,21 +1666,35 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
     if party_extra.get("gstin"):   bill_lines.append(Paragraph(f"GSTIN: <b>{party_extra['gstin']}</b>", tiny))
     if party_extra.get("state"):   bill_lines.append(Paragraph(f"State: <b>{party_extra['state']}</b>", tiny))
 
-    meta_lines = [Paragraph(f"<b>{title.split()[0]} Details:</b>", box_label),
-                  Paragraph(f"{title.split()[0]} No.: <b>{code}</b>", smallb),
-                  Paragraph(f"Date: <b>{date_s}</b>", smallb)]
+    # Vyapar-style 2-column meta: main fields on left, PO/purchaser on right
+    meta_main = [Paragraph(f"<b>{title.split()[0]} Details:</b>", box_label),
+                 Paragraph(f"{title.split()[0]} No.: <b>{code}</b>", smallb),
+                 Paragraph(f"Date: <b>{date_s}</b>", smallb)]
     if show("show_due_date") and doc_meta.get("due_date"):
-        meta_lines.append(Paragraph(f"Due Date: <b>{doc_meta['due_date']}</b>", smallb))
+        meta_main.append(Paragraph(f"Due Date: <b>{doc_meta['due_date']}</b>", smallb))
     if show("show_place_of_supply") and doc_meta.get("place_of_supply"):
-        meta_lines.append(Paragraph(f"Place of Supply: <b>{doc_meta['place_of_supply']}</b>", smallb))
-    # PO meta (Vyapar-style): PO Date, PO No, Purchaser Name
+        meta_main.append(Paragraph(f"Place of Supply: <b>{doc_meta['place_of_supply']}</b>", smallb))
+    meta_po = []
     if show("show_po_meta"):
         if doc_meta.get("po_date"):
-            meta_lines.append(Paragraph(f"PO Date: <b>{doc_meta['po_date']}</b>", smallb))
+            meta_po.append(Paragraph(f"PO Date: <b>{doc_meta['po_date']}</b>", smallb))
         if doc_meta.get("po_number") or doc_meta.get("po_no"):
-            meta_lines.append(Paragraph(f"PO No: <b>{doc_meta.get('po_number') or doc_meta.get('po_no')}</b>", smallb))
+            meta_po.append(Paragraph(f"PO No: <b>{doc_meta.get('po_number') or doc_meta.get('po_no')}</b>", smallb))
         if doc_meta.get("purchaser_name"):
-            meta_lines.append(Paragraph(f"Purchaser Name: <b>{doc_meta['purchaser_name']}</b>", smallb))
+            meta_po.append(Paragraph(f"Purchaser Name: <b>{doc_meta['purchaser_name']}</b>", smallb))
+    # Compose meta_lines: either flat list or nested 2-column table when PO meta is present
+    if meta_po:
+        meta_inner = Table([[meta_main, meta_po]], colWidths=[46*mm, 47*mm])
+        meta_inner.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 0),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+        ]))
+        meta_lines = [meta_inner]
+    else:
+        meta_lines = meta_main
 
     bd_tbl = Table([[bill_lines, meta_lines]], colWidths=[95*mm, 95*mm])
     bd_tbl.setStyle(TableStyle([
@@ -1725,24 +1748,33 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
 
     # ---------- Line items ----------
     show_hsn = show("show_hsn_column")
-    # Item Code: respect explicit toggle, but if user hasn't explicitly enabled and no line has a code, hide it
-    _explicit_code = tpl.get("show_item_code_column")
-    _any_code = any((l.get("item_code") or l.get("code")) for l in (lines or []))
-    show_code = bool(_explicit_code) if _explicit_code is not None else _any_code
-    # Discount column: same logic — only show if any line has a discount
-    _explicit_disc = tpl.get("show_discount_column")
-    _any_disc = any(float(l.get("discount_amount") or 0) > 0 or float(l.get("discount_pct") or 0) > 0 for l in (lines or []))
-    show_disc = bool(_explicit_disc) if _explicit_disc is not None else _any_disc
+    # Smart-show columns: explicit toggle wins; else auto-detect data presence
+    def _resolve_show(toggle_name, predicate, default_when_no_data=False):
+        explicit = tpl.get(toggle_name)
+        if explicit is not None:
+            return bool(explicit)
+        any_data = any(predicate(l) for l in (lines or []))
+        return any_data if any_data else default_when_no_data
+    show_code = _resolve_show("show_item_code_column", lambda l: l.get("item_code") or l.get("code"))
+    show_unit = _resolve_show("show_unit_column", lambda l: l.get("unit"), default_when_no_data=True)
+    show_disc = _resolve_show("show_discount_column", lambda l: float(l.get("discount_amount") or 0) > 0 or float(l.get("discount_pct") or 0) > 0)
+    show_inline_gst = bool(tpl.get("show_inline_gst_column"))  # default off — Vyapar puts GST only in Tax Summary
+    # Vyapar-style columns: # | Item name | Item Code | HSN/SAC | Qty | Unit | Price/Unit | Amount
     cols = ["#", "Item name"]
-    widths = [7*mm, 50*mm]
+    widths = [7*mm, 56*mm]
     if show_code:
-        cols.append("Item Code"); widths.append(20*mm)
+        cols.append("Item Code"); widths.append(22*mm)
     if show_hsn:
         cols.append("HSN/SAC"); widths.append(18*mm)
-    cols += ["Qty", "Price/unit"]; widths += [14*mm, 20*mm]
+    cols.append("Qty"); widths.append(14*mm)
+    if show_unit:
+        cols.append("Unit"); widths.append(14*mm)
+    cols.append("Price/Unit"); widths.append(22*mm)
     if show_disc:
-        cols.append("Discount"); widths.append(20*mm)
-    cols += ["GST", "Amount"]; widths += [22*mm, 20*mm]
+        cols.append("Discount"); widths.append(22*mm)
+    if show_inline_gst:
+        cols.append("GST"); widths.append(22*mm)
+    cols.append("Amount"); widths.append(24*mm)
 
     data = [cols]
     subtotal = 0.0; total_discount = 0.0; total_gst = 0.0; total_amount = 0.0
@@ -1768,18 +1800,27 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
             row.append(str(l.get("item_code") or l.get("code") or ""))
         if show_hsn:
             row.append(str(l.get("hsn") or ""))
-        row += [f"{qty:g}", f"₹ {rate:,.2f}"]
+        row.append(f"{qty:g}")
+        if show_unit:
+            row.append(str(l.get("unit") or "Nos"))
+        row.append(f"₹ {rate:,.2f}")
         if show_disc:
             row.append(f"₹ {disc_amt:,.2f} ({disc_pct:g}%)" if disc_amt else "—")
-        row += [f"₹ {gst_amt:,.2f} ({gst_rate:g}%)" if gst_amt else "—", f"₹ {amt:,.2f}"]
+        if show_inline_gst:
+            row.append(f"₹ {gst_amt:,.2f} ({gst_rate:g}%)" if gst_amt else "—")
+        # Vyapar's Amount column = net + GST (line total including tax)
+        row.append(f"₹ {amt:,.2f}")
         data.append(row)
     # Total row
     tot_row = ["", Paragraph("<b>TOTAL</b>", smallb)]
     if show_code: tot_row.append("")
     if show_hsn: tot_row.append("")
-    tot_row += [f"{sum(float(l.get('qty',0) or 0) for l in (lines or [])):g}", ""]
+    tot_row.append(f"{sum(float(l.get('qty',0) or 0) for l in (lines or [])):g}")
+    if show_unit: tot_row.append("")
+    tot_row.append("")  # Price/Unit total = blank
     if show_disc: tot_row.append(f"₹ {total_discount:,.2f}")
-    tot_row += [f"₹ {total_gst:,.2f}", f"₹ {total_amount:,.2f}"]
+    if show_inline_gst: tot_row.append(f"₹ {total_gst:,.2f}")
+    tot_row.append(f"₹ {total_amount:,.2f}")
     data.append(tot_row)
 
     tbl = Table(data, colWidths=widths, repeatRows=1)
@@ -1818,44 +1859,73 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
                 t_data.append(["Total", f"₹ {gt_taxable:,.2f}", "", f"₹ {ct:,.2f}", f"₹ {gt_total_tax:,.2f}"])
                 widths_ts = [22*mm, 28*mm, 18*mm, 28*mm, 30*mm]
             else:
-                hdr = ["HSN/SAC", "Taxable Amount", "CGST Rate", "CGST Amount", "SGST Rate", "SGST Amount", "Total Tax Amount"]
-                t_data = [hdr]
+                # Nested header (Vyapar-style): HSN/SAC | Taxable | CGST(Rate|Amt) | SGST(Rate|Amt) | Total Tax
+                hdr1 = ["HSN/SAC", "Taxable Amount (₹)", "CGST", "", "SGST", "", "Total Tax (₹)"]
+                hdr2 = ["", "", "Rate (%)", "Amt (₹)", "Rate (%)", "Amt (₹)", ""]
+                t_data = [hdr1, hdr2]
                 gt_taxable=0; gt_c=0; gt_s=0; gt_total_tax=0
                 for r in rows:
                     gt_taxable += r["taxable"]; gt_c += r["cgst_amt"]; gt_s += r["sgst_amt"]; gt_total_tax += r["total_tax"]
-                    t_data.append([r["hsn"] or "—", f"₹ {r['taxable']:,.2f}", f"{r['cgst_rate']:g}%", f"₹ {r['cgst_amt']:,.2f}", f"{r['sgst_rate']:g}%", f"₹ {r['sgst_amt']:,.2f}", f"₹ {r['total_tax']:,.2f}"])
-                t_data.append(["Total", f"₹ {gt_taxable:,.2f}", "", f"₹ {gt_c:,.2f}", "", f"₹ {gt_s:,.2f}", f"₹ {gt_total_tax:,.2f}"])
-                widths_ts = [20*mm, 26*mm, 14*mm, 22*mm, 14*mm, 22*mm, 24*mm]
+                    t_data.append([r["hsn"] or "—", f"{r['taxable']:,.2f}", f"{r['cgst_rate']:g}", f"{r['cgst_amt']:,.2f}", f"{r['sgst_rate']:g}", f"{r['sgst_amt']:,.2f}", f"{r['total_tax']:,.2f}"])
+                t_data.append(["Total", f"{gt_taxable:,.2f}", "", f"{gt_c:,.2f}", "", f"{gt_s:,.2f}", f"{gt_total_tax:,.2f}"])
+                widths_ts = [18*mm, 24*mm, 12*mm, 18*mm, 12*mm, 18*mm, 20*mm]
             ts = Table(t_data, colWidths=widths_ts)
-            ts.setStyle(TableStyle([
-                ("BACKGROUND", (0,0), (-1,0), LIGHTGREY),
-                ("FONTNAME", (0,0), (-1,0), _PDF_FONT_BOLD),
+            ts_style = [
+                ("BACKGROUND", (0,0), (-1,1), LIGHTGREY) if not is_interstate else ("BACKGROUND", (0,0), (-1,0), LIGHTGREY),
+                ("FONTNAME", (0,0), (-1, 1 if not is_interstate else 0), _PDF_FONT_BOLD),
+                ("FONTNAME", (0,0), (-1,-1), _PDF_FONT_REGULAR),
                 ("FONTSIZE", (0,0), (-1,-1), 7.5),
-                ("ALIGN", (1,0), (-1,-1), "RIGHT"),
+                ("ALIGN", (1,0), (-1,-1), "CENTER"),
+                ("ALIGN", (0,0), (0,-1), "LEFT"),
                 ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
                 ("GRID", (0,0), (-1,-1), 0.4, BORDER),
                 ("BACKGROUND", (0,-1), (-1,-1), LIGHTGREY),
                 ("FONTNAME", (0,-1), (-1,-1), _PDF_FONT_BOLD),
                 ("TOPPADDING", (0,0), (-1,-1), 3),
                 ("BOTTOMPADDING", (0,0), (-1,-1), 3),
-            ]))
+            ]
+            # For intrastate, span the nested headers
+            if not is_interstate:
+                ts_style += [
+                    ("SPAN", (0,0), (0,1)),    # HSN/SAC
+                    ("SPAN", (1,0), (1,1)),    # Taxable Amount
+                    ("SPAN", (2,0), (3,0)),    # CGST (Rate+Amt)
+                    ("SPAN", (4,0), (5,0)),    # SGST (Rate+Amt)
+                    ("SPAN", (6,0), (6,1)),    # Total Tax
+                ]
+            ts.setStyle(TableStyle(ts_style))
             bottom_left_blocks.append(Paragraph("<b>Tax Summary:</b>", smallb))
             bottom_left_blocks.append(ts)
 
-    # Totals sidebar
+    # Totals sidebar — Vyapar shows a single "Tax (X%)" line; can split via toggle
     sidebar = []
     if show("show_totals_sidebar"):
         sd = []
         sd.append(["Sub Total", f"₹ {subtotal:,.2f}"])
         if total_discount:
             sd.append(["Discount", f"₹ {total_discount:,.2f}"])
-        if is_interstate:
-            sd.append(["IGST", f"₹ {(gst_breakup or {}).get('igst', total_gst):,.2f}"])
+        _split_tax = bool(tpl.get("show_split_tax_in_sidebar"))  # default off (Vyapar-style combined)
+        if _split_tax:
+            if is_interstate:
+                sd.append(["IGST", f"₹ {(gst_breakup or {}).get('igst', total_gst):,.2f}"])
+            else:
+                cg = (gst_breakup or {}).get("cgst", total_gst/2)
+                sg = (gst_breakup or {}).get("sgst", total_gst/2)
+                sd.append(["CGST", f"₹ {cg:,.2f}"])
+                sd.append(["SGST", f"₹ {sg:,.2f}"])
         else:
-            cg = (gst_breakup or {}).get("cgst", total_gst/2)
-            sg = (gst_breakup or {}).get("sgst", total_gst/2)
-            sd.append(["CGST", f"₹ {cg:,.2f}"])
-            sd.append(["SGST", f"₹ {sg:,.2f}"])
+            # Combined "Tax (X%)" — derive avg rate from line items
+            net_taxable = sum(float(l.get("qty",0) or 0) * float(l.get("rate",0) or 0) for l in (lines or []))
+            if net_taxable > 0:
+                avg_rate = (total_gst / net_taxable) * 100
+                # Round to common GST rates if close enough
+                for cand in (5, 12, 18, 28):
+                    if abs(avg_rate - cand) < 0.5:
+                        avg_rate = cand; break
+                label = f"Tax ({avg_rate:g}%)"
+            else:
+                label = "Tax"
+            sd.append([label, f"₹ {total_gst:,.2f}"])
         # Round-off (Vyapar-style): round total to whole rupees
         raw_total = float(totals.get('total', total_amount) or 0)
         rounded_total = round(raw_total)
@@ -1922,13 +1992,13 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
         has_desc = bool(desc_text)
         has_terms = bool(terms_text)
         if has_desc and has_terms:
-            cells_l = [Paragraph("<b>Description:</b>", smallb), Paragraph(desc_text, small)]
-            cells_r = [Paragraph("<b>Terms &amp; Conditions:</b>", smallb), Paragraph(terms_text, small)]
+            cells_l = [Paragraph("<b>Description:</b>", smallb), Paragraph(desc_text.replace("\n", "<br/>"), small)]
+            cells_r = [Paragraph("<b>Terms &amp; Conditions:</b>", smallb), Paragraph(terms_text.replace("\n", "<br/>"), small)]
         elif has_terms:
-            cells_l = [Paragraph("<b>Terms &amp; Conditions:</b>", smallb), Paragraph(terms_text, small)]
+            cells_l = [Paragraph("<b>Terms &amp; Conditions:</b>", smallb), Paragraph(terms_text.replace("\n", "<br/>"), small)]
             cells_r = []
         elif has_desc:
-            cells_l = [Paragraph("<b>Description:</b>", smallb), Paragraph(desc_text, small)]
+            cells_l = [Paragraph("<b>Description:</b>", smallb), Paragraph(desc_text.replace("\n", "<br/>"), small)]
             cells_r = []
         else:
             cells_l = None
@@ -1962,10 +2032,17 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
                 flow.append(Spacer(1, 2*mm))
                 flow.append(dt_tbl)
 
-    # ---------- Bank details + QR + Signatory ----------
+    # ---------- Bank details + QR + Signatory (forced to new page, Vyapar-style) ----------
     has_bank = show("show_bank_details") and any(company.get(k) for k in ("bank_name","bank_account_no","bank_ifsc","upi_id"))
     has_sig = show("show_signatory_image")
     if has_bank or has_sig:
+        # Vyapar puts bank/signatory on a new page. Toggle via show_bank_on_new_page.
+        if bool(tpl.get("show_bank_on_new_page", True)):
+            from reportlab.platypus import PageBreak
+            flow.append(PageBreak())
+            # Re-render the company header on page 2 (Vyapar shows it again)
+            flow.append(header_tbl)
+            flow.append(Spacer(1, 3*mm))
         # Bank cell with optional QR
         bank_block = [Paragraph("<b>Bank Details:</b>", smallb)]
         # QR
