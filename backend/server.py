@@ -421,6 +421,75 @@ class Quotation(BaseModel):
     notes: Optional[str] = ""
     created_at: str = Field(default_factory=now_iso)
 
+class POLine(BaseModel):
+    description: str
+    qty: float
+    rate: float
+    gst_rate: float = 18.0
+
+class PurchaseOrder(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    code: Optional[str] = None
+    supplier_id: str
+    supplier_name: str
+    date: str = Field(default_factory=now_iso)
+    delivery_date: Optional[str] = ""
+    lines: List[POLine] = []
+    subtotal: float = 0
+    gst_total: float = 0
+    total: float = 0
+    status: Literal["draft", "sent", "received", "cancelled"] = "draft"
+    notes: Optional[str] = ""
+    created_at: str = Field(default_factory=now_iso)
+
+class InvoiceLine(BaseModel):
+    description: str
+    item_code: Optional[str] = ""        # SKU / part number, shown as "Item Code" col
+    hsn: Optional[str] = ""
+    qty: float
+    unit: Optional[str] = "Nos"          # Mtr, Kg, Nos, etc.
+    rate: float
+    discount_pct: float = 0.0
+    discount_amount: float = 0.0
+    gst_rate: float = 18.0
+
+class Invoice(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    code: Optional[str] = None
+    customer_id: str
+    customer_name: str
+    customer_gstin: Optional[str] = ""
+    place_of_supply: Optional[str] = ""
+    is_interstate: bool = False
+    date: str = Field(default_factory=now_iso)
+    due_date: Optional[str] = ""
+    # Optional Ship To override (when shipping address ≠ billing address)
+    ship_to_name: Optional[str] = ""
+    ship_to_address: Optional[str] = ""
+    ship_to_gstin: Optional[str] = ""
+    # Optional Bill From / Ship From overrides (defaults derived from company settings)
+    bill_from_name: Optional[str] = ""
+    bill_from_address: Optional[str] = ""
+    ship_from_name: Optional[str] = ""        # e.g. "Unit - 1"
+    ship_from_address: Optional[str] = ""
+    # Optional PO meta fields
+    po_number: Optional[str] = ""
+    po_date: Optional[str] = ""
+    purchaser_name: Optional[str] = ""
+    payment_mode: Optional[str] = ""
+    lines: List[InvoiceLine] = []
+    subtotal: float = 0
+    cgst: float = 0
+    sgst: float = 0
+    igst: float = 0
+    total: float = 0
+    status: Literal["draft", "sent", "paid", "overdue"] = "draft"
+    notes: Optional[str] = ""
+    created_at: str = Field(default_factory=now_iso)
+
+# ---------------- Payment In / Out + Expenses (Money flow Phase A) ----------------
 class ProformaInvoice(BaseModel):
     """Formal pre-invoice with terms — distinct from informal Estimate/Quotation.
     Convertible into a Sale Invoice once accepted."""
@@ -511,75 +580,6 @@ class PurchaseReturn(BaseModel):
     notes: Optional[str] = ""
     created_at: str = Field(default_factory=now_iso)
 
-class POLine(BaseModel):
-    description: str
-    qty: float
-    rate: float
-    gst_rate: float = 18.0
-
-class PurchaseOrder(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    id: str = Field(default_factory=new_id)
-    code: Optional[str] = None
-    supplier_id: str
-    supplier_name: str
-    date: str = Field(default_factory=now_iso)
-    delivery_date: Optional[str] = ""
-    lines: List[POLine] = []
-    subtotal: float = 0
-    gst_total: float = 0
-    total: float = 0
-    status: Literal["draft", "sent", "received", "cancelled"] = "draft"
-    notes: Optional[str] = ""
-    created_at: str = Field(default_factory=now_iso)
-
-class InvoiceLine(BaseModel):
-    description: str
-    item_code: Optional[str] = ""        # SKU / part number, shown as "Item Code" col
-    hsn: Optional[str] = ""
-    qty: float
-    unit: Optional[str] = "Nos"          # Mtr, Kg, Nos, etc.
-    rate: float
-    discount_pct: float = 0.0
-    discount_amount: float = 0.0
-    gst_rate: float = 18.0
-
-class Invoice(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    id: str = Field(default_factory=new_id)
-    code: Optional[str] = None
-    customer_id: str
-    customer_name: str
-    customer_gstin: Optional[str] = ""
-    place_of_supply: Optional[str] = ""
-    is_interstate: bool = False
-    date: str = Field(default_factory=now_iso)
-    due_date: Optional[str] = ""
-    # Optional Ship To override (when shipping address ≠ billing address)
-    ship_to_name: Optional[str] = ""
-    ship_to_address: Optional[str] = ""
-    ship_to_gstin: Optional[str] = ""
-    # Optional Bill From / Ship From overrides (defaults derived from company settings)
-    bill_from_name: Optional[str] = ""
-    bill_from_address: Optional[str] = ""
-    ship_from_name: Optional[str] = ""        # e.g. "Unit - 1"
-    ship_from_address: Optional[str] = ""
-    # Optional PO meta fields
-    po_number: Optional[str] = ""
-    po_date: Optional[str] = ""
-    purchaser_name: Optional[str] = ""
-    payment_mode: Optional[str] = ""
-    lines: List[InvoiceLine] = []
-    subtotal: float = 0
-    cgst: float = 0
-    sgst: float = 0
-    igst: float = 0
-    total: float = 0
-    status: Literal["draft", "sent", "paid", "overdue"] = "draft"
-    notes: Optional[str] = ""
-    created_at: str = Field(default_factory=now_iso)
-
-# ---------------- Payment In / Out + Expenses (Money flow Phase A) ----------------
 class PaymentAllocation(BaseModel):
     """A single allocation of a payment to an invoice/bill."""
     document_id: str
