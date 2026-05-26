@@ -2,15 +2,18 @@ import { useEffect, useState } from "react";
 import api from "@/lib/api";
 import { PageHeader, Stat, Card, Empty, Th, Td, inr, fmtDate } from "@/components/erp/Primitives";
 import { Badge } from "@/components/ui/badge";
-import { AlertTriangle, Boxes, ClipboardList, ShieldCheck, Users, ArrowDownToLine, ArrowUpFromLine } from "lucide-react";
+import { AlertTriangle, Boxes, ClipboardList, ShieldCheck, Users, ArrowDownToLine, ArrowUpFromLine, TrendingUp } from "lucide-react";
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Area, AreaChart } from "recharts";
 
 export default function Dashboard() {
   const [stats, setStats] = useState(null);
   const [money, setMoney] = useState(null);
+  const [trend, setTrend] = useState(null);
 
   useEffect(() => {
     api.get("/dashboard/stats").then(r => setStats(r.data)).catch(()=>{});
     api.get("/dashboard/receivable-payable").then(r => setMoney(r.data)).catch(()=>{});
+    api.get("/dashboard/sales-trend?days=30").then(r => setTrend(r.data)).catch(()=>{});
   }, []);
 
   return (
@@ -20,7 +23,7 @@ export default function Dashboard() {
         <div className="text-slate-500">Loading...</div>
       ) : (
         <>
-          {/* Vyapar-style receivable / payable summary */}
+          {/* Receivable / payable summary */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
             <Card className="p-5">
               <div className="flex items-start justify-between">
@@ -43,6 +46,34 @@ export default function Dashboard() {
               </div>
             </Card>
           </div>
+
+          {/* Sales trend chart */}
+          {trend?.series?.length > 0 && (
+            <Card className="mb-4">
+              <div className="px-5 py-3 border-b border-slate-200 flex items-center gap-2">
+                <TrendingUp className="h-4 w-4 text-slate-500" />
+                <div className="font-display font-semibold">Total Sale</div>
+                <div className="text-xs text-slate-500 ml-auto">Last {trend.days} days</div>
+              </div>
+              <div className="px-3 pt-3 pb-4" style={{ height: 260 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <AreaChart data={trend.series} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
+                    <defs>
+                      <linearGradient id="salesGrad" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor="#DC2626" stopOpacity={0.25} />
+                        <stop offset="100%" stopColor="#DC2626" stopOpacity={0} />
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                    <XAxis dataKey="date" tick={{ fontSize: 10, fill: "#64748b" }} tickFormatter={d => d ? d.slice(5) : ""} />
+                    <YAxis tick={{ fontSize: 10, fill: "#64748b" }} tickFormatter={v => v >= 1000 ? (v/1000).toFixed(0) + "k" : v} />
+                    <Tooltip formatter={v => inr(v)} contentStyle={{ fontSize: 12, borderRadius: 2 }} />
+                    <Area type="monotone" dataKey="total" stroke="#DC2626" strokeWidth={2} fill="url(#salesGrad)" />
+                  </AreaChart>
+                </ResponsiveContainer>
+              </div>
+            </Card>
+          )}
 
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
             <Stat testid="stat-open-wo" label="Open WO" value={stats.open_wo} />
