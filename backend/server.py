@@ -474,7 +474,7 @@ class Invoice(BaseModel):
     bill_from_address: Optional[str] = ""
     ship_from_name: Optional[str] = ""        # e.g. "Unit - 1"
     ship_from_address: Optional[str] = ""
-    # Vyapar-style PO meta
+    # Optional PO meta fields
     po_number: Optional[str] = ""
     po_date: Optional[str] = ""
     purchaser_name: Optional[str] = ""
@@ -489,7 +489,7 @@ class Invoice(BaseModel):
     notes: Optional[str] = ""
     created_at: str = Field(default_factory=now_iso)
 
-# ---------------- Payment In / Out + Expenses (Vyapar parity Phase A) ----------------
+# ---------------- Payment In / Out + Expenses (Money flow Phase A) ----------------
 class PaymentAllocation(BaseModel):
     """A single allocation of a payment to an invoice/bill."""
     document_id: str
@@ -1331,7 +1331,7 @@ class IntegrationSettingsIn(BaseModel):
     company_phone: Optional[str] = ""
     company_email: Optional[str] = ""
     company_udyam: Optional[str] = ""  # UDYAM / MSME registration shown on letterhead
-    # Bank / UPI block (printed on every invoice as per Vyapar layout)
+    # Bank / UPI block (printed on every invoice per standard tax-invoice layout)
     bank_name: Optional[str] = ""
     bank_account_no: Optional[str] = ""
     bank_ifsc: Optional[str] = ""
@@ -1359,9 +1359,9 @@ async def update_integrations(payload: IntegrationSettingsIn, user=Depends(requi
     await set_setting("integrations", data)
     return data
 
-# ---------- Invoice Template (Vyapar-style toggles) ----------
+# ---------- Invoice Template (per-section visibility toggles) ----------
 class InvoiceTemplateIn(BaseModel):
-    """Per-section visibility flags for the printed PDF (Vyapar's 'Print > Regular Printer' style)."""
+    """Per-section visibility flags for the printed PDF."""
     show_company_logo: bool = True
     show_company_address: bool = True
     show_company_gstin: bool = True
@@ -1374,7 +1374,7 @@ class InvoiceTemplateIn(BaseModel):
     show_due_date: bool = True
     show_place_of_supply: bool = True
     show_hsn_column: bool = True
-    show_item_code_column: bool = True       # Item Code column (like Vyapar)
+    show_item_code_column: bool = True       # Item Code column
     show_po_meta: bool = True                # PO Date / PO No / Purchaser Name in meta box
     show_discount_column: bool = True
     show_tax_summary: bool = True            # HSN-wise CGST/SGST/IGST breakup
@@ -1386,15 +1386,15 @@ class InvoiceTemplateIn(BaseModel):
     show_bank_details: bool = True
     show_upi_qr: bool = True
     show_signatory_image: bool = True
-    show_bank_on_new_page: bool = True       # Vyapar-style: bank details + signature on page 2
+    show_bank_on_new_page: bool = True       # Move bank details + signature to a new page
     show_unit_column: bool = True            # Unit column in items table (Mtr/Nos/Kg)
-    show_inline_gst_column: bool = False     # Off by default — Vyapar puts GST in Tax Summary only
+    show_inline_gst_column: bool = False     # Off by default — GST shown only in Tax Summary
     show_split_tax_in_sidebar: bool = False  # Off = single "Tax (X%)" line; on = CGST + SGST split
     print_original_duplicate: bool = True
     paper_size: Literal["A4", "A5"] = "A4"
     orientation: Literal["portrait", "landscape"] = "portrait"
     amount_in_words_locale: Literal["en_IN", "en"] = "en_IN"
-    # Style preset: "standard" = full Vyapar layout, "compact" = single-page minimal,
+    # Style preset: "standard" = full tax-invoice layout, "compact" = single-page minimal,
     # "modern" = clean serif with accent lines and more whitespace.
     template_style: Literal["standard", "compact", "modern"] = "standard"
 
@@ -1516,7 +1516,7 @@ async def whatsapp_send(payload: WhatsAppSendIn, user=Depends(get_current_user))
 
 # ---------- Resend deprecated — using Gmail / Outlook OAuth instead ----------
 
-# ---------- PDF builders (Vyapar-style with Denplex Red/Black branding) ----------
+# ---------- PDF builders (Denplex Red/Black branding) ----------
 def _money(n) -> str:
     try:
         return f"Rs. {float(n):,.2f}"
@@ -1559,7 +1559,7 @@ def _upi_qr_png(upi_id: str, payee_name: str, amount: float = 0.0, note: str = "
         return None
 
 def _hsn_tax_summary(lines: List[Dict[str, Any]], is_interstate: bool) -> List[Dict[str, Any]]:
-    """Aggregate per-HSN tax breakup like Vyapar's Tax Summary block."""
+    """Aggregate per-HSN tax breakup for the Tax Summary block."""
     bucket: Dict[str, Dict[str, float]] = {}
     for l in lines or []:
         hsn = str(l.get("hsn") or "")
@@ -1592,7 +1592,7 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
                    copy_label: str = "ORIGINAL FOR RECIPIENT",
                    bill_from: Optional[Dict[str, Any]] = None,
                    ship_from: Optional[Dict[str, Any]] = None) -> bytes:
-    """Vyapar-style invoice/quotation/PO PDF — Denplex Red+Black branded.
+    """Tax-invoice/quotation/PO PDF — Denplex Red+Black branded.
     `tpl` overrides which sections are visible (defaults to all-on).
     `party_extra` carries gstin/phone/state/address for the Bill-To party.
     `ship_to` is an optional shipping address dict.
@@ -1628,7 +1628,7 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
     elif style_preset == "modern":
         _margin = 14*mm; _body = 9.0; _title_sz = 22; _company_sz = 14; _border_w = 0.0  # no full borders
         _accent = colors.HexColor("#1E293B")  # near-black accent
-    else:  # standard (Vyapar)
+    else:  # standard
         _margin = 10*mm; _body = 8.5; _title_sz = 18; _company_sz = 13; _border_w = 0.75
         _accent = RED
 
@@ -1740,7 +1740,7 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
     if party_extra.get("gstin"):   bill_lines.append(Paragraph(f"GSTIN: <b>{party_extra['gstin']}</b>", tiny))
     if party_extra.get("state"):   bill_lines.append(Paragraph(f"State: <b>{party_extra['state']}</b>", tiny))
 
-    # Vyapar-style 2-column meta: main fields on left, PO/purchaser on right
+    # 2-column meta: main fields on left, PO/purchaser on right
     meta_main = [Paragraph(f"<b>{title.split()[0]} Details:</b>", box_label),
                  Paragraph(f"{title.split()[0]} No.: <b>{code}</b>", smallb),
                  Paragraph(f"Date: <b>{date_s}</b>", smallb)]
@@ -1832,8 +1832,8 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
     show_code = _resolve_show("show_item_code_column", lambda l: l.get("item_code") or l.get("code"))
     show_unit = _resolve_show("show_unit_column", lambda l: l.get("unit"), default_when_no_data=True)
     show_disc = _resolve_show("show_discount_column", lambda l: float(l.get("discount_amount") or 0) > 0 or float(l.get("discount_pct") or 0) > 0)
-    show_inline_gst = bool(tpl.get("show_inline_gst_column"))  # default off — Vyapar puts GST only in Tax Summary
-    # Vyapar-style columns: # | Item name | Item Code | HSN/SAC | Qty | Unit | Price/Unit | Amount
+    show_inline_gst = bool(tpl.get("show_inline_gst_column"))  # default off — GST shown only in Tax Summary
+    # Default columns: # | Item name | Item Code | HSN/SAC | Qty | Unit | Price/Unit | Amount
     cols = ["#", "Item name"]
     widths = [7*mm, 56*mm]
     if show_code:
@@ -1864,8 +1864,8 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
         net = max(gross - disc_amt, 0)
         gst_rate = float(l.get("gst_rate", 0) or 0)
         gst_amt = net * gst_rate / 100
-        # Vyapar-style Amount = net (qty*rate - disc). GST captured separately in Tax Summary.
-        # When inline GST column is on, Amount = net + GST (Vyapar's optional behavior).
+        # Amount = net (qty*rate - disc). GST captured separately in Tax Summary.
+        # When inline GST column is on, Amount = net + GST (optional behavior).
         amt_display = (net + gst_amt) if tpl.get("show_inline_gst_column") else net
         subtotal += gross
         total_discount += disc_amt
@@ -1892,7 +1892,7 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
     if show_hsn: tot_row.append("")
     tot_row.append(f"{sum(float(l.get('qty',0) or 0) for l in (lines or [])):g}")
     if show_unit: tot_row.append("")
-    tot_row.append("")  # Price/Unit total cell — Vyapar leaves blank
+    tot_row.append("")  # Price/Unit total cell — left blank
     if show_disc: tot_row.append(f"₹ {total_discount:,.2f}" if total_discount else "")
     if show_inline_gst: tot_row.append(f"₹ {total_gst:,.2f}")
     tot_row.append(f"₹ {total_amount:,.2f}")
@@ -1934,7 +1934,7 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
                 t_data.append(["Total", f"₹ {gt_taxable:,.2f}", "", f"₹ {ct:,.2f}", f"₹ {gt_total_tax:,.2f}"])
                 widths_ts = [22*mm, 28*mm, 18*mm, 28*mm, 30*mm]
             else:
-                # Nested header (Vyapar-style): HSN/SAC | Taxable | CGST(Rate|Amt) | SGST(Rate|Amt) | Total Tax
+                # Nested header: HSN/SAC | Taxable | CGST(Rate|Amt) | SGST(Rate|Amt) | Total Tax
                 hdr1 = ["HSN/SAC", "Taxable Amount (₹)", "CGST", "", "SGST", "", "Total Tax (₹)"]
                 hdr2 = ["", "", "Rate (%)", "Amt (₹)", "Rate (%)", "Amt (₹)", ""]
                 t_data = [hdr1, hdr2]
@@ -1972,16 +1972,16 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
             bottom_left_blocks.append(Paragraph("<b>Tax Summary:</b>", smallb))
             bottom_left_blocks.append(ts)
 
-    # Totals sidebar — Vyapar shows a single "Tax (X%)" line; can split via toggle
+    # Totals sidebar — single "Tax (X%)" line by default; can split via toggle
     sidebar = []
     if show("show_totals_sidebar"):
         sd = []
-        # Sub Total = sum of nets (Vyapar) — same as total_amount when inline GST off
+        # Sub Total = sum of nets — same as total_amount when inline GST off
         st_value = (subtotal - total_discount) if not tpl.get("show_inline_gst_column") else (subtotal - total_discount + total_gst)
         sd.append(["Sub Total", f"₹ {st_value:,.2f}"])
         if total_discount:
             sd.append(["Discount", f"₹ {total_discount:,.2f}"])
-        _split_tax = bool(tpl.get("show_split_tax_in_sidebar"))  # default off (Vyapar-style combined)
+        _split_tax = bool(tpl.get("show_split_tax_in_sidebar"))  # default off (combined Tax line)
         if _split_tax:
             if is_interstate:
                 sd.append(["IGST", f"₹ {(gst_breakup or {}).get('igst', total_gst):,.2f}"])
@@ -2003,7 +2003,7 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
             else:
                 label = "Tax"
             sd.append([label, f"₹ {total_gst:,.2f}"])
-        # Round-off (Vyapar-style): round total to whole rupees.
+        # Round-off: round total to whole rupees.
         # The grand total = net + tax; total_amount may be net-only when inline GST is off.
         grand_total_raw = (total_amount + total_gst) if not tpl.get("show_inline_gst_column") else total_amount
         raw_total = float(totals.get('total') or grand_total_raw)
@@ -2111,15 +2111,15 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
                 flow.append(Spacer(1, 2*mm))
                 flow.append(dt_tbl)
 
-    # ---------- Bank details + QR + Signatory (forced to new page, Vyapar-style) ----------
+    # ---------- Bank details + QR + Signatory (optional page break) ----------
     has_bank = show("show_bank_details") and any(company.get(k) for k in ("bank_name","bank_account_no","bank_ifsc","upi_id"))
     has_sig = show("show_signatory_image")
     if has_bank or has_sig:
-        # Vyapar puts bank/signatory on a new page. Toggle via show_bank_on_new_page.
+        # Optional: move bank/signatory to a new page. Toggle via show_bank_on_new_page.
         if bool(tpl.get("show_bank_on_new_page", True)):
             from reportlab.platypus import PageBreak
             flow.append(PageBreak())
-            # Re-render the company header on page 2 (Vyapar shows it again)
+            # Re-render the company header on page 2
             flow.append(header_tbl)
             flow.append(Spacer(1, 3*mm))
         # Bank cell with optional QR
@@ -3681,7 +3681,7 @@ async def create_expense_category(c: ExpenseCategory, user=Depends(require_roles
 @api.get("/expense-categories")
 async def list_expense_categories(user=Depends(get_current_user)):
     rows = await db.expense_categories.find({}, {"_id": 0}).sort("name", 1).to_list(500)
-    # Seed defaults if empty (Vyapar-style)
+    # Seed defaults if empty
     if not rows:
         defaults = ["Courier", "Salary", "Rent", "Petrol", "Tea", "Transport", "Labour Bill", "Other"]
         for name in defaults:
