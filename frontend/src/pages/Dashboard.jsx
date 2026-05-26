@@ -2,13 +2,15 @@ import { useEffect, useState } from "react";
 import api from "@/lib/api";
 import { PageHeader, Stat, Card, Empty, Th, Td, inr, fmtDate } from "@/components/erp/Primitives";
 import { Badge } from "@/components/ui/badge";
-import { AlertTriangle, Boxes, ClipboardList, ShieldCheck, Users } from "lucide-react";
+import { AlertTriangle, Boxes, ClipboardList, ShieldCheck, Users, ArrowDownToLine, ArrowUpFromLine } from "lucide-react";
 
 export default function Dashboard() {
   const [stats, setStats] = useState(null);
+  const [money, setMoney] = useState(null);
 
   useEffect(() => {
     api.get("/dashboard/stats").then(r => setStats(r.data)).catch(()=>{});
+    api.get("/dashboard/receivable-payable").then(r => setMoney(r.data)).catch(()=>{});
   }, []);
 
   return (
@@ -18,6 +20,30 @@ export default function Dashboard() {
         <div className="text-slate-500">Loading...</div>
       ) : (
         <>
+          {/* Vyapar-style receivable / payable summary */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+            <Card className="p-5">
+              <div className="flex items-start justify-between">
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Total Receivable</div>
+                  <div className="font-display text-3xl font-bold mt-2 text-emerald-700">{inr(money?.receivable_total || 0)}</div>
+                  <div className="text-xs text-slate-500 mt-1">From <strong>{money?.receivable_parties_count || 0}</strong> Parties</div>
+                </div>
+                <div className="h-10 w-10 rounded-full bg-emerald-50 flex items-center justify-center"><ArrowDownToLine className="h-5 w-5 text-emerald-600" /></div>
+              </div>
+            </Card>
+            <Card className="p-5">
+              <div className="flex items-start justify-between">
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Total Payable</div>
+                  <div className="font-display text-3xl font-bold mt-2 text-red-700">{inr(money?.payable_total || 0)}</div>
+                  <div className="text-xs text-slate-500 mt-1">From <strong>{money?.payable_parties_count || 0}</strong> Parties</div>
+                </div>
+                <div className="h-10 w-10 rounded-full bg-red-50 flex items-center justify-center"><ArrowUpFromLine className="h-5 w-5 text-red-600" /></div>
+              </div>
+            </Card>
+          </div>
+
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
             <Stat testid="stat-open-wo" label="Open WO" value={stats.open_wo} />
             <Stat testid="stat-qc-pending" label="QC Pending" value={stats.qc_pending} accent="text-amber-700" />
