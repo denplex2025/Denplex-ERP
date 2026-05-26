@@ -40,7 +40,7 @@ export default function PartyStatement() {
       <PageHeader
         overline="Accounting"
         title="Account Statement"
-        subtitle="Per-party ledger with running balance. Vyapar-style — combines sales, payments, returns."
+        subtitle="Per-party ledger with running balance. Combines sales, payments, returns from the party."
       />
 
       <Card className="p-5 mb-6">
