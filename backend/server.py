@@ -4078,6 +4078,72 @@ async def del_purchase_return(rid: str, user=Depends(require_roles("admin", "man
     await db.purchase_returns.delete_one({"id": rid})
     return {"ok": True}
 
+# ---------------- Universal export (CSV / XLSX) — Phase F ----------------
+EXPORT_COLLECTIONS = {
+    "invoices": ("invoices", ["code", "date", "customer_name", "total", "status", "po_number"]),
+    "proforma-invoices": ("proforma_invoices", ["code", "date", "customer_name", "total", "status"]),
+    "quotations": ("quotations", ["code", "date", "customer_name", "total", "status"]),
+    "purchase-orders": ("purchase_orders", ["code", "date", "supplier_name", "total", "status"]),
+    "vendor-bills": ("vendor_bills", ["code", "date", "supplier_name", "total", "status"]),
+    "credit-notes": ("credit_notes", ["code", "date", "customer_name", "total"]),
+    "debit-notes": ("debit_notes", ["code", "date", "supplier_name", "total"]),
+    "sale-orders": ("sale_orders", ["code", "date", "customer_name", "total", "status"]),
+    "delivery-challans": ("delivery_challans", ["code", "date", "customer_name", "total", "status"]),
+    "customers": ("customers", ["code", "name", "gstin", "phone", "email", "address"]),
+    "suppliers": ("suppliers", ["code", "name", "gstin", "phone", "email", "address"]),
+    "items": ("items", ["code", "name", "hsn", "rate", "stock", "reorder_level"]),
+    "payments-in": ("payments_in", ["code", "date", "party_name", "amount", "payment_type", "status"]),
+    "payments-out": ("payments_out", ["code", "date", "party_name", "amount", "payment_type", "status"]),
+    "expenses": ("expenses", ["code", "date", "category_name", "party_name", "amount", "paid_amount", "status"]),
+    "sale-returns": ("sale_returns", ["code", "date", "customer_name", "total", "original_invoice_code", "status"]),
+    "purchase-returns": ("purchase_returns", ["code", "date", "supplier_name", "total", "original_bill_code", "status"]),
+}
+
+@api.get("/export/{collection}.{format}")
+async def export_collection(collection: str, format: str, user=Depends(get_current_user)):
+    """Export any registered collection as CSV or XLSX. Streams binary back."""
+    if collection not in EXPORT_COLLECTIONS:
+        raise HTTPException(404, f"Unknown collection '{collection}'")
+    if format not in ("csv", "xlsx"):
+        raise HTTPException(400, "format must be csv or xlsx")
+    coll_name, cols = EXPORT_COLLECTIONS[collection]
+    rows = await db[coll_name].find({}, {"_id": 0}).sort("created_at", -1).to_list(50000)
+    if format == "csv":
+        import csv as _csv
+        buf = io.StringIO()
+        w = _csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore")
+        w.writeheader()
+        for r in rows:
+            w.writerow({c: r.get(c, "") for c in cols})
+        return Response(content=buf.getvalue(), media_type="text/csv",
+                        headers={"Content-Disposition": f'attachment; filename="{collection}.csv"'})
+    # xlsx
+    try:
+        import openpyxl
+        from openpyxl.styles import Font, PatternFill, Alignment
+    except ImportError:
+        raise HTTPException(500, "openpyxl not available")
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = collection[:31]
+    # Header row
+    ws.append([c.replace("_", " ").title() for c in cols])
+    header_fill = PatternFill(start_color="DC2626", end_color="DC2626", fill_type="solid")
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="left", vertical="center")
+    for r in rows:
+        ws.append([r.get(c, "") for c in cols])
+    # Auto-fit-ish: widen columns based on header
+    for i, c in enumerate(cols, start=1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = max(15, len(c) + 4)
+    buf = io.BytesIO()
+    wb.save(buf); buf.seek(0)
+    return Response(content=buf.getvalue(),
+                    media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": f'attachment; filename="{collection}.xlsx"'})
+
 # ---------------- App config ----------------
 app.include_router(api)
 app.add_middleware(
