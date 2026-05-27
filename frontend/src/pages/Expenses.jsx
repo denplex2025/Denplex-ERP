@@ -9,6 +9,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { PageHeader, Card, Th, Td, Empty, fmtDate, inr } from "@/components/erp/Primitives";
+import ExportMenu from "@/components/erp/ExportMenu";
 import { Plus, Receipt, Tag } from "lucide-react";
 import { toast } from "sonner";
 
@@ -80,14 +81,15 @@ export default function Expenses() {
         title="Expenses"
         subtitle="Track business expenses by category (Courier, Salary, Rent, etc.)."
         actions={
-          <>
+          <div className="flex items-center gap-2">
+            <ExportMenu collection="expenses" />
             <Button onClick={() => setOpenCat(true)} variant="outline" className="rounded-sm" data-testid="add-expense-category">
               <Tag className="h-4 w-4 mr-1" /> New Category
             </Button>
             <Button onClick={() => setOpen(true)} className="rounded-sm bg-red-600 hover:bg-red-700" disabled={!selectedCat} data-testid="add-expense">
               <Plus className="h-4 w-4 mr-1" /> Add Expense
             </Button>
-          </>
+          </div>
         }
       />
 
