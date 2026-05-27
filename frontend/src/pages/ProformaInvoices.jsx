@@ -8,6 +8,7 @@ import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
 import { PageHeader, Card, Th, Td, Empty, fmtDate, inr } from "@/components/erp/Primitives";
+import ExportMenu from "@/components/erp/ExportMenu";
 import { Plus, FileText, ArrowRightCircle, Download, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -84,7 +85,7 @@ export default function ProformaInvoices() {
         overline="Sales"
         title="Proforma Invoices"
         subtitle="Formal pre-invoices with terms. Convert to a Sale Invoice once the customer confirms."
-        actions={<Button onClick={() => setOpen(true)} className="rounded-sm bg-red-600 hover:bg-red-700"><Plus className="h-4 w-4 mr-1" /> New Proforma</Button>}
+        actions={<div className="flex items-center gap-2"><ExportMenu collection="proforma-invoices" /><Button onClick={() => setOpen(true)} className="rounded-sm bg-red-600 hover:bg-red-700"><Plus className="h-4 w-4 mr-1" /> New Proforma</Button></div>}
       />
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
