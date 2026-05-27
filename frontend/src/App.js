@@ -43,6 +43,8 @@ import PaymentOut from "./pages/PaymentOut";
 import Expenses from "./pages/Expenses";
 import PartyStatement from "./pages/PartyStatement";
 import ProformaInvoices from "./pages/ProformaInvoices";
+import SaleReturns from "./pages/SaleReturns";
+import PurchaseReturns from "./pages/PurchaseReturns";
 
 function App() {
   return (
@@ -81,6 +83,8 @@ function App() {
               <Route path="expenses" element={<Expenses />} />
               <Route path="statements" element={<PartyStatement />} />
               <Route path="proforma" element={<ProformaInvoices />} />
+              <Route path="sale-returns" element={<SaleReturns />} />
+              <Route path="purchase-returns" element={<PurchaseReturns />} />
             </Route>
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
