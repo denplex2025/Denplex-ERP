@@ -8,6 +8,7 @@ import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
 import { PageHeader, Card, Th, Td, Empty, fmtDate, inr } from "@/components/erp/Primitives";
+import ExportMenu from "@/components/erp/ExportMenu";
 import { Plus, ArrowDownToLine } from "lucide-react";
 import { toast } from "sonner";
 
@@ -50,9 +51,12 @@ export default function PaymentIn() {
         title="Payment-In"
         subtitle="Money received from customers — for sale invoices or as advance."
         actions={
-          <Button onClick={() => setOpen(true)} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="add-payment-in">
-            <Plus className="h-4 w-4 mr-1" /> Add Payment-In
-          </Button>
+          <div className="flex items-center gap-2">
+            <ExportMenu collection="payments-in" />
+            <Button onClick={() => setOpen(true)} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="add-payment-in">
+              <Plus className="h-4 w-4 mr-1" /> Add Payment-In
+            </Button>
+          </div>
         }
       />
 
