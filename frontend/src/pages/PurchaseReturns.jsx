@@ -16,7 +16,7 @@ import { toast } from "sonner";
 export default function PurchaseReturns() {
   const [rows, setRows] = useState([]);
   const [suppliers, setSuppliers] = useState([]);
-  const [vendor-bills, setVendor-bills] = useState([]);
+  const [bills, setBills] = useState([]);
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({ date: new Date().toISOString().slice(0, 10), reduce_inventory: true, lines: [] });
 
@@ -24,18 +24,18 @@ export default function PurchaseReturns() {
     try {
       const r = await api.get("/purchase-returns"); setRows(r.data || []);
       const c = await api.get("/suppliers"); setSuppliers(c.data || []);
-      const i = await api.get("/vendor-bills"); setVendor-bills(i.data || []);
+      const i = await api.get("/vendor-bills"); setBills(i.data || []);
     } catch (e) { toast.error("Failed to load"); }
   };
   useEffect(() => { load(); }, []);
 
-  const supplierVendor-bills = useMemo(
-    () => vendor-bills.filter(i => i.supplier_id === form.supplier_id),
-    [vendor-bills, form.supplier_id]
+  const supplierBills = useMemo(
+    () => bills.filter(i => i.supplier_id === form.supplier_id),
+    [bills, form.supplier_id]
   );
 
   const pickBill = (iid) => {
-    const inv = vendor-bills.find(i => i.id === iid);
+    const inv = bills.find(i => i.id === iid);
     if (!inv) return;
     setForm(p => ({
       ...p,
@@ -144,7 +144,7 @@ export default function PurchaseReturns() {
             <Field label="Original Bill (optional)">
               <Select value={form.original_bill_id || ""} onValueChange={pickBill} disabled={!form.supplier_id}>
                 <SelectTrigger className="rounded-sm"><SelectValue placeholder={form.supplier_id ? "Pick to auto-fill lines" : "Select supplier first"} /></SelectTrigger>
-                <SelectContent>{supplierVendor-bills.map(i => <SelectItem key={i.id} value={i.id}>{i.code} · {inr(i.total)}</SelectItem>)}</SelectContent>
+                <SelectContent>{supplierBills.map(i => <SelectItem key={i.id} value={i.id}>{i.code} · {inr(i.total)}</SelectItem>)}</SelectContent>
               </Select>
             </Field>
             <Field label="Date *"><Input type="date" value={form.date || ""} onChange={e => setForm(p => ({ ...p, date: e.target.value }))} className="rounded-sm" /></Field>
