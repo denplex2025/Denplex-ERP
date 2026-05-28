@@ -6,7 +6,7 @@ import {
   LayoutDashboard, Boxes, Layers, ClipboardList, FileText,
   ShoppingCart, Receipt, Users, UserPlus, Truck, ShieldCheck,
   FileBox, Settings as SettingsIcon, LogOut, Menu, Calculator, UsersRound, Megaphone, Wrench, ScrollText,
-  ArrowDownToLine, ArrowUpFromLine, Banknote, Undo2
+  ArrowDownToLine, ArrowUpFromLine, Banknote, Undo2, Cog
 } from "lucide-react";
 import { useState } from "react";
 
@@ -44,6 +44,7 @@ const NAV_GROUPS = [
   {
     head: "Production",
     items: [
+      { to: "/app/parts", label: "Part Master", icon: Cog, testid: "nav-parts" },
       { to: "/app/bom", label: "BOM", icon: Layers, testid: "nav-bom" },
       { to: "/app/work-orders", label: "Work Orders", icon: ClipboardList, testid: "nav-work-orders" },
       { to: "/app/job-cards", label: "Job Cards", icon: FileText, testid: "nav-job-cards" },
