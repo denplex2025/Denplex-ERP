@@ -361,6 +361,8 @@ class PartMaster(BaseModel):
     step_file_b64: Optional[str] = ""
     drawing_filename: Optional[str] = ""
     step_filename: Optional[str] = ""
+    # Sourcing — how the part is produced
+    sourcing: Literal["manufactured", "bought_out", "ready_made"] = "manufactured"
     # Status
     is_active: bool = True
     notes: Optional[str] = ""
@@ -4140,7 +4142,7 @@ EXPORT_COLLECTIONS = {
     "customers": ("customers", ["code", "name", "gstin", "phone", "email", "address"]),
     "suppliers": ("suppliers", ["code", "name", "gstin", "phone", "email", "address"]),
     "items": ("items", ["code", "name", "hsn", "rate", "stock", "reorder_level"]),
-    "parts": ("parts", ["part_number", "customer_part_number", "name", "customer_name", "material", "current_revision", "cycle_time_minutes", "weight_kg", "is_active"]),
+    "parts": ("parts", ["part_number", "customer_part_number", "name", "customer_name", "material", "sourcing", "current_revision", "cycle_time_minutes", "weight_kg", "is_active"]),
     "payments-in": ("payments_in", ["code", "date", "party_name", "amount", "payment_type", "status"]),
     "payments-out": ("payments_out", ["code", "date", "party_name", "amount", "payment_type", "status"]),
     "expenses": ("expenses", ["code", "date", "category_name", "party_name", "amount", "paid_amount", "status"]),
@@ -4243,9 +4245,16 @@ async def update_part(pid: str, p: PartMaster, user=Depends(get_current_user)):
     return {"ok": True}
 
 @api.delete("/parts/{pid}")
-async def delete_part(pid: str, user=Depends(require_roles("admin", "manager", "design", "production"))):
-    # Soft delete by default — set is_active = False; hard delete with ?force=true
+async def delete_part(pid: str, force: bool = False, user=Depends(require_roles("admin", "manager", "design", "production"))):
+    """Soft delete by default (is_active=False). Pass ?force=true for permanent removal."""
+    if force:
+        p = await db.parts.find_one({"id": pid}, {"_id": 0, "part_number": 1, "name": 1})
+        await db.parts.delete_one({"id": pid})
+        await write_audit(user.get("name", ""), "part_deleted_hard", "part", pid,
+                          {"part_number": p.get("part_number") if p else "", "name": p.get("name") if p else ""})
+        return {"ok": True, "deleted": True}
     await db.parts.update_one({"id": pid}, {"$set": {"is_active": False}})
+    await write_audit(user.get("name", ""), "part_deactivated", "part", pid, {})
     return {"ok": True, "soft_deleted": True}
 
 @api.post("/parts/{pid}/revisions")
