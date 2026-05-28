@@ -10,7 +10,7 @@ import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { PageHeader, Card, Th, Td, Empty, fmtDate, inr } from "@/components/erp/Primitives";
 import ExportMenu from "@/components/erp/ExportMenu";
-import { Plus, FileText, Download, History, Search, Cog, Layers } from "lucide-react";
+import { Plus, FileText, Download, History, Search, Cog, Layers, Trash2, AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
 
 const PROCESS_OPTIONS = ["Turning", "Milling", "Grinding", "Drilling", "Tapping", "Boring", "Heat Treatment", "Plating", "Wire EDM", "Surface Treatment", "Assembly", "Welding", "Other"];
@@ -33,7 +33,7 @@ export default function Parts() {
   const [revOpen, setRevOpen] = useState(false);
   const [revPart, setRevPart] = useState(null);
   const [newRev, setNewRev] = useState({ revision: "", change_reason: "" });
-  const [form, setForm] = useState({ process: [], tools_required: [], is_active: true });
+  const [form, setForm] = useState({ process: [], tools_required: [], is_active: true, sourcing: "manufactured" });
 
   const load = async () => {
     try {
@@ -46,7 +46,7 @@ export default function Parts() {
 
   const openNew = () => {
     setEditingId(null);
-    setForm({ process: [], tools_required: [], is_active: true, current_revision: "Rev A" });
+    setForm({ process: [], tools_required: [], is_active: true, current_revision: "Rev A", sourcing: "manufactured" });
     setOpen(true);
   };
   const openEdit = (p) => {
@@ -107,6 +107,17 @@ export default function Parts() {
       document.body.appendChild(a); a.click(); a.remove();
     } catch (e) { toast.error("No drawing on file"); }
   };
+  const deletePart = async (pid, partNumber, hard = false) => {
+    const action = hard ? "PERMANENTLY DELETE" : "deactivate";
+    if (!window.confirm(`${hard ? "🚨 " : ""}${action} part "${partNumber}"?${hard ? "\n\nThis cannot be undone." : ""}`)) return;
+    try {
+      const url = hard ? `/parts/${pid}?force=true` : `/parts/${pid}`;
+      await api.delete(url);
+      toast.success(hard ? "Part permanently deleted" : "Part deactivated (can be reactivated)");
+      load();
+    } catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
+  };
+
   const dlStep = async (pid, code, revision = null) => {
     try {
       const url = revision ? `/parts/${pid}/step?revision=${encodeURIComponent(revision)}` : `/parts/${pid}/step`;
@@ -155,7 +166,7 @@ export default function Parts() {
       <Card>
         {rows.length === 0 ? <Empty label="No parts yet. Add your first part to start." /> : (
           <table className="w-full">
-            <thead><tr><Th>Part #</Th><Th>Name</Th><Th>Customer</Th><Th>Material</Th><Th>Rev</Th><Th>Cycle</Th><Th>Wt (kg)</Th><Th>Status</Th><Th></Th></tr></thead>
+            <thead><tr><Th>Part #</Th><Th>Name</Th><Th>Customer</Th><Th>Material</Th><Th>Source</Th><Th>Rev</Th><Th>Cycle</Th><Th>Wt (kg)</Th><Th>Status</Th><Th></Th></tr></thead>
             <tbody>
               {rows.map(p => (
                 <tr key={p.id} className="hover:bg-slate-50">
@@ -163,6 +174,15 @@ export default function Parts() {
                   <Td>{p.name}</Td>
                   <Td>{p.customer_name || "—"}</Td>
                   <Td className="text-xs">{p.material || "—"}{p.material_grade ? ` · ${p.material_grade}` : ""}</Td>
+                  <Td>
+                    <Badge variant="outline" className={`rounded-sm uppercase text-[10px] ${
+                      p.sourcing === "bought_out" ? "border-blue-600 text-blue-700" :
+                      p.sourcing === "ready_made" ? "border-purple-600 text-purple-700" :
+                      "border-slate-500 text-slate-700"
+                    }`}>
+                      {p.sourcing === "bought_out" ? "Bought-out" : p.sourcing === "ready_made" ? "Ready-made" : "Mfg"}
+                    </Badge>
+                  </Td>
                   <Td><Badge variant="outline" className="rounded-sm text-[10px] font-mono-tech">{p.current_revision || "—"}</Badge></Td>
                   <Td className="text-xs">{p.cycle_time_minutes ? `${p.cycle_time_minutes}m` : "—"}</Td>
                   <Td className="text-xs">{p.weight_kg ? p.weight_kg.toFixed(3) : "—"}</Td>
@@ -172,6 +192,8 @@ export default function Parts() {
                       {p.drawing_pdf_b64 && <Button size="icon" variant="ghost" className="h-7 w-7" title="Drawing PDF" onClick={() => dlDrawing(p.id, p.part_number)}><FileText className="h-3.5 w-3.5 text-red-600" /></Button>}
                       {p.step_file_b64 && <Button size="icon" variant="ghost" className="h-7 w-7" title="STEP / CAD" onClick={() => dlStep(p.id, p.part_number)}><Download className="h-3.5 w-3.5 text-blue-600" /></Button>}
                       <Button size="icon" variant="ghost" className="h-7 w-7" title="Revisions" onClick={() => openRevDialog(p)}><History className="h-3.5 w-3.5 text-slate-600" /></Button>
+                      {p.is_active && <Button size="icon" variant="ghost" className="h-7 w-7" title="Deactivate" onClick={() => deletePart(p.id, p.part_number, false)}><Trash2 className="h-3.5 w-3.5 text-amber-600" /></Button>}
+                      <Button size="icon" variant="ghost" className="h-7 w-7" title="Delete permanently" onClick={() => deletePart(p.id, p.part_number, true)}><AlertTriangle className="h-3.5 w-3.5 text-red-700" /></Button>
                     </div>
                   </Td>
                 </tr>
@@ -191,7 +213,17 @@ export default function Parts() {
             <Field label="Part Number *"><Input value={form.part_number || ""} onChange={e => setForm(p => ({ ...p, part_number: e.target.value }))} className="rounded-sm font-mono-tech" placeholder="DPX-2025-001" /></Field>
             <Field label="Customer Part #"><Input value={form.customer_part_number || ""} onChange={e => setForm(p => ({ ...p, customer_part_number: e.target.value }))} className="rounded-sm font-mono-tech" /></Field>
             <Field label="Current Revision"><Input value={form.current_revision || ""} onChange={e => setForm(p => ({ ...p, current_revision: e.target.value }))} className="rounded-sm" placeholder="Rev A" /></Field>
-            <div className="md:col-span-2"><Field label="Name *"><Input value={form.name || ""} onChange={e => setForm(p => ({ ...p, name: e.target.value }))} className="rounded-sm" /></Field></div>
+            <Field label="Name *"><Input value={form.name || ""} onChange={e => setForm(p => ({ ...p, name: e.target.value }))} className="rounded-sm" /></Field>
+            <Field label="Sourcing">
+              <Select value={form.sourcing || "manufactured"} onValueChange={v => setForm(p => ({ ...p, sourcing: v }))}>
+                <SelectTrigger className="rounded-sm"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="manufactured">Manufactured (in-house)</SelectItem>
+                  <SelectItem value="bought_out">Bought-out (from supplier)</SelectItem>
+                  <SelectItem value="ready_made">Ready-made / Standard (catalog)</SelectItem>
+                </SelectContent>
+              </Select>
+            </Field>
             <Field label="Customer">
               <Select value={form.customer_id || ""} onValueChange={v => setForm(p => ({ ...p, customer_id: v }))}>
                 <SelectTrigger className="rounded-sm"><SelectValue placeholder="—" /></SelectTrigger>
