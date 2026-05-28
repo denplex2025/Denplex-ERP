@@ -318,6 +318,54 @@ class Supplier(BaseModel):
     address: Optional[str] = ""
     created_at: str = Field(default_factory=now_iso)
 
+class PartRevision(BaseModel):
+    """A single revision entry in a Part's history."""
+    revision: str                              # e.g. "Rev A", "01", "B2"
+    effective_date: str = Field(default_factory=now_iso)
+    change_reason: Optional[str] = ""          # Why this rev was made (customer change, internal optimization, etc.)
+    drawing_pdf_b64: Optional[str] = ""        # Snapshot of drawing at this rev (base64)
+    step_file_b64: Optional[str] = ""          # Snapshot of STEP at this rev (base64)
+    drawing_filename: Optional[str] = ""       # Original filename for reference
+    step_filename: Optional[str] = ""
+    created_by: Optional[str] = ""
+    notes: Optional[str] = ""
+
+class PartMaster(BaseModel):
+    """Central part identity. Every WO, BOM, inventory entry references a Part.
+    The single source of truth for what each component IS."""
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    part_number: str                                       # Internal Denplex part number — primary identifier
+    customer_part_number: Optional[str] = ""               # Customer's part number for cross-reference
+    name: str                                              # Descriptive name
+    description: Optional[str] = ""
+    customer_id: Optional[str] = ""
+    customer_name: Optional[str] = ""
+    # Engineering specs
+    material: Optional[str] = ""                           # e.g. "EN31", "SS316", "AISI 4140"
+    material_grade: Optional[str] = ""                     # e.g. "Hardened", "Forged", "Annealed"
+    process: List[str] = []                                # ["Turning", "Milling", "Grinding", "Heat Treatment"]
+    cycle_time_minutes: float = 0                          # Standard cycle time per piece
+    weight_kg: float = 0                                   # Finished piece weight
+    raw_material_size: Optional[str] = ""                  # e.g. "Ø50 x 200mm bar", "Plate 100x100x10"
+    raw_material_qty_per_part: float = 0                   # For material planning (e.g. 0.5 kg / part)
+    # Inspection & tooling
+    inspection_plan: Optional[str] = ""                    # Critical dimensions, gauges, tolerances
+    critical_dimensions: List[Dict[str, str]] = []         # [{dim: "Ø25 ±0.01", gauge: "Snap gauge G1"}]
+    tools_required: List[str] = []                         # Tools/fixtures/inserts needed
+    # Revisions
+    current_revision: Optional[str] = ""                   # e.g. "Rev B"
+    revisions: List[PartRevision] = []                     # Full history
+    # Current revision files (also stored in latest revision but mirrored here for fast access)
+    drawing_pdf_b64: Optional[str] = ""
+    step_file_b64: Optional[str] = ""
+    drawing_filename: Optional[str] = ""
+    step_filename: Optional[str] = ""
+    # Status
+    is_active: bool = True
+    notes: Optional[str] = ""
+    created_at: str = Field(default_factory=now_iso)
+
 class InventoryItem(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: str = Field(default_factory=new_id)
@@ -4092,6 +4140,7 @@ EXPORT_COLLECTIONS = {
     "customers": ("customers", ["code", "name", "gstin", "phone", "email", "address"]),
     "suppliers": ("suppliers", ["code", "name", "gstin", "phone", "email", "address"]),
     "items": ("items", ["code", "name", "hsn", "rate", "stock", "reorder_level"]),
+    "parts": ("parts", ["part_number", "customer_part_number", "name", "customer_name", "material", "current_revision", "cycle_time_minutes", "weight_kg", "is_active"]),
     "payments-in": ("payments_in", ["code", "date", "party_name", "amount", "payment_type", "status"]),
     "payments-out": ("payments_out", ["code", "date", "party_name", "amount", "payment_type", "status"]),
     "expenses": ("expenses", ["code", "date", "category_name", "party_name", "amount", "paid_amount", "status"]),
@@ -4143,6 +4192,125 @@ async def export_collection(collection: str, format: str, user=Depends(get_curre
     return Response(content=buf.getvalue(),
                     media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     headers={"Content-Disposition": f'attachment; filename="{collection}.xlsx"'})
+
+# ---------------- Part Master (Phase M.1) ----------------
+@api.post("/parts")
+async def create_part(p: PartMaster, user=Depends(get_current_user)):
+    doc = p.model_dump()
+    # Auto-snapshot current files into a revision entry if revision is set
+    if doc.get("current_revision") and not doc.get("revisions"):
+        rev = {
+            "revision": doc["current_revision"],
+            "effective_date": doc.get("created_at") or now_iso(),
+            "change_reason": "Initial release",
+            "drawing_pdf_b64": doc.get("drawing_pdf_b64", ""),
+            "step_file_b64": doc.get("step_file_b64", ""),
+            "drawing_filename": doc.get("drawing_filename", ""),
+            "step_filename": doc.get("step_filename", ""),
+            "created_by": user.get("name", ""),
+            "notes": "",
+        }
+        doc["revisions"] = [rev]
+    if await db.parts.find_one({"part_number": doc["part_number"]}):
+        raise HTTPException(400, f"Part number {doc['part_number']} already exists")
+    await db.parts.insert_one(doc)
+    await write_audit(user.get("name", ""), "part_created", "part", doc["id"], {"part_number": doc["part_number"]})
+    return serialize(doc)
+
+@api.get("/parts")
+async def list_parts(customer_id: Optional[str] = None, search: Optional[str] = None, user=Depends(get_current_user)):
+    q = {}
+    if customer_id: q["customer_id"] = customer_id
+    if search:
+        q["$or"] = [
+            {"part_number": {"$regex": search, "$options": "i"}},
+            {"customer_part_number": {"$regex": search, "$options": "i"}},
+            {"name": {"$regex": search, "$options": "i"}},
+        ]
+    return await list_collection(db.parts, q)
+
+@api.get("/parts/{pid}")
+async def get_part(pid: str, user=Depends(get_current_user)):
+    p = await db.parts.find_one({"id": pid}, {"_id": 0})
+    if not p: raise HTTPException(404, "Part not found")
+    return p
+
+@api.put("/parts/{pid}")
+async def update_part(pid: str, p: PartMaster, user=Depends(get_current_user)):
+    data = p.model_dump(); data.pop("id", None); data.pop("created_at", None)
+    await db.parts.update_one({"id": pid}, {"$set": data})
+    await write_audit(user.get("name", ""), "part_updated", "part", pid, {"part_number": data.get("part_number")})
+    return {"ok": True}
+
+@api.delete("/parts/{pid}")
+async def delete_part(pid: str, user=Depends(require_roles("admin", "manager", "design", "production"))):
+    # Soft delete by default — set is_active = False; hard delete with ?force=true
+    await db.parts.update_one({"id": pid}, {"$set": {"is_active": False}})
+    return {"ok": True, "soft_deleted": True}
+
+@api.post("/parts/{pid}/revisions")
+async def add_part_revision(pid: str, rev: PartRevision, user=Depends(get_current_user)):
+    """Promote a new revision. Mirrors the new revision's files into the part's current_revision fields."""
+    p = await db.parts.find_one({"id": pid}, {"_id": 0})
+    if not p: raise HTTPException(404, "Part not found")
+    rev_doc = rev.model_dump()
+    if not rev_doc.get("created_by"):
+        rev_doc["created_by"] = user.get("name", "")
+    revisions = p.get("revisions", []) + [rev_doc]
+    update = {
+        "revisions": revisions,
+        "current_revision": rev_doc["revision"],
+        "drawing_pdf_b64": rev_doc.get("drawing_pdf_b64") or p.get("drawing_pdf_b64", ""),
+        "step_file_b64": rev_doc.get("step_file_b64") or p.get("step_file_b64", ""),
+        "drawing_filename": rev_doc.get("drawing_filename") or p.get("drawing_filename", ""),
+        "step_filename": rev_doc.get("step_filename") or p.get("step_filename", ""),
+    }
+    await db.parts.update_one({"id": pid}, {"$set": update})
+    await write_audit(user.get("name", ""), "part_revision_added", "part", pid,
+                      {"part_number": p.get("part_number"), "revision": rev_doc["revision"], "reason": rev_doc.get("change_reason")})
+    return {"ok": True, "revision": rev_doc["revision"]}
+
+@api.get("/parts/{pid}/drawing")
+async def download_part_drawing(pid: str, revision: Optional[str] = None, user=Depends(get_current_user)):
+    """Stream the drawing PDF (current revision by default, or a specific historical revision)."""
+    p = await db.parts.find_one({"id": pid}, {"_id": 0})
+    if not p: raise HTTPException(404, "Part not found")
+    if revision:
+        rev = next((r for r in p.get("revisions", []) if r.get("revision") == revision), None)
+        if not rev: raise HTTPException(404, f"Revision {revision} not found")
+        b64 = rev.get("drawing_pdf_b64", "")
+        filename = rev.get("drawing_filename") or f"{p.get('part_number')}_{revision}.pdf"
+    else:
+        b64 = p.get("drawing_pdf_b64", "")
+        filename = p.get("drawing_filename") or f"{p.get('part_number')}.pdf"
+    if not b64: raise HTTPException(404, "No drawing on file for this revision")
+    try:
+        data = base64.b64decode(b64.split(",", 1)[1] if b64.startswith("data:") else b64)
+    except Exception:
+        raise HTTPException(500, "Failed to decode drawing")
+    return Response(content=data, media_type="application/pdf",
+                    headers={"Content-Disposition": f'inline; filename="{filename}"'})
+
+@api.get("/parts/{pid}/step")
+async def download_part_step(pid: str, revision: Optional[str] = None, user=Depends(get_current_user)):
+    """Stream the STEP / CAD file (current revision by default, or a specific historical revision)."""
+    p = await db.parts.find_one({"id": pid}, {"_id": 0})
+    if not p: raise HTTPException(404, "Part not found")
+    if revision:
+        rev = next((r for r in p.get("revisions", []) if r.get("revision") == revision), None)
+        if not rev: raise HTTPException(404, f"Revision {revision} not found")
+        b64 = rev.get("step_file_b64", "")
+        filename = rev.get("step_filename") or f"{p.get('part_number')}_{revision}.step"
+    else:
+        b64 = p.get("step_file_b64", "")
+        filename = p.get("step_filename") or f"{p.get('part_number')}.step"
+    if not b64: raise HTTPException(404, "No STEP/CAD file on file for this revision")
+    try:
+        data = base64.b64decode(b64.split(",", 1)[1] if b64.startswith("data:") else b64)
+    except Exception:
+        raise HTTPException(500, "Failed to decode STEP file")
+    return Response(content=data, media_type="application/step",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 # ---------------- App config ----------------
 app.include_router(api)
