@@ -398,10 +398,18 @@ class StockMovement(BaseModel):
     created_at: str = Field(default_factory=now_iso)
 
 class BOMLine(BaseModel):
-    item_id: str
-    item_name: str
+    # Either reference a legacy inventory item (item_id) OR a Part Master entry (component_part_id).
+    # Going forward, component_part_id is preferred. item_id is kept for back-compat.
+    item_id: Optional[str] = ""
+    item_name: Optional[str] = ""
+    component_part_id: Optional[str] = ""      # Reference to PartMaster
+    component_part_number: Optional[str] = ""
+    component_part_name: Optional[str] = ""
     qty: float
     uom: str = "pcs"
+    scrap_factor_pct: float = 0                # Extra material allowance (5% = 5)
+    sourcing: Optional[str] = ""               # Mirror of Part's sourcing; helps UI
+    notes: Optional[str] = ""
 
 class BOM(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -411,6 +419,13 @@ class BOM(BaseModel):
     description: Optional[str] = ""
     design_code: Optional[str] = ""
     solidworks_url: Optional[str] = ""
+    # Hierarchy support — link to PartMaster
+    parent_part_id: Optional[str] = ""         # The Part this BOM is for
+    parent_part_number: Optional[str] = ""
+    revision: Optional[str] = "Rev A"          # BOM revision label
+    is_default: bool = True                    # Active BOM for this parent_part
+    bom_type: Literal["assembly", "subassembly", "standard_lib"] = "assembly"
+    is_active: bool = True
     lines: List[BOMLine] = []
     created_at: str = Field(default_factory=now_iso)
 
@@ -1016,6 +1031,19 @@ async def scan_bill(payload: BillScanIn, user=Depends(get_current_user)):
 async def create_bom(b: BOM, user=Depends(get_current_user)):
     doc = b.model_dump()
     doc["code"] = await gen_code("BOM", "bom")
+    # Back-fill parent part name + lines from PartMaster references
+    if doc.get("parent_part_id") and not doc.get("parent_part_number"):
+        p = await db.parts.find_one({"id": doc["parent_part_id"]}, {"_id": 0, "part_number": 1, "name": 1})
+        if p:
+            doc["parent_part_number"] = p.get("part_number", "")
+            if not doc.get("product_name"): doc["product_name"] = p.get("name", "")
+    for line in doc.get("lines", []):
+        if line.get("component_part_id") and not line.get("component_part_number"):
+            p = await db.parts.find_one({"id": line["component_part_id"]}, {"_id": 0, "part_number": 1, "name": 1, "sourcing": 1})
+            if p:
+                line["component_part_number"] = p.get("part_number", "")
+                line["component_part_name"] = p.get("name", "")
+                if not line.get("sourcing"): line["sourcing"] = p.get("sourcing", "")
     if not doc.get("design_code"):
         doc["design_code"] = f"DSGN-{datetime.now(timezone.utc).strftime('%y%m')}-{await next_seq('design'):04d}"
     await db.boms.insert_one(doc)
@@ -4143,6 +4171,7 @@ EXPORT_COLLECTIONS = {
     "suppliers": ("suppliers", ["code", "name", "gstin", "phone", "email", "address"]),
     "items": ("items", ["code", "name", "hsn", "rate", "stock", "reorder_level"]),
     "parts": ("parts", ["part_number", "customer_part_number", "name", "customer_name", "material", "sourcing", "current_revision", "cycle_time_minutes", "weight_kg", "is_active"]),
+    "bom": ("bom", ["code", "parent_part_number", "product_name", "bom_type", "revision", "is_active"]),
     "payments-in": ("payments_in", ["code", "date", "party_name", "amount", "payment_type", "status"]),
     "payments-out": ("payments_out", ["code", "date", "party_name", "amount", "payment_type", "status"]),
     "expenses": ("expenses", ["code", "date", "category_name", "party_name", "amount", "paid_amount", "status"]),
@@ -4194,6 +4223,194 @@ async def export_collection(collection: str, format: str, user=Depends(get_curre
     return Response(content=buf.getvalue(),
                     media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     headers={"Content-Disposition": f'attachment; filename="{collection}.xlsx"'})
+
+# ---------------- BOM auto-extraction from uploaded files (Phase M.3b) ----------------
+@api.post("/bom/extract")
+async def bom_extract(file: UploadFile = File(...), user=Depends(get_current_user)):
+    """Extract candidate BOM lines from an uploaded file.
+    Supports: PDF (assembly drawings with parts list), STEP/STP (CAD component tree),
+    XLSX/XLS/CSV (BOM exports from SolidWorks/Solid Edge/any tool).
+    Returns a list of candidates the user can tick to add to a BOM."""
+    name = (file.filename or "").lower()
+    raw = await file.read()
+    candidates = []
+    notes = []
+
+    if name.endswith(".pdf"):
+        try:
+            import pdfplumber
+            buf = io.BytesIO(raw)
+            with pdfplumber.open(buf) as pdf:
+                for page_num, page in enumerate(pdf.pages, 1):
+                    tables = page.extract_tables() or []
+                    for t_idx, table in enumerate(tables):
+                        if not table or len(table) < 2: continue
+                        header = [str(c or "").strip().lower() for c in table[0]]
+                        def col(*aliases):
+                            for a in aliases:
+                                for i, h in enumerate(header):
+                                    if a in h: return i
+                            return -1
+                        col_no = col("item no", "sno", "sl no", "#", "no.")
+                        col_part = col("part no", "part #", "drawing", "part number")
+                        col_desc = col("description", "item name", "part name", "name")
+                        col_qty = col("qty", "quantity", "qty.")
+                        col_mat = col("material", "matl")
+                        if col_desc < 0 and col_part < 0:
+                            continue
+                        for row in table[1:]:
+                            if not row or all((c or "").strip() == "" for c in row): continue
+                            cells = [str(c or "").strip() for c in row]
+                            def get(i): return cells[i] if 0 <= i < len(cells) else ""
+                            qty_raw = get(col_qty).replace(",", "")
+                            try: qty_val = float(qty_raw) if qty_raw else 1.0
+                            except: qty_val = 1.0
+                            cand = {
+                                "source": f"PDF page {page_num} - table {t_idx + 1}",
+                                "part_number": get(col_part),
+                                "name": get(col_desc),
+                                "qty": qty_val,
+                                "uom": "Nos",
+                                "material": get(col_mat),
+                                "sourcing_guess": "manufactured",
+                            }
+                            if cand["name"] or cand["part_number"]:
+                                candidates.append(cand)
+            if not candidates:
+                notes.append("No BOM table detected. The PDF may be image-based (scanned) - try uploading the original CAD/Excel BOM, or use AI vision (Phase I.2) once available.")
+        except Exception as e:
+            raise HTTPException(500, f"PDF parse failed: {e}")
+
+    elif name.endswith(".step") or name.endswith(".stp"):
+        try:
+            text = raw.decode("utf-8", errors="ignore")
+            import re as _re
+            seen = set()
+            for m in _re.finditer(r"PRODUCT\s*\(\s*'([^']+)'\s*,\s*'([^']*)'", text):
+                pname = m.group(1).strip()
+                pdesc = m.group(2).strip()
+                key = (pname, pdesc)
+                if key in seen: continue
+                seen.add(key)
+                candidates.append({
+                    "source": "STEP file - PRODUCT entry",
+                    "part_number": pname,
+                    "name": pdesc or pname,
+                    "qty": 1,
+                    "uom": "Nos",
+                    "material": "",
+                    "sourcing_guess": "manufactured",
+                })
+            notes.append(f"STEP contained {len(candidates)} unique PRODUCT entries. Note: STEP files don't carry quantities - all defaulted to 1.")
+        except Exception as e:
+            raise HTTPException(500, f"STEP parse failed: {e}")
+
+    elif name.endswith(".xlsx") or name.endswith(".xls") or name.endswith(".csv"):
+        try:
+            import pandas as pd
+            buf = io.BytesIO(raw)
+            if name.endswith(".csv"):
+                df = pd.read_csv(buf)
+            else:
+                df = pd.read_excel(buf)
+            cols = [str(c).strip().lower() for c in df.columns]
+            def col(*aliases):
+                for a in aliases:
+                    for i, c in enumerate(cols):
+                        if a in c: return df.columns[i]
+                return None
+            col_part = col("part no", "part #", "part number", "drawing")
+            col_desc = col("description", "part name", "item name", "name")
+            col_qty = col("qty", "quantity")
+            col_mat = col("material", "matl")
+            col_unit = col("uom", "unit")
+            for _, row in df.iterrows():
+                def get(c): return str(row.get(c, "")).strip() if c else ""
+                qty_raw = get(col_qty).replace(",", "")
+                try: qty_val = float(qty_raw) if qty_raw else 1.0
+                except: qty_val = 1.0
+                cand = {
+                    "source": "Excel/CSV row",
+                    "part_number": get(col_part),
+                    "name": get(col_desc),
+                    "qty": qty_val,
+                    "uom": get(col_unit) or "Nos",
+                    "material": get(col_mat),
+                    "sourcing_guess": "manufactured",
+                }
+                if cand["name"] or cand["part_number"]:
+                    candidates.append(cand)
+            notes.append(f"Detected columns mapped: part={col_part}, desc={col_desc}, qty={col_qty}, material={col_mat}")
+        except Exception as e:
+            raise HTTPException(500, f"Excel/CSV parse failed: {e}")
+
+    elif any(name.endswith(ext) for ext in (".sldprt", ".sldasm", ".par", ".asm", ".ipt", ".prt")):
+        return {
+            "candidates": [],
+            "notes": [
+                f"Proprietary CAD format ({name.split('.')[-1].upper()}) - requires the source software to read.",
+                "Workaround: open the file in SolidWorks/Solid Edge - File menu - 'Save BOM as Excel' - upload that Excel here.",
+                "Direct CAD-API integration is on the Phase E roadmap (SolidWorks PDM / Solid Edge connectors).",
+            ],
+        }
+
+    else:
+        raise HTTPException(400, f"Unsupported file type: {name}. Accepted: PDF, STEP/STP, XLSX/XLS/CSV.")
+
+    return {"candidates": candidates, "notes": notes, "count": len(candidates)}
+
+# ---------------- BOM Hierarchy explosion (Phase M.3) ----------------
+@api.get("/bom/by-part/{part_id}")
+async def bom_by_part(part_id: str, user=Depends(get_current_user)):
+    """Find the active BOM for a given part."""
+    bom = await db.bom.find_one({"parent_part_id": part_id, "is_active": True, "is_default": True}, {"_id": 0})
+    if not bom:
+        bom = await db.bom.find_one({"parent_part_id": part_id, "is_active": True}, {"_id": 0})
+    if not bom:
+        raise HTTPException(404, "No BOM found for this part")
+    return bom
+
+@api.get("/bom/{bid}/explode")
+async def bom_explode(bid: str, levels: int = 3, user=Depends(get_current_user)):
+    """Recursively flatten a BOM down to `levels` deep.
+    Returns a tree of {part, qty, level, sourcing, children: [...]}.
+    Useful for full material requirements planning."""
+    root = await db.bom.find_one({"id": bid}, {"_id": 0})
+    if not root:
+        raise HTTPException(404, "BOM not found")
+
+    async def expand(bom: Dict[str, Any], level: int, qty_multiplier: float) -> List[Dict[str, Any]]:
+        out = []
+        for line in bom.get("lines", []):
+            effective_qty = float(line.get("qty", 0) or 0) * qty_multiplier * (1 + float(line.get("scrap_factor_pct", 0) or 0) / 100)
+            entry = {
+                "level": level,
+                "line_seq": bom.get("lines", []).index(line),
+                "part_id": line.get("component_part_id") or line.get("item_id"),
+                "part_number": line.get("component_part_number") or line.get("item_name"),
+                "part_name": line.get("component_part_name") or line.get("item_name"),
+                "qty": effective_qty,
+                "uom": line.get("uom", "pcs"),
+                "scrap_factor_pct": line.get("scrap_factor_pct", 0),
+                "sourcing": line.get("sourcing", ""),
+                "children": [],
+            }
+            # If this component itself has a BOM and we haven't exhausted levels, recurse
+            if level < levels and line.get("component_part_id"):
+                sub_bom = await db.bom.find_one({"parent_part_id": line["component_part_id"], "is_active": True, "is_default": True}, {"_id": 0})
+                if not sub_bom:
+                    sub_bom = await db.bom.find_one({"parent_part_id": line["component_part_id"], "is_active": True}, {"_id": 0})
+                if sub_bom:
+                    entry["children"] = await expand(sub_bom, level + 1, effective_qty)
+            out.append(entry)
+        return out
+
+    tree = await expand(root, 1, 1.0)
+    return {
+        "bom": {"id": root["id"], "code": root.get("code"), "parent_part_number": root.get("parent_part_number"), "product_name": root.get("product_name"), "revision": root.get("revision")},
+        "levels": levels,
+        "lines": tree,
+    }
 
 # ---------------- Part Master (Phase M.1) ----------------
 @api.post("/parts")
