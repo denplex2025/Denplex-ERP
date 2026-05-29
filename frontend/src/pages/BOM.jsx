@@ -140,29 +140,44 @@ export default function BOMPage() {
     } catch (e) { toast.error(e?.response?.data?.detail || "Extract failed"); }
     finally { setExtractBusy(false); }
   };
-  const addCheckedToBom = () => {
+  const addCheckedToBom = async () => {
     const toAdd = extractCandidates.filter((_, i) => extractChecked[i]);
     if (!toAdd.length) { toast.error("Tick at least one line"); return; }
-    // Append as raw lines — user can then map each to a Part Master entry
-    setForm(p => ({
-      ...p,
-      lines: [
-        ...(p.lines || []),
-        ...toAdd.map(c => ({
-          component_part_id: "",
-          component_part_number: c.part_number || "",
+    try {
+      // 1. Bulk-create Part Master entries for ticked candidates (matching existing where possible)
+      const payload = toAdd.map(c => ({
+        part_number: c.part_number || "",
+        name: c.name || "",
+        material: c.material || "",
+        sourcing_guess: c.sourcing_guess || "manufactured",
+      }));
+      const r = await api.post("/parts/bulk-from-candidates", payload);
+      const mapped = r.data?.items || [];
+
+      // 2. Build BOM lines referencing those Parts
+      const newLines = toAdd.map((c, i) => {
+        const m = mapped[i] || {};
+        return {
+          component_part_id: m.part_id || "",
+          component_part_number: m.part_number || c.part_number || "",
           component_part_name: c.name || "",
           qty: c.qty || 1,
           uom: c.uom || "Nos",
           scrap_factor_pct: 0,
           sourcing: c.sourcing_guess || "",
           notes: c.source || "",
-        }))
-      ]
-    }));
-    setExtractOpen(false);
-    setExtractCandidates([]); setExtractChecked({});
-    toast.success(`Added ${toAdd.length} lines - map each to a Part Master entry`);
+        };
+      });
+      setForm(p => ({ ...p, lines: [...(p.lines || []), ...newLines] }));
+
+      // 3. Refresh Parts dropdown so new entries are selectable
+      const pp = await api.get("/parts");
+      setParts(pp.data || []);
+
+      setExtractOpen(false);
+      setExtractCandidates([]); setExtractChecked({});
+      toast.success(`Added ${toAdd.length} BOM lines · created ${r.data?.created || 0} new parts · matched ${r.data?.matched || 0} existing`);
+    } catch (e) { toast.error(e?.response?.data?.detail || "Failed to add"); }
   };
   const toggleAllExtract = (val) => {
     const next = {}; extractCandidates.forEach((_, i) => next[i] = val);
