@@ -4436,6 +4436,89 @@ async def create_part(p: PartMaster, user=Depends(get_current_user)):
     await write_audit(user.get("name", ""), "part_created", "part", doc["id"], {"part_number": doc["part_number"]})
     return serialize(doc)
 
+class PartCandidate(BaseModel):
+    """Lightweight candidate row from BOM extraction — used by bulk-from-candidates."""
+    part_number: Optional[str] = ""
+    name: Optional[str] = ""
+    description: Optional[str] = ""
+    material: Optional[str] = ""
+    sourcing_guess: Optional[str] = "manufactured"
+
+@api.post("/parts/bulk-from-candidates")
+async def bulk_parts_from_candidates(items: List[PartCandidate], user=Depends(get_current_user)):
+    """Given a list of extracted candidates (from BOM file extract), match each to an existing Part
+    or create a new one. Returns a list mirroring input order with the resolved part_id and status."""
+    result = []
+    created = 0
+    matched = 0
+    skipped = 0
+    for item in items:
+        pn = (item.part_number or "").strip()
+        nm = (item.name or item.description or "").strip()
+        # Derive a part_number if missing — use sanitized name; fall back to AUTO-<id>
+        if not pn:
+            if nm:
+                pn = "EXT-" + "".join(c if c.isalnum() else "-" for c in nm.upper())[:40].strip("-")
+            else:
+                pn = "AUTO-" + new_id()[:8].upper()
+        if not pn:
+            skipped += 1
+            result.append({"part_id": "", "part_number": "", "status": "skipped", "reason": "empty"})
+            continue
+        # Check for existing (case-insensitive match on part_number)
+        existing = await db.parts.find_one(
+            {"part_number": {"$regex": f"^{re.escape(pn)}$", "$options": "i"}},
+            {"_id": 0, "id": 1, "part_number": 1}
+        )
+        if existing:
+            result.append({
+                "part_id": existing["id"],
+                "part_number": existing["part_number"],
+                "status": "matched",
+            })
+            matched += 1
+            continue
+        # Create
+        doc = {
+            "id": new_id(),
+            "part_number": pn,
+            "customer_part_number": "",
+            "name": nm or pn,
+            "description": "",
+            "customer_id": "",
+            "customer_name": "",
+            "material": (item.material or ""),
+            "material_grade": "",
+            "process": [],
+            "cycle_time_minutes": 0,
+            "weight_kg": 0,
+            "raw_material_size": "",
+            "raw_material_qty_per_part": 0,
+            "inspection_plan": "",
+            "critical_dimensions": [],
+            "tools_required": [],
+            "current_revision": "Rev A",
+            "revisions": [],
+            "drawing_pdf_b64": "",
+            "step_file_b64": "",
+            "drawing_filename": "",
+            "step_filename": "",
+            "sourcing": item.sourcing_guess or "manufactured",
+            "is_active": True,
+            "notes": f"Auto-created from BOM extraction at {now_iso()}",
+            "created_at": now_iso(),
+        }
+        await db.parts.insert_one(doc)
+        result.append({
+            "part_id": doc["id"],
+            "part_number": pn,
+            "status": "created",
+        })
+        created += 1
+    await write_audit(user.get("name", ""), "parts_bulk_from_candidates", "parts", "",
+                      {"created": created, "matched": matched, "skipped": skipped, "total": len(items)})
+    return {"items": result, "created": created, "matched": matched, "skipped": skipped}
+
 @api.get("/parts")
 async def list_parts(customer_id: Optional[str] = None, search: Optional[str] = None, user=Depends(get_current_user)):
     q = {}
