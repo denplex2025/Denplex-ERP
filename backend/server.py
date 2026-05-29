@@ -4363,9 +4363,9 @@ async def bom_extract(file: UploadFile = File(...), user=Depends(get_current_use
 @api.get("/bom/by-part/{part_id}")
 async def bom_by_part(part_id: str, user=Depends(get_current_user)):
     """Find the active BOM for a given part."""
-    bom = await db.bom.find_one({"parent_part_id": part_id, "is_active": True, "is_default": True}, {"_id": 0})
+    bom = await db.boms.find_one({"parent_part_id": part_id, "is_active": True, "is_default": True}, {"_id": 0})
     if not bom:
-        bom = await db.bom.find_one({"parent_part_id": part_id, "is_active": True}, {"_id": 0})
+        bom = await db.boms.find_one({"parent_part_id": part_id, "is_active": True}, {"_id": 0})
     if not bom:
         raise HTTPException(404, "No BOM found for this part")
     return bom
@@ -4375,7 +4375,7 @@ async def bom_explode(bid: str, levels: int = 3, user=Depends(get_current_user))
     """Recursively flatten a BOM down to `levels` deep.
     Returns a tree of {part, qty, level, sourcing, children: [...]}.
     Useful for full material requirements planning."""
-    root = await db.bom.find_one({"id": bid}, {"_id": 0})
+    root = await db.boms.find_one({"id": bid}, {"_id": 0})
     if not root:
         raise HTTPException(404, "BOM not found")
 
@@ -4397,9 +4397,9 @@ async def bom_explode(bid: str, levels: int = 3, user=Depends(get_current_user))
             }
             # If this component itself has a BOM and we haven't exhausted levels, recurse
             if level < levels and line.get("component_part_id"):
-                sub_bom = await db.bom.find_one({"parent_part_id": line["component_part_id"], "is_active": True, "is_default": True}, {"_id": 0})
+                sub_bom = await db.boms.find_one({"parent_part_id": line["component_part_id"], "is_active": True, "is_default": True}, {"_id": 0})
                 if not sub_bom:
-                    sub_bom = await db.bom.find_one({"parent_part_id": line["component_part_id"], "is_active": True}, {"_id": 0})
+                    sub_bom = await db.boms.find_one({"parent_part_id": line["component_part_id"], "is_active": True}, {"_id": 0})
                 if sub_bom:
                     entry["children"] = await expand(sub_bom, level + 1, effective_qty)
             out.append(entry)
