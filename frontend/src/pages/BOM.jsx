@@ -10,6 +10,7 @@ import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { PageHeader, Card, Th, Td, Empty, fmtDate } from "@/components/erp/Primitives";
 import ExportMenu from "@/components/erp/ExportMenu";
+import Spinner from "@/components/erp/Spinner";
 import { Plus, Edit, Trash2, X, Layers, ChevronRight, ChevronDown, Cog, Upload, Check } from "lucide-react";
 import { toast } from "sonner";
 
@@ -35,6 +36,8 @@ export default function BOMPage() {
   const [form, setForm] = useState({ bom_type: "assembly", revision: "Rev A", is_default: true, is_active: true, lines: [] });
   const [explodeOpen, setExplodeOpen] = useState(false);
   const [explodeData, setExplodeData] = useState(null);
+  const [explodeLoading, setExplodeLoading] = useState(false);
+  const [explodeForRowId, setExplodeForRowId] = useState(null);
   // BOM extraction (M.3b) — upload a drawing/STEP/Excel and pick which candidates to add
   const [extractOpen, setExtractOpen] = useState(false);
   const [extractCandidates, setExtractCandidates] = useState([]);
@@ -185,11 +188,20 @@ export default function BOMPage() {
   };
 
   const explode = async (r) => {
+    setExplodeData(null);
+    setExplodeForRowId(r.id);
+    setExplodeOpen(true);
+    setExplodeLoading(true);
     try {
       const x = await api.get(`/bom/${r.id}/explode?levels=4`);
       setExplodeData(x.data);
-      setExplodeOpen(true);
-    } catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Failed to explode BOM");
+      setExplodeOpen(false);
+    } finally {
+      setExplodeLoading(false);
+      setExplodeForRowId(null);
+    }
   };
 
   return (
@@ -224,7 +236,9 @@ export default function BOMPage() {
                   <Td>{fmtDate(r.created_at)}</Td>
                   <Td className="text-right">
                     <div className="inline-flex gap-0.5">
-                      <Button size="icon" variant="ghost" className="h-7 w-7" title="Explode (recursive view)" onClick={() => explode(r)}><Layers className="h-3.5 w-3.5 text-blue-600" /></Button>
+                      <Button size="icon" variant="ghost" className="h-7 w-7" title="Explode (recursive view)" onClick={() => explode(r)} disabled={explodeLoading && explodeForRowId === r.id}>
+                        {explodeLoading && explodeForRowId === r.id ? <Spinner size="sm" /> : <Layers className="h-3.5 w-3.5 text-blue-600" />}
+                      </Button>
                       <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => openEdit(r)}><Edit className="h-3.5 w-3.5" /></Button>
                       <Button size="icon" variant="ghost" className="h-7 w-7 text-red-600" onClick={() => del(r)}><Trash2 className="h-3.5 w-3.5" /></Button>
                     </div>
@@ -310,7 +324,7 @@ export default function BOMPage() {
 
           <div className="flex items-center gap-2 mb-3">
             <Input type="file" accept=".pdf,.step,.stp,.xlsx,.xls,.csv" onChange={e => onExtractFile(e.target.files?.[0])} className="rounded-sm text-sm" />
-            {extractBusy && <span className="text-xs text-slate-500">Parsing...</span>}
+            {extractBusy && <Spinner size="sm" label="Parsing file..." />}
           </div>
 
           {extractNotes.length > 0 && (
@@ -359,12 +373,21 @@ export default function BOMPage() {
       <Dialog open={explodeOpen} onOpenChange={setExplodeOpen}>
         <DialogContent className="rounded-sm max-w-3xl max-h-[85vh] overflow-y-auto">
           <DialogHeader><DialogTitle className="font-display flex items-center gap-2"><Layers className="h-4 w-4 text-blue-600" /> BOM Explosion {explodeData?.bom?.code ? `· ${explodeData.bom.code}` : ""}</DialogTitle></DialogHeader>
-          {explodeData ? (
+          {explodeLoading ? (
+            <div className="py-12 flex flex-col items-center justify-center gap-3">
+              <Spinner size="xl" label="Computing BOM explosion..." />
+              <div className="text-xs text-slate-500">Recursively expanding sub-assemblies down to 4 levels.</div>
+            </div>
+          ) : explodeData ? (
             <>
               <div className="text-sm text-slate-600 mb-3">Recursive view down to {explodeData.levels} levels. Quantities include scrap factor.</div>
-              <ExplodeTree lines={explodeData.lines} />
+              {explodeData.lines?.length === 0 ? (
+                <Empty label="No lines found in this BOM." />
+              ) : (
+                <ExplodeTree lines={explodeData.lines} />
+              )}
             </>
-          ) : <Empty label="Loading…" />}
+          ) : <Empty label="Nothing to show." />}
         </DialogContent>
       </Dialog>
     </div>
