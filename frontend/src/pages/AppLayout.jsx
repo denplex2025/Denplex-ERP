@@ -9,6 +9,7 @@ import {
   ArrowDownToLine, ArrowUpFromLine, Banknote, Undo2, Cog
 } from "lucide-react";
 import { useState } from "react";
+import GlobalSpinner from "@/components/erp/GlobalSpinner";
 
 // Grouped sidebar nav. To add a new department head, append a new group object below.
 const NAV_GROUPS = [
@@ -173,6 +174,7 @@ export default function AppLayout() {
           <Outlet />
         </div>
       </main>
+      <GlobalSpinner />
       <Toaster position="top-right" richColors />
     </div>
   );
