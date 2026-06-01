@@ -320,7 +320,9 @@ class Supplier(BaseModel):
 
 class PartRevision(BaseModel):
     """A single revision entry in a Part's history."""
-    revision: str                              # e.g. "Rev A", "01", "B2"
+    revision: str                              # Internal revision (e.g. "Rev A", "01", "B2")
+    customer_revision: Optional[str] = ""      # Customer's revision label for the same change (e.g. "ECN 1234 / Rev D")
+    customer_change_ref: Optional[str] = ""    # Customer's ECN/PCO/change document reference
     effective_date: str = Field(default_factory=now_iso)
     change_reason: Optional[str] = ""          # Why this rev was made (customer change, internal optimization, etc.)
     drawing_pdf_b64: Optional[str] = ""        # Snapshot of drawing at this rev (base64)
@@ -411,6 +413,19 @@ class BOMLine(BaseModel):
     sourcing: Optional[str] = ""               # Mirror of Part's sourcing; helps UI
     notes: Optional[str] = ""
 
+class BOMRevision(BaseModel):
+    """A single revision entry in a BOM's history. Snapshots the lines at the time."""
+    revision: str                              # e.g. "Rev A", "01", "B"
+    effective_date: str = Field(default_factory=now_iso)
+    change_reason: Optional[str] = ""
+    lines_snapshot: List[Dict[str, Any]] = []  # Frozen copy of BOM lines at this revision
+    drawing_pdf_b64: Optional[str] = ""        # Optional assembly drawing for this rev
+    drawing_filename: Optional[str] = ""
+    customer_revision: Optional[str] = ""      # Customer's matching rev label, if any
+    customer_change_ref: Optional[str] = ""
+    created_by: Optional[str] = ""
+    notes: Optional[str] = ""
+
 class BOM(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: str = Field(default_factory=new_id)
@@ -419,13 +434,15 @@ class BOM(BaseModel):
     description: Optional[str] = ""
     design_code: Optional[str] = ""
     solidworks_url: Optional[str] = ""
-    # Hierarchy support — link to PartMaster
-    parent_part_id: Optional[str] = ""         # The Part this BOM is for
+    parent_part_id: Optional[str] = ""
     parent_part_number: Optional[str] = ""
-    revision: Optional[str] = "Rev A"          # BOM revision label
-    is_default: bool = True                    # Active BOM for this parent_part
+    revision: Optional[str] = "Rev A"          # Current/active BOM revision label
+    revision_history: List[BOMRevision] = []   # Full audit trail
+    is_default: bool = True
     bom_type: Literal["assembly", "subassembly", "standard_lib"] = "assembly"
     is_active: bool = True
+    drawing_pdf_b64: Optional[str] = ""        # Current assembly drawing
+    drawing_filename: Optional[str] = ""
     lines: List[BOMLine] = []
     created_at: str = Field(default_factory=now_iso)
 
@@ -4223,6 +4240,53 @@ async def export_collection(collection: str, format: str, user=Depends(get_curre
     return Response(content=buf.getvalue(),
                     media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     headers={"Content-Disposition": f'attachment; filename="{collection}.xlsx"'})
+
+# ---------------- BOM Revisions + Drawings (Phase M.2) ----------------
+@api.post("/bom/{bid}/revisions")
+async def add_bom_revision(bid: str, rev: BOMRevision, user=Depends(get_current_user)):
+    """Promote a new BOM revision. Snapshots the current lines into the history,
+    bumps the active revision label, optionally updates the assembly drawing."""
+    bom = await db.boms.find_one({"id": bid}, {"_id": 0})
+    if not bom: raise HTTPException(404, "BOM not found")
+    rev_doc = rev.model_dump()
+    if not rev_doc.get("created_by"):
+        rev_doc["created_by"] = user.get("name", "")
+    # If caller didn't provide a lines snapshot, capture current BOM lines
+    if not rev_doc.get("lines_snapshot"):
+        rev_doc["lines_snapshot"] = list(bom.get("lines", []))
+    history = bom.get("revision_history", []) + [rev_doc]
+    update = {
+        "revision_history": history,
+        "revision": rev_doc["revision"],
+    }
+    if rev_doc.get("drawing_pdf_b64"):
+        update["drawing_pdf_b64"] = rev_doc["drawing_pdf_b64"]
+        update["drawing_filename"] = rev_doc.get("drawing_filename", "")
+    await db.boms.update_one({"id": bid}, {"$set": update})
+    await write_audit(user.get("name", ""), "bom_revision_added", "bom", bid,
+                      {"code": bom.get("code"), "revision": rev_doc["revision"], "reason": rev_doc.get("change_reason")})
+    return {"ok": True, "revision": rev_doc["revision"]}
+
+@api.get("/bom/{bid}/drawing")
+async def download_bom_drawing(bid: str, revision: Optional[str] = None, user=Depends(get_current_user)):
+    """Stream the BOM's assembly drawing PDF (current or a specific historical revision)."""
+    bom = await db.boms.find_one({"id": bid}, {"_id": 0})
+    if not bom: raise HTTPException(404, "BOM not found")
+    if revision:
+        rev = next((r for r in bom.get("revision_history", []) if r.get("revision") == revision), None)
+        if not rev: raise HTTPException(404, f"Revision {revision} not found")
+        b64 = rev.get("drawing_pdf_b64", "")
+        filename = rev.get("drawing_filename") or f"{bom.get('code')}_{revision}.pdf"
+    else:
+        b64 = bom.get("drawing_pdf_b64", "")
+        filename = bom.get("drawing_filename") or f"{bom.get('code')}.pdf"
+    if not b64: raise HTTPException(404, "No drawing on file for this BOM/revision")
+    try:
+        data = base64.b64decode(b64.split(",", 1)[1] if b64.startswith("data:") else b64)
+    except Exception:
+        raise HTTPException(500, "Failed to decode drawing")
+    return Response(content=data, media_type="application/pdf",
+                    headers={"Content-Disposition": f'inline; filename="{filename}"'})
 
 # ---------------- BOM auto-extraction from uploaded files (Phase M.3b) ----------------
 @api.post("/bom/extract")
