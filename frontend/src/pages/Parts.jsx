@@ -32,7 +32,7 @@ export default function Parts() {
   const [editingId, setEditingId] = useState(null);
   const [revOpen, setRevOpen] = useState(false);
   const [revPart, setRevPart] = useState(null);
-  const [newRev, setNewRev] = useState({ revision: "", change_reason: "" });
+  const [newRev, setNewRev] = useState({ revision: "", change_reason: "", customer_revision: "", customer_change_ref: "" });
   const [form, setForm] = useState({ process: [], tools_required: [], is_active: true, sourcing: "manufactured" });
 
   const load = async () => {
@@ -87,7 +87,7 @@ export default function Parts() {
     } catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
   };
 
-  const openRevDialog = (p) => { setRevPart(p); setNewRev({ revision: "", change_reason: "" }); setRevOpen(true); };
+  const openRevDialog = (p) => { setRevPart(p); setNewRev({ revision: "", change_reason: "", customer_revision: "", customer_change_ref: "" }); setRevOpen(true); };
   const saveRevision = async () => {
     if (!newRev.revision) { toast.error("Revision label required"); return; }
     try {
@@ -295,9 +295,13 @@ export default function Parts() {
                     <Card key={i} className="p-3">
                       <div className="flex items-start justify-between gap-2">
                         <div>
-                          <div className="font-mono-tech font-semibold">{r.revision}</div>
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono-tech font-semibold">{r.revision}</span>
+                            {r.customer_revision && <span className="text-xs px-1.5 py-0.5 rounded-sm border border-blue-600 text-blue-700 font-mono-tech">Customer: {r.customer_revision}</span>}
+                          </div>
                           <div className="text-xs text-slate-500">{fmtDate(r.effective_date)} · {r.created_by || "—"}</div>
                           {r.change_reason && <div className="text-sm mt-1">{r.change_reason}</div>}
+                          {r.customer_change_ref && <div className="text-xs text-slate-500 mt-0.5">Customer ref: <span className="font-mono-tech">{r.customer_change_ref}</span></div>}
                         </div>
                         <div className="flex gap-1">
                           {r.drawing_pdf_b64 && <Button size="sm" variant="outline" className="rounded-sm h-7 px-2 text-xs" onClick={() => dlDrawing(revPart.id, revPart.part_number, r.revision)}><FileText className="h-3 w-3 mr-1" /> PDF</Button>}
@@ -311,8 +315,10 @@ export default function Parts() {
 
               <div className="text-xs uppercase tracking-wider text-slate-600 font-semibold border-b border-slate-200 pb-1 mb-2 mt-4">Promote New Revision</div>
               <div className="grid grid-cols-2 gap-3">
-                <Field label="New Revision Label"><Input value={newRev.revision || ""} onChange={e => setNewRev(p => ({ ...p, revision: e.target.value }))} className="rounded-sm" placeholder="Rev B" /></Field>
+                <Field label="Our Revision Label *"><Input value={newRev.revision || ""} onChange={e => setNewRev(p => ({ ...p, revision: e.target.value }))} className="rounded-sm" placeholder="Rev B" /></Field>
                 <Field label="Change Reason"><Input value={newRev.change_reason || ""} onChange={e => setNewRev(p => ({ ...p, change_reason: e.target.value }))} className="rounded-sm" placeholder="Customer revised dim X" /></Field>
+                <Field label="Customer's Revision (if any)"><Input value={newRev.customer_revision || ""} onChange={e => setNewRev(p => ({ ...p, customer_revision: e.target.value }))} className="rounded-sm" placeholder="Astral Rev 03 / Customer's label" /></Field>
+                <Field label="Customer Change Ref"><Input value={newRev.customer_change_ref || ""} onChange={e => setNewRev(p => ({ ...p, customer_change_ref: e.target.value }))} className="rounded-sm" placeholder="ECN 1234 / PCO #56" /></Field>
               </div>
               <div className="grid grid-cols-2 gap-3 mt-3">
                 <Field label="New Drawing PDF (optional)">
