@@ -11,7 +11,7 @@ import { Badge } from "@/components/ui/badge";
 import { PageHeader, Card, Th, Td, Empty, fmtDate } from "@/components/erp/Primitives";
 import ExportMenu from "@/components/erp/ExportMenu";
 import Spinner from "@/components/erp/Spinner";
-import { Plus, Edit, Trash2, X, Layers, ChevronRight, ChevronDown, Cog, Upload, Check } from "lucide-react";
+import { Plus, Edit, Trash2, X, Layers, ChevronRight, ChevronDown, Cog, Upload, Check, History, FileText, Download } from "lucide-react";
 import { toast } from "sonner";
 
 const BOM_TYPES = [
@@ -38,6 +38,10 @@ export default function BOMPage() {
   const [explodeData, setExplodeData] = useState(null);
   const [explodeLoading, setExplodeLoading] = useState(false);
   const [explodeForRowId, setExplodeForRowId] = useState(null);
+  // Revision dialog state (M.2)
+  const [revOpen, setRevOpen] = useState(false);
+  const [revBom, setRevBom] = useState(null);
+  const [newRev, setNewRev] = useState({ revision: "", change_reason: "", customer_revision: "", customer_change_ref: "" });
   // BOM extraction (M.3b) — upload a drawing/STEP/Excel and pick which candidates to add
   const [extractOpen, setExtractOpen] = useState(false);
   const [extractCandidates, setExtractCandidates] = useState([]);
@@ -72,6 +76,12 @@ export default function BOMPage() {
     setForm({ ...r, lines: r.lines || [] });
     setOpen(true);
   };
+  const fileToB64 = (file) => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result.split(",")[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
   const setF = (k, v) => setForm(p => ({ ...p, [k]: v }));
   const setLine = (i, k, v) => setForm(p => { const ls = [...p.lines]; ls[i] = { ...ls[i], [k]: v }; return { ...p, lines: ls }; });
   const setLinePart = (i, partId) => {
@@ -187,6 +197,30 @@ export default function BOMPage() {
     setExtractChecked(next);
   };
 
+  const openRevDialog = (bom) => {
+    setRevBom(bom);
+    setNewRev({ revision: "", change_reason: "", customer_revision: "", customer_change_ref: "" });
+    setRevOpen(true);
+  };
+  const saveBomRevision = async () => {
+    if (!newRev.revision) { toast.error("Revision label required"); return; }
+    try {
+      await api.post(`/bom/${revBom.id}/revisions`, newRev);
+      toast.success(`Promoted ${newRev.revision}`);
+      setRevOpen(false); setRevBom(null);
+      load();
+    } catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
+  };
+  const dlBomDrawing = async (bid, code, revision = null) => {
+    try {
+      const url = revision ? `/bom/${bid}/drawing?revision=${encodeURIComponent(revision)}` : `/bom/${bid}/drawing`;
+      const r = await api.get(url, { responseType: "blob" });
+      const a = document.createElement("a"); a.href = URL.createObjectURL(r.data);
+      a.download = `${code}${revision ? "_" + revision : ""}.pdf`;
+      document.body.appendChild(a); a.click(); a.remove();
+    } catch (e) { toast.error("No drawing on file"); }
+  };
+
   const explode = async (r) => {
     setExplodeData(null);
     setExplodeForRowId(r.id);
@@ -239,6 +273,8 @@ export default function BOMPage() {
                       <Button size="icon" variant="ghost" className="h-7 w-7" title="Explode (recursive view)" onClick={() => explode(r)} disabled={explodeLoading && explodeForRowId === r.id}>
                         {explodeLoading && explodeForRowId === r.id ? <Spinner size="sm" /> : <Layers className="h-3.5 w-3.5 text-blue-600" />}
                       </Button>
+                      <Button size="icon" variant="ghost" className="h-7 w-7" title="Revisions" onClick={() => openRevDialog(r)}><History className="h-3.5 w-3.5 text-slate-600" /></Button>
+                      {r.drawing_pdf_b64 && <Button size="icon" variant="ghost" className="h-7 w-7" title="Assembly drawing" onClick={() => dlBomDrawing(r.id, r.code)}><FileText className="h-3.5 w-3.5 text-red-600" /></Button>}
                       <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => openEdit(r)}><Edit className="h-3.5 w-3.5" /></Button>
                       <Button size="icon" variant="ghost" className="h-7 w-7 text-red-600" onClick={() => del(r)}><Trash2 className="h-3.5 w-3.5" /></Button>
                     </div>
@@ -309,6 +345,60 @@ export default function BOMPage() {
             <Button variant="outline" className="rounded-sm" onClick={() => setOpen(false)}>Cancel</Button>
             <Button onClick={save} className="rounded-sm bg-red-600 hover:bg-red-700">{editing ? "Update" : "Create"} BOM</Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* BOM Revisions dialog (M.2) */}
+      <Dialog open={revOpen} onOpenChange={setRevOpen}>
+        <DialogContent className="rounded-sm max-w-2xl max-h-[85vh] overflow-y-auto">
+          <DialogHeader><DialogTitle className="font-display flex items-center gap-2"><History className="h-4 w-4 text-slate-600" /> Revisions {revBom ? `· ${revBom.code}` : ""}</DialogTitle></DialogHeader>
+          {revBom && (
+            <>
+              <div className="text-xs uppercase tracking-wider text-slate-600 font-semibold border-b border-slate-200 pb-1 mb-2">History</div>
+              {revBom.revision_history?.length ? (
+                <div className="space-y-2 mb-4">
+                  {revBom.revision_history.slice().reverse().map((r, i) => (
+                    <Card key={i} className="p-3">
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono-tech font-semibold">{r.revision}</span>
+                            {r.customer_revision && <span className="text-xs px-1.5 py-0.5 rounded-sm border border-blue-600 text-blue-700 font-mono-tech">Customer: {r.customer_revision}</span>}
+                          </div>
+                          <div className="text-xs text-slate-500">{fmtDate(r.effective_date)} · {r.created_by || "—"}</div>
+                          {r.change_reason && <div className="text-sm mt-1">{r.change_reason}</div>}
+                          {r.customer_change_ref && <div className="text-xs text-slate-500 mt-0.5">Customer ref: <span className="font-mono-tech">{r.customer_change_ref}</span></div>}
+                          <div className="text-xs text-slate-500 mt-0.5">{r.lines_snapshot?.length || 0} lines snapshotted</div>
+                        </div>
+                        <div className="flex gap-1">
+                          {r.drawing_pdf_b64 && <Button size="sm" variant="outline" className="rounded-sm h-7 px-2 text-xs" onClick={() => dlBomDrawing(revBom.id, revBom.code, r.revision)}><Download className="h-3 w-3 mr-1" /> PDF</Button>}
+                        </div>
+                      </div>
+                    </Card>
+                  ))}
+                </div>
+              ) : <Empty label="No revisions yet." />}
+
+              <div className="text-xs uppercase tracking-wider text-slate-600 font-semibold border-b border-slate-200 pb-1 mb-2 mt-4">Promote New Revision</div>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="Our Revision Label *"><Input value={newRev.revision || ""} onChange={e => setNewRev(p => ({ ...p, revision: e.target.value }))} className="rounded-sm" placeholder="Rev B" /></Field>
+                <Field label="Change Reason"><Input value={newRev.change_reason || ""} onChange={e => setNewRev(p => ({ ...p, change_reason: e.target.value }))} className="rounded-sm" placeholder="Customer revised dim X" /></Field>
+                <Field label="Customer's Revision (if any)"><Input value={newRev.customer_revision || ""} onChange={e => setNewRev(p => ({ ...p, customer_revision: e.target.value }))} className="rounded-sm" placeholder="Astral Rev 03" /></Field>
+                <Field label="Customer Change Ref"><Input value={newRev.customer_change_ref || ""} onChange={e => setNewRev(p => ({ ...p, customer_change_ref: e.target.value }))} className="rounded-sm" placeholder="ECN 1234" /></Field>
+              </div>
+              <div className="grid grid-cols-1 gap-3 mt-3">
+                <Field label="Assembly Drawing PDF (optional)">
+                  <Input type="file" accept="application/pdf,.pdf" onChange={async e => { const f = e.target.files?.[0]; if (!f) return; const b64 = await fileToB64(f); setNewRev(p => ({ ...p, drawing_pdf_b64: b64, drawing_filename: f.name })); }} className="rounded-sm text-xs" />
+                  {newRev.drawing_filename && <div className="text-xs text-emerald-700 mt-1 font-mono-tech">{newRev.drawing_filename}</div>}
+                </Field>
+              </div>
+              <div className="text-xs text-slate-500 mt-2">Snapshots current BOM lines into this revision. Future edits create new revisions.</div>
+              <DialogFooter>
+                <Button variant="outline" className="rounded-sm" onClick={() => setRevOpen(false)}>Cancel</Button>
+                <Button onClick={saveBomRevision} className="rounded-sm bg-red-600 hover:bg-red-700">Promote Revision</Button>
+              </DialogFooter>
+            </>
+          )}
         </DialogContent>
       </Dialog>
 
