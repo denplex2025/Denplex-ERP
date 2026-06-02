@@ -454,6 +454,7 @@ class WorkOrder(BaseModel):
     customer_name: Optional[str] = ""
     bom_id: Optional[str] = ""
     product: str
+    part_number: Optional[str] = ""
     qty: float
     po_ref: Optional[str] = ""
     status: Literal["planned", "in_progress", "qc", "completed", "on_hold", "cancelled"] = "planned"
