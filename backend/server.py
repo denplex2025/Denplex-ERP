@@ -3985,6 +3985,66 @@ async def dashboard_sales_trend(days: int = 30, user=Depends(get_current_user)):
         by_day[d] = by_day.get(d, 0) + float(inv.get("total", 0) or 0)
     return {"days": days, "series": [{"date": k, "total": round(v, 2)} for k, v in sorted(by_day.items())]}
 
+@api.get("/dashboard/shopfloor")
+async def dashboard_shopfloor(user=Depends(get_current_user)):
+    """M.6 — factory-floor live picture. Workflow stage counts, delayed jobs,
+    today dispatches, material shortages. Built from existing WO status data;
+    will become more granular once M.5 operation routing lands."""
+    from datetime import date as _date
+    today_iso = _date.today().isoformat()
+
+    active_wo = await db.work_orders.count_documents({"status": {"$in": ["planned", "in_progress", "qc"]}})
+    qc_pending = await db.work_orders.count_documents({"status": "qc"})
+    delayed_count = await db.work_orders.count_documents({
+        "status": {"$nin": ["completed", "cancelled"]},
+        "due_date": {"$lt": today_iso, "$ne": ""}
+    })
+
+    stages_pipeline = [
+        {"$match": {"status": {"$in": ["planned", "in_progress", "qc", "completed", "on_hold"]}}},
+        {"$group": {"_id": "$status", "count": {"$sum": 1}}},
+    ]
+    stage_rows = await db.work_orders.aggregate(stages_pipeline).to_list(20)
+    stage_map = {r["_id"]: r["count"] for r in stage_rows}
+    workflow_stages = [
+        {"stage": "Planned",     "key": "planned",     "count": stage_map.get("planned", 0),     "color": "slate"},
+        {"stage": "In Progress", "key": "in_progress", "count": stage_map.get("in_progress", 0), "color": "blue"},
+        {"stage": "QC Hold",     "key": "qc",          "count": stage_map.get("qc", 0),          "color": "amber"},
+        {"stage": "On Hold",     "key": "on_hold",     "count": stage_map.get("on_hold", 0),     "color": "red"},
+        {"stage": "Completed",   "key": "completed",   "count": stage_map.get("completed", 0),   "color": "emerald"},
+    ]
+
+    try:
+        challans_today = await db.delivery_challans.count_documents({"date": {"$regex": f"^{today_iso}"}})
+    except Exception: challans_today = 0
+    try:
+        invoices_today = await db.invoices.count_documents({"date": {"$regex": f"^{today_iso}"}})
+    except Exception: invoices_today = 0
+    dispatches_today = challans_today + invoices_today
+
+    items = await db.items.find(
+        {}, {"_id": 0, "id": 1, "name": 1, "stock": 1, "reorder_level": 1, "uom": 1, "sku": 1, "code": 1}
+    ).to_list(5000)
+    low_stock = [i for i in items if float(i.get("stock", 0) or 0) <= float(i.get("reorder_level", 0) or 0)]
+
+    delayed_list = await db.work_orders.find(
+        {"status": {"$nin": ["completed", "cancelled"]}, "due_date": {"$lt": today_iso, "$ne": ""}},
+        {"_id": 0, "code": 1, "customer_name": 1, "product": 1, "due_date": 1, "status": 1, "priority": 1, "id": 1}
+    ).sort("due_date", 1).to_list(5)
+
+    return {
+        "active_wo": active_wo,
+        "delayed_jobs": delayed_count,
+        "qc_pending": qc_pending,
+        "today_dispatches": dispatches_today,
+        "material_shortage": len(low_stock),
+        "machine_utilization_pct": None,
+        "workflow_stages": workflow_stages,
+        "delayed_list": delayed_list,
+        "low_stock_top": low_stock[:5],
+        "today": today_iso,
+    }
+
 @api.get("/parties/{pid}/statement")
 async def party_statement(pid: str, period: str = "this_year", user=Depends(get_current_user)):
     """Per-party ledger: opening balance + transactions + closing balance."""
