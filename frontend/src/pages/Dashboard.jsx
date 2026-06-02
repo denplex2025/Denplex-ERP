@@ -3,6 +3,7 @@ import api from "@/lib/api";
 import { PageHeader, Stat, Card, Empty, Th, Td, inr, fmtDate } from "@/components/erp/Primitives";
 import { Badge } from "@/components/ui/badge";
 import { AlertTriangle, Boxes, ClipboardList, ShieldCheck, Users, ArrowDownToLine, ArrowUpFromLine, TrendingUp } from "lucide-react";
+import { LiveWorkflowBar } from "@/components/erp/WorkflowBar";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Area, AreaChart } from "recharts";
 
 export default function Dashboard() {
@@ -23,7 +24,10 @@ export default function Dashboard() {
         <div className="text-slate-500">Loading...</div>
       ) : (
         <>
-          {/* Receivable / payable summary */}
+          {/* M.6 — Production workflow status (shop-floor first) */}
+          <LiveWorkflowBar />
+
+                    {/* Receivable / payable summary */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
             <Card className="p-5">
               <div className="flex items-start justify-between">
