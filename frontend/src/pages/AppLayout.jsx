@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import GlobalSpinner from "@/components/erp/GlobalSpinner";
+import FloatingActions from "@/components/erp/FloatingActions";
 
 // Grouped sidebar nav. To add a new department head, append a new group object below.
 const NAV_GROUPS = [
@@ -175,6 +176,7 @@ export default function AppLayout() {
         </div>
       </main>
       <GlobalSpinner />
+      <FloatingActions />
       <Toaster position="top-right" richColors />
     </div>
   );
