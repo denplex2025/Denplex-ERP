@@ -12,7 +12,7 @@ import { Plus, Factory } from "lucide-react";
 import StatusBadge from "@/components/erp/StatusBadge";
 
 const STATUSES   = ["planned", "in_progress", "qc", "completed", "on_hold", "cancelled"];
-const PRIORITIES = ["normal", "high", "urgent"];
+const PRIORITIES = ["low", "medium", "high"];
 
 const emptyForm = {
   customer_name: "",
@@ -20,7 +20,7 @@ const emptyForm = {
   part_number: "",
   qty: 1,
   due_date: "",
-  priority: "normal",
+  priority: "medium",
   status: "planned",
   notes: "",
 };
@@ -76,6 +76,7 @@ export default function WorkOrders() {
     setSaving(true);
     try {
       const payload = {
+        product: form.part_name.trim(),
         customer_name: form.customer_name.trim(),
         customer: form.customer_name.trim(),
         part_name: form.part_name.trim(),
