@@ -38,7 +38,7 @@ export default function WorkOrders() {
   const refresh = async () => {
     setLoading(true);
     try {
-      const r = await api.get("/work_orders");
+      const r = await api.get("/work-orders");
       setList(Array.isArray(r.data) ? r.data : []);
     } catch (e) {
       console.warn("WO list fetch failed:", e?.message);
@@ -88,7 +88,7 @@ export default function WorkOrders() {
         status: form.status,
         notes: form.notes.trim(),
       };
-      await api.post("/work_orders", payload);
+      await api.post("/work-orders", payload);
       setOpen(false);
       setForm(emptyForm);
       refresh();
