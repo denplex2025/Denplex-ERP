@@ -51,8 +51,17 @@ export default function Dashboard() {
   });
 
   useEffect(() => {
-    api.get("/dashboard/shopfloor").then((r) => setShopfloor(r.data)).catch(() => {});
-    api.get("/dashboard/summary").then((r) => setStats((s) => ({ ...s, ...r.data }))).catch(() => {});
+    // Parallel fetch with 6s timeout so a slow endpoint can't hang the page
+    const withTimeout = (p, ms = 6000) =>
+      Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), ms))]);
+
+    withTimeout(api.get("/dashboard/shopfloor", { silent: true }))
+      .then((r) => setShopfloor(r.data))
+      .catch((e) => { console.warn("shopfloor slow/failed:", e.message); setShopfloor({}); });
+
+    withTimeout(api.get("/dashboard/summary", { silent: true }))
+      .then((r) => setStats((s) => ({ ...s, ...r.data })))
+      .catch((e) => { console.warn("summary slow/failed:", e.message); });
   }, []);
 
   const m = shopfloor || {};
