@@ -116,9 +116,10 @@ export default function Inventory() {
       />
 
       <Tabs value={tab} onValueChange={setTab}>
-        <TabsList className="rounded-sm bg-slate-100 mb-4">
+       <TabsList className="rounded-sm bg-slate-100 mb-4">
           <TabsTrigger value="items" className="rounded-sm" data-testid="tab-items">Items</TabsTrigger>
           <TabsTrigger value="moves" className="rounded-sm" data-testid="tab-movements">Movements</TabsTrigger>
+          <TabsTrigger value="material_states" className="rounded-sm" data-testid="tab-material-states">Material States</TabsTrigger>
         </TabsList>
 
         <TabsContent value="items">
@@ -177,6 +178,9 @@ export default function Inventory() {
               </table>
             )}
           </Card>
+        </TabsContent>
+        <TabsContent value="material_states">
+          <MaterialStates />
         </TabsContent>
       </Tabs>
 
