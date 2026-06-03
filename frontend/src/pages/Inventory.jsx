@@ -9,6 +9,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { PageHeader, Card, Th, Td, Empty, fmtDate } from "@/components/erp/Primitives";
 import { Plus, Edit, Trash2, ArrowDownToLine, ArrowUpFromLine, RefreshCw, Sparkles, Loader2 } from "lucide-react";
+import MaterialStates from "@/components/erp/MaterialStates";
 import { toast } from "sonner";
 
 export default function Inventory() {
