@@ -1131,10 +1131,42 @@ async def create_wo(w: WorkOrder, user=Depends(get_current_user)):
 async def list_wo(user=Depends(get_current_user)):
     return await list_collection(db.work_orders)
 
+async def _wo_status_hook(wid, prev, data, user):
+    try:
+        old_status = (prev or {}).get("status", "")
+        new_status = data.get("status", "")
+        TRANSITIONS = {
+            ("planned", "in_progress"): ("raw", "wip"),
+            ("in_progress", "qc"):       ("wip", "inspection_hold"),
+        }
+        if old_status == new_status:
+            return
+        trans = (old_status, new_status)
+        if trans not in TRANSITIONS:
+            return
+        from_state, to_state = TRANSITIONS[trans]
+        qty = float(data.get("qty") or (prev or {}).get("qty", 0) or 0)
+        if qty <= 0:
+            return
+        await record_state_movement(
+            item_name=(data.get("product") or (prev or {}).get("product", "")),
+            part_number=(data.get("part_number") or (prev or {}).get("part_number", "")),
+            qty=qty, from_state=from_state, to_state=to_state,
+            ref_type="WO", ref_id=wid,
+            ref_code=(prev or {}).get("code", "") or wid,
+            note=f"WO status: {old_status} -> {new_status}",
+            user_email=user.get("email", "") if isinstance(user, dict) else "",
+        )
+    except Exception as _e:
+        try: logger.warning(f"WO hook failed: {_e}")
+        except Exception: pass
+
 @api.put("/work-orders/{wid}")
 async def update_wo(wid: str, w: WorkOrder, user=Depends(get_current_user)):
+    prev = await db.work_orders.find_one({"id": wid}, {"_id": 0})
     data = w.model_dump(); data.pop("id", None); data.pop("created_at", None)
     await db.work_orders.update_one({"id": wid}, {"$set": data})
+    await _wo_status_hook(wid, prev, data, user)
     return {"ok": True}
 
 @api.delete("/work-orders/{wid}")
