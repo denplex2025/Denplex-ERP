@@ -1132,47 +1132,7 @@ async def list_wo(user=Depends(get_current_user)):
     return await list_collection(db.work_orders)
 
 @api.put("/work-orders/{wid}")
-async def @api.put("/work-orders/{wid}")
 async def update_wo(wid: str, w: WorkOrder, user=Depends(get_current_user)):
-    # M.4b: capture old status BEFORE the update to detect transition
-    prev = await db.work_orders.find_one({"id": wid}, {"_id": 0})
-    old_status = (prev or {}).get("status", "")
-
-    data = w.model_dump(); data.pop("id", None); data.pop("created_at", None)
-    await db.work_orders.update_one({"id": wid}, {"$set": data})
-
-    # ===== M.4b hook: auto-record state movement on status transition =====
-    try:
-        new_status = data.get("status", "")
-        STATE_TRANSITION_MAP = {
-            ("planned", "in_progress"): ("raw", "wip"),
-            ("in_progress", "qc"):       ("wip", "inspection_hold"),
-            # qc → completed: handled by QC endpoint instead
-            # cancelled / on_hold: no state implication
-        }
-        transition = (old_status, new_status)
-        if transition in STATE_TRANSITION_MAP and old_status != new_status:
-            from_state, to_state = STATE_TRANSITION_MAP[transition]
-            qty = float(data.get("qty") or (prev or {}).get("qty", 0) or 0)
-            if qty > 0:
-                await record_state_movement(
-                    item_name=(data.get("product") or (prev or {}).get("product", "")),
-                    part_number=(data.get("part_number") or (prev or {}).get("part_number", "")),
-                    qty=qty,
-                    from_state=from_state,
-                    to_state=to_state,
-                    ref_type="WO",
-                    ref_id=wid,
-                    ref_code=(prev or {}).get("code", "") or wid,
-                    note=f"WO status: {old_status} -> {new_status}",
-                    user_email=user.get("email", "") if isinstance(user, dict) else "",
-                )
-    except Exception as _e:
-        try: logger.warning(f"WO M.4b hook failed (non-fatal): {_e}")
-        except Exception: pass
-    # ===== end M.4b hook =====
-
-    return {"ok": True}(wid: str, w: WorkOrder, user=Depends(get_current_user)):
     data = w.model_dump(); data.pop("id", None); data.pop("created_at", None)
     await db.work_orders.update_one({"id": wid}, {"$set": data})
     return {"ok": True}
