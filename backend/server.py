@@ -4745,6 +4745,222 @@ async def download_part_step(pid: str, revision: Optional[str] = None, user=Depe
         raise HTTPException(500, "Failed to decode STEP file")
     return Response(content=data, media_type="application/step",
                     headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+# ==================== Material States (M.4a) ====================
+DEFAULT_MATERIAL_STATES = [
+    {"key": "raw",             "name": "Raw Material",     "color": "slate",   "sort_order": 10, "is_system": True, "description": "Material received from supplier, not yet issued."},
+    {"key": "wip",             "name": "WIP",              "color": "blue",    "sort_order": 20, "is_system": True, "description": "Issued to shop floor, being machined."},
+    {"key": "inspection_hold", "name": "Inspection Hold",  "color": "amber",   "sort_order": 30, "is_system": True, "description": "Off the machine, awaiting QC."},
+    {"key": "heat_treatment",  "name": "Heat Treatment",   "color": "amber",   "sort_order": 40, "is_system": True, "description": "Sent out for heat treatment."},
+    {"key": "plating",         "name": "Plating",          "color": "amber",   "sort_order": 50, "is_system": True, "description": "Sent out for plating/coating."},
+    {"key": "vendor_out",      "name": "Vendor Out",       "color": "amber",   "sort_order": 60, "is_system": True, "description": "Sent for any other vendor job-work."},
+    {"key": "fg",              "name": "Finished Goods",   "color": "emerald", "sort_order": 70, "is_system": True, "description": "Passed QC, ready to dispatch."},
+    {"key": "rejected",        "name": "Rejected",         "color": "red",     "sort_order": 80, "is_system": True, "description": "Failed QC, on hold for review."},
+    {"key": "scrap",           "name": "Scrap",            "color": "red",     "sort_order": 90, "is_system": True, "description": "Written off (cannot recover)."},
+]
+
+class MaterialState(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    key: str = ""
+    name: str
+    description: Optional[str] = ""
+    color: str = "slate"
+    sort_order: int = 100
+    is_active: bool = True
+    is_system: bool = False
+    created_at: str = Field(default_factory=now_iso)
+
+class MaterialStateMovement(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    item_id: Optional[str] = ""
+    item_sku: Optional[str] = ""
+    item_name: Optional[str] = ""
+    part_id: Optional[str] = ""
+    part_number: Optional[str] = ""
+    part_name: Optional[str] = ""
+    qty: float
+    from_state: Optional[str] = ""
+    to_state: Optional[str] = ""
+    ref_type: Optional[str] = ""
+    ref_id: Optional[str] = ""
+    ref_code: Optional[str] = ""
+    location: Optional[str] = ""
+    lot_no: Optional[str] = ""
+    note: Optional[str] = ""
+    created_by: Optional[str] = ""
+    created_at: str = Field(default_factory=now_iso)
+
+async def _seed_material_states_if_needed():
+    existing = await db.material_states.count_documents({})
+    if existing > 0:
+        return
+    for s in DEFAULT_MATERIAL_STATES:
+        doc = MaterialState(**s).model_dump()
+        await db.material_states.insert_one(doc)
+
+def _slugify(text: str) -> str:
+    out = (text or "").strip().lower()
+    out = "".join(c if c.isalnum() else "_" for c in out)
+    while "__" in out:
+        out = out.replace("__", "_")
+    return out.strip("_")
+
+@api.get("/material-states")
+async def list_material_states(user=Depends(get_current_user)):
+    await _seed_material_states_if_needed()
+    items = await db.material_states.find({}).sort("sort_order", 1).to_list(500)
+    return [serialize(s) for s in items]
+
+@api.post("/material-states")
+async def create_material_state(s: MaterialState, user=Depends(get_current_user)):
+    doc = s.model_dump()
+    if not doc.get("key"):
+        doc["key"] = _slugify(doc.get("name", ""))
+    if not doc.get("key"):
+        raise HTTPException(400, "State name required")
+    existing = await db.material_states.find_one({"key": doc["key"]})
+    if existing:
+        raise HTTPException(400, f"State key '{doc['key']}' already exists")
+    doc["is_system"] = False
+    await db.material_states.insert_one(doc)
+    return serialize(doc)
+
+@api.put("/material-states/{sid}")
+async def update_material_state(sid: str, s: MaterialState, user=Depends(get_current_user)):
+    existing = await db.material_states.find_one({"id": sid})
+    if not existing:
+        raise HTTPException(404, "State not found")
+    data = s.model_dump()
+    data.pop("id", None); data.pop("created_at", None); data.pop("is_system", None); data.pop("key", None)
+    await db.material_states.update_one({"id": sid}, {"$set": data})
+    updated = await db.material_states.find_one({"id": sid}, {"_id": 0})
+    return serialize(updated)
+
+@api.delete("/material-states/{sid}")
+async def delete_material_state(sid: str, user=Depends(get_current_user)):
+    existing = await db.material_states.find_one({"id": sid})
+    if not existing:
+        raise HTTPException(404, "State not found")
+    if existing.get("is_system"):
+        raise HTTPException(400, "System state cannot be deleted — deactivate instead")
+    in_use = await db.material_state_movements.count_documents({
+        "$or": [{"from_state": existing["key"]}, {"to_state": existing["key"]}]
+    })
+    if in_use > 0:
+        raise HTTPException(400, f"State '{existing['name']}' used in {in_use} movements — deactivate instead")
+    await db.material_states.delete_one({"id": sid})
+    return {"ok": True}
+
+async def record_state_movement(*, item_id="", item_sku="", item_name="",
+                                 part_id="", part_number="", part_name="",
+                                 qty=0, from_state="", to_state="",
+                                 ref_type="", ref_id="", ref_code="",
+                                 location="", lot_no="", note="", user_email=""):
+    if qty is None or float(qty) <= 0:
+        raise ValueError("Quantity must be positive")
+    if not from_state and not to_state:
+        raise ValueError("Movement must have either from_state or to_state")
+    if from_state and from_state == to_state:
+        raise ValueError("From and To states must differ")
+    mv = MaterialStateMovement(
+        item_id=item_id, item_sku=item_sku, item_name=item_name,
+        part_id=part_id, part_number=part_number, part_name=part_name,
+        qty=float(qty), from_state=from_state, to_state=to_state,
+        ref_type=ref_type, ref_id=ref_id, ref_code=ref_code,
+        location=location, lot_no=lot_no, note=note,
+        created_by=user_email,
+    )
+    doc = mv.model_dump()
+    await db.material_state_movements.insert_one(doc)
+    return serialize(doc)
+
+@api.post("/material-states/move")
+async def post_state_movement(body: MaterialStateMovement, user=Depends(get_current_user)):
+    try:
+        email = ""
+        if isinstance(user, dict):
+            email = user.get("email", "")
+        else:
+            email = getattr(user, "email", "") or ""
+        result = await record_state_movement(
+            item_id=body.item_id or "", item_sku=body.item_sku or "", item_name=body.item_name or "",
+            part_id=body.part_id or "", part_number=body.part_number or "", part_name=body.part_name or "",
+            qty=body.qty, from_state=body.from_state or "", to_state=body.to_state or "",
+            ref_type=body.ref_type or "", ref_id=body.ref_id or "", ref_code=body.ref_code or "",
+            location=body.location or "", lot_no=body.lot_no or "", note=body.note or "",
+            user_email=email,
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+@api.get("/material-states/movements")
+async def list_state_movements(item_id: Optional[str] = None, state: Optional[str] = None,
+                                ref_type: Optional[str] = None, limit: int = 300,
+                                user=Depends(get_current_user)):
+    q = {}
+    if item_id: q["item_id"] = item_id
+    if state:   q["$or"] = [{"from_state": state}, {"to_state": state}]
+    if ref_type: q["ref_type"] = ref_type
+    moves = await db.material_state_movements.find(q).sort("created_at", -1).to_list(limit)
+    return [serialize(m) for m in moves]
+
+@api.get("/material-states/balance")
+async def get_state_balances(user=Depends(get_current_user)):
+    pipeline = [
+        {"$facet": {
+            "inward": [
+                {"$match": {"to_state": {"$ne": ""}}},
+                {"$group": {
+                    "_id": {"item_id": "$item_id", "item_sku": "$item_sku", "item_name": "$item_name", "state": "$to_state"},
+                    "qty": {"$sum": "$qty"}
+                }}
+            ],
+            "outward": [
+                {"$match": {"from_state": {"$ne": ""}}},
+                {"$group": {
+                    "_id": {"item_id": "$item_id", "item_sku": "$item_sku", "item_name": "$item_name", "state": "$from_state"},
+                    "qty": {"$sum": "$qty"}
+                }}
+            ]
+        }}
+    ]
+    cursor = db.material_state_movements.aggregate(pipeline)
+    result = await cursor.to_list(1)
+    if not result:
+        return []
+    def keyof(r):
+        m = r["_id"]
+        return (m.get("item_id", ""), m.get("item_sku", ""), m.get("item_name", ""), m.get("state", ""))
+    inward = {keyof(r): r for r in result[0].get("inward", [])}
+    outward = {keyof(r): r for r in result[0].get("outward", [])}
+    all_keys = set(inward.keys()) | set(outward.keys())
+    balances = []
+    for k in all_keys:
+        in_qty = inward[k]["qty"] if k in inward else 0
+        out_qty = outward[k]["qty"] if k in outward else 0
+        net = in_qty - out_qty
+        if abs(net) < 0.0001:
+            continue
+        balances.append({
+            "item_id": k[0],
+            "item_sku": k[1],
+            "item_name": k[2],
+            "state": k[3],
+            "qty": net
+        })
+    return balances
+
+@api.get("/material-states/summary")
+async def get_state_summary(user=Depends(get_current_user)):
+    balances = await get_state_balances(user)
+    summary = {}
+    for b in balances:
+        summary[b["state"]] = summary.get(b["state"], 0) + b["qty"]
+    return summary
+# ==================== End Material States (M.4a) ====================
+
 
 # ---------------- App config ----------------
 app.include_router(api)
