@@ -1034,6 +1034,38 @@ async def create_movement(m: StockMovement, user=Depends(get_current_user)):
     doc["item_name"] = item["name"]
     doc["by_user"] = user["name"]
     await db.movements.insert_one(doc)
+
+    # ===== M.4b hook: auto-record material state movement =====
+    try:
+        state_from, state_to = "", ""
+        if m.type == "in":
+            state_to = "raw"
+        elif m.type == "out":
+            state_from = "raw"
+        elif m.type == "in_process":
+            state_from = "raw"
+            state_to = "wip"
+        # "adjust" sets qty directly — no state movement recorded
+        if state_from or state_to:
+            await record_state_movement(
+                item_id=m.item_id,
+                item_sku=item["sku"],
+                item_name=item["name"],
+                qty=qty,
+                from_state=state_from,
+                to_state=state_to,
+                ref_type="StockMovement",
+                ref_id=doc.get("id", ""),
+                ref_code=(m.ref or "") if hasattr(m, "ref") else "",
+                note=(m.notes or "") if hasattr(m, "notes") else "",
+                user_email=user.get("email", "") if isinstance(user, dict) else "",
+            )
+    except Exception as _e:
+        # Non-fatal — never fail the main movement because of state tracking
+        try: logger.warning(f"Material state hook failed (non-fatal): {_e}")
+        except Exception: pass
+    # ===== end M.4b hook =====
+
     return serialize(doc)
 
 @api.get("/inventory/movements")
