@@ -15,6 +15,9 @@ import StatusBadge from "@/components/erp/StatusBadge";
 const fmtINR = (n) =>
   new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 }).format(n || 0);
 
+// M.4b hotfix: defensive array coercion — backend may return non-arrays
+const asArr = (v) => Array.isArray(v) ? v : [];
+
 function MetricTile({ icon: Icon, label, value, sublabel, color = "slate", to }) {
   const colorMap = {
     blue:    { bg: "bg-blue-50",    text: "text-blue-700",    icon: "text-blue-600",    border: "border-l-blue-500" },
@@ -65,7 +68,7 @@ export default function Dashboard() {
   }, []);
 
   const m = shopfloor || {};
-  const stages = m.workflow_stages || [];
+  const stages = asArr(m.workflow_stages);
   const activeWO =
     (stages.find((s) => s.key === "in_progress")?.count || 0) +
     (stages.find((s) => s.key === "planned")?.count || 0);
@@ -88,21 +91,21 @@ export default function Dashboard() {
             sublabel={`${stages.find((s) => s.key === "in_progress")?.count || 0} running`}
             color="blue" to="/app/work-orders" />
           <MetricTile icon={AlertTriangle} label="Delayed Jobs"
-            value={(m.delayed_jobs || []).length}
-            sublabel={(m.delayed_jobs || []).length ? "Past due date" : "On schedule"}
-            color={(m.delayed_jobs || []).length ? "red" : "slate"}
+            value={asArr(m.delayed_jobs).length}
+            sublabel={asArr(m.delayed_jobs).length ? "Past due date" : "On schedule"}
+            color={asArr(m.delayed_jobs).length ? "red" : "slate"}
             to="/app/work-orders?filter=delayed" />
           <MetricTile icon={ClipboardCheck} label="QC Pending" value={qcPending}
             sublabel={qcPending ? "Awaiting inspection" : "Clear"}
             color={qcPending ? "amber" : "slate"} to="/app/qc" />
           <MetricTile icon={Truck} label="Today Dispatches"
-            value={(m.today_dispatches || []).length}
+            value={asArr(m.today_dispatches).length}
             sublabel={completedToday ? `${completedToday} completed today` : "—"}
             color="emerald" to="/app/docs/delivery-challans" />
           <MetricTile icon={PackageX} label="Material Shortage"
-            value={(m.material_shortage || []).length}
-            sublabel={(m.material_shortage || []).length ? "Below reorder" : "Adequate"}
-            color={(m.material_shortage || []).length ? "red" : "slate"}
+            value={asArr(m.material_shortage).length}
+            sublabel={asArr(m.material_shortage).length ? "Below reorder" : "Adequate"}
+            color={asArr(m.material_shortage).length ? "red" : "slate"}
             to="/app/inventory?filter=shortage" />
         </div>
       </div>
@@ -112,17 +115,17 @@ export default function Dashboard() {
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-semibold flex items-center justify-between">
               <span>Delayed Jobs</span>
-              {(m.delayed_jobs || []).length > 0 && (
+              {asArr(m.delayed_jobs).length > 0 && (
                 <StatusBadge status="delayed" label={`${m.delayed_jobs.length} jobs`} />
               )}
             </CardTitle>
           </CardHeader>
           <CardContent>
-            {(m.delayed_jobs || []).length === 0 ? (
+            {asArr(m.delayed_jobs).length === 0 ? (
               <div className="text-xs text-slate-400 py-6 text-center">No delayed jobs</div>
             ) : (
               <div className="space-y-2">
-                {(m.delayed_jobs || []).slice(0, 5).map((j, i) => (
+                {asArr(m.delayed_jobs).slice(0, 5).map((j, i) => (
                   <div key={i} className="flex items-center justify-between text-xs border-b border-slate-100 pb-1">
                     <div className="flex-1 min-w-0">
                       <div className="font-medium text-slate-700 truncate">{j.wo_no || j.id}</div>
@@ -140,17 +143,17 @@ export default function Dashboard() {
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-semibold flex items-center justify-between">
               <span>Material Shortage</span>
-              {(m.material_shortage || []).length > 0 && (
+              {asArr(m.material_shortage).length > 0 && (
                 <StatusBadge status="overdue" label={`${m.material_shortage.length} items`} />
               )}
             </CardTitle>
           </CardHeader>
           <CardContent>
-            {(m.material_shortage || []).length === 0 ? (
+            {asArr(m.material_shortage).length === 0 ? (
               <div className="text-xs text-slate-400 py-6 text-center">No shortages</div>
             ) : (
               <div className="space-y-2">
-                {(m.material_shortage || []).slice(0, 5).map((it, i) => (
+                {asArr(m.material_shortage).slice(0, 5).map((it, i) => (
                   <div key={i} className="flex items-center justify-between text-xs border-b border-slate-100 pb-1">
                     <div className="flex-1 min-w-0">
                       <div className="font-medium text-slate-700 truncate">{it.name || it.part_number}</div>
@@ -165,14 +168,14 @@ export default function Dashboard() {
         </Card>
       </div>
 
-      {(stats.sales_trend && stats.sales_trend.length > 0) && (
+      {(asArr(stats.sales_trend).length > 0) && (
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-semibold">Sales Trend (last 30 days)</CardTitle>
           </CardHeader>
           <CardContent className="h-56">
             <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={stats.sales_trend}>
+              <AreaChart data={asArr(stats.sales_trend)}>
                 <defs>
                   <linearGradient id="salesG" x1="0" y1="0" x2="0" y2="1">
                     <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.4} />
@@ -241,7 +244,7 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {(stats.recent_wo && stats.recent_wo.length > 0) && (
+      {(asArr(stats.recent_wo).length > 0) && (
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-semibold flex items-center justify-between">
@@ -251,7 +254,7 @@ export default function Dashboard() {
           </CardHeader>
           <CardContent>
             <div className="space-y-1">
-              {stats.recent_wo.slice(0, 6).map((wo, i) => (
+              {asArr(stats.recent_wo).slice(0, 6).map((wo, i) => (
                 <div key={i} className="flex items-center justify-between text-xs border-b border-slate-100 pb-1">
                   <div className="flex-1 min-w-0 grid grid-cols-3 gap-2">
                     <span className="font-medium text-slate-700 truncate">{wo.wo_no}</span>
