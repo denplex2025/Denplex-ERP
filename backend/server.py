@@ -863,7 +863,7 @@ async def get_next_qc_inspection_code() -> str:
 
 # --- Endpoints ---
 @api.post("/qc-inspections")
-async def create_qc_inspection(req: QCInspection, claims: dict = Depends(check_jwt)):
+async def create_qc_inspection(req: QCInspection, claims: dict = Depends(get_current_user)):
     """Create a new dimensional QC inspection."""
     req.created_by = claims.get("sub", "unknown")
     req.code = await get_next_qc_inspection_code()
@@ -872,13 +872,13 @@ async def create_qc_inspection(req: QCInspection, claims: dict = Depends(check_j
     return {"id": str(result.inserted_id), "code": req.code}
 
 @api.get("/qc-inspections")
-async def list_qc_inspections(claims: dict = Depends(check_jwt)):
+async def list_qc_inspections(claims: dict = Depends(get_current_user)):
     """List all dimensional QC inspections."""
     items = await db.qc_inspections.find().to_list(1000)
     return [fixup(i) for i in items]
 
 @api.get("/qc-inspections/{qid}")
-async def get_qc_inspection(qid: str, claims: dict = Depends(check_jwt)):
+async def get_qc_inspection(qid: str, claims: dict = Depends(get_current_user)):
     """Get a single dimensional QC inspection (includes drawing PDF if present)."""
     doc = await db.qc_inspections.find_one({"_id": ObjectId(qid)})
     if not doc:
@@ -886,20 +886,20 @@ async def get_qc_inspection(qid: str, claims: dict = Depends(check_jwt)):
     return fixup(doc)
 
 @api.put("/qc-inspections/{qid}")
-async def update_qc_inspection(qid: str, req: QCInspection, claims: dict = Depends(check_jwt)):
+async def update_qc_inspection(qid: str, req: QCInspection, claims: dict = Depends(get_current_user)):
     """Update a dimensional QC inspection."""
     req.updated_at = now_iso()
     await db.qc_inspections.update_one({"_id": ObjectId(qid)}, {"$set": req.model_dump(by_alias=False)})
     return {"ok": True}
 
 @api.delete("/qc-inspections/{qid}")
-async def delete_qc_inspection(qid: str, claims: dict = Depends(check_jwt)):
+async def delete_qc_inspection(qid: str, claims: dict = Depends(get_current_user)):
     """Delete a dimensional QC inspection."""
     await db.qc_inspections.delete_one({"_id": ObjectId(qid)})
     return {"ok": True}
 
 @api.post("/qc-inspections/{qid}/drawing")
-async def upload_qc_drawing(qid: str, file: UploadFile = File(...), claims: dict = Depends(check_jwt)):
+async def upload_qc_drawing(qid: str, file: UploadFile = File(...), claims: dict = Depends(get_current_user)):
     """Upload a drawing PDF to a QC inspection. Stores as base64."""
     content = await file.read()
     b64 = base64.b64encode(content).decode("utf-8")
@@ -1102,7 +1102,7 @@ def build_qc_excel(inspection: dict) -> bytes:
     return buffer.getvalue()
 
 @api.get("/qc-inspections/{qid}/pdf")
-async def export_qc_pdf(qid: str, claims: dict = Depends(check_jwt)):
+async def export_qc_pdf(qid: str, claims: dict = Depends(get_current_user)):
     """Export QC inspection as PDF (Denplex template format)."""
     doc = await db.qc_inspections.find_one({"_id": ObjectId(qid)})
     if not doc:
@@ -1116,7 +1116,7 @@ async def export_qc_pdf(qid: str, claims: dict = Depends(check_jwt)):
     )
 
 @api.get("/qc-inspections/{qid}/xlsx")
-async def export_qc_xlsx(qid: str, claims: dict = Depends(check_jwt)):
+async def export_qc_xlsx(qid: str, claims: dict = Depends(get_current_user)):
     """Export QC inspection as Excel (Denplex template format)."""
     doc = await db.qc_inspections.find_one({"_id": ObjectId(qid)})
     if not doc:
