@@ -8,7 +8,7 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
-import { Plus, Factory } from "lucide-react";
+import { Plus, Factory, Pencil, Trash2 } from "lucide-react";
 import StatusBadge from "@/components/erp/StatusBadge";
 
 const STATUSES   = ["planned", "in_progress", "qc", "completed", "on_hold", "cancelled"];
@@ -29,6 +29,7 @@ export default function WorkOrders() {
   const [list, setList]         = useState([]);
   const [loading, setLoading]   = useState(true);
   const [open, setOpen]         = useState(false);
+  const [editingId, setEditingId] = useState(null);
   const [form, setForm]         = useState(emptyForm);
   const [saving, setSaving]     = useState(false);
   const [error, setError]       = useState("");
@@ -49,7 +50,6 @@ export default function WorkOrders() {
 
   useEffect(() => {
     refresh();
-    // Non-blocking autocomplete prefetch — form opens even if these hang
     api.get("/customers", { silent: true })
       .then((r) => setCustomers(Array.isArray(r.data) ? r.data : []))
       .catch(() => {});
@@ -61,7 +61,24 @@ export default function WorkOrders() {
   const change = (k, v) => setForm((f) => ({ ...f, [k]: v }));
 
   const openNew = () => {
+    setEditingId(null);
     setForm(emptyForm);
+    setError("");
+    setOpen(true);
+  };
+
+  const openEdit = (wo) => {
+    setEditingId(wo._id || wo.id);
+    setForm({
+      customer_name: wo.customer_name || wo.customer || "",
+      part_name: wo.product || wo.part_name || wo.item_name || "",
+      part_number: wo.part_number || "",
+      qty: wo.qty || wo.quantity || 1,
+      due_date: wo.due_date || "",
+      priority: wo.priority || "medium",
+      status: wo.status || "planned",
+      notes: wo.notes || "",
+    });
     setError("");
     setOpen(true);
   };
@@ -81,16 +98,21 @@ export default function WorkOrders() {
         customer: form.customer_name.trim(),
         part_name: form.part_name.trim(),
         part_number: form.part_number.trim(),
-        item_name: form.part_name.trim(),       // legacy field name fallback
+        item_name: form.part_name.trim(),
         qty: parseInt(form.qty, 10) || 1,
-        quantity: parseInt(form.qty, 10) || 1,  // legacy fallback
+        quantity: parseInt(form.qty, 10) || 1,
         due_date: form.due_date || null,
         priority: form.priority,
         status: form.status,
         notes: form.notes.trim(),
       };
-      await api.post("/work-orders", payload);
+      if (editingId) {
+        await api.put(`/work-orders/${editingId}`, payload);
+      } else {
+        await api.post("/work-orders", payload);
+      }
       setOpen(false);
+      setEditingId(null);
       setForm(emptyForm);
       refresh();
     } catch (e) {
@@ -98,13 +120,22 @@ export default function WorkOrders() {
         e?.response?.data?.detail ||
         e?.response?.data?.message ||
         e?.message ||
-        "Failed to create work order";
+        "Failed to save work order";
       setError(typeof msg === "string" ? msg : JSON.stringify(msg));
     }
     setSaving(false);
   };
 
-  // Defensive filters — drop any record with blank/null name
+  const del = async (wo) => {
+    if (!window.confirm(`Delete work order ${wo.wo_no || wo.code || wo.id}?`)) return;
+    try {
+      await api.delete(`/work-orders/${wo._id || wo.id}`);
+      refresh();
+    } catch (e) {
+      alert(e?.response?.data?.detail || "Delete failed");
+    }
+  };
+
   const safeCustomers = customers.filter((c) => c && (c.name || c.customer_name));
   const safeParts     = parts.filter((p) => p && (p.name || p.part_name || p.part_number));
 
@@ -140,20 +171,29 @@ export default function WorkOrders() {
                     <th className="text-right px-4 py-2">Qty</th>
                     <th className="text-left px-4 py-2">Due</th>
                     <th className="text-left px-4 py-2">Status</th>
+                    <th className="text-right px-4 py-2">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
                   {list.map((wo, i) => (
                     <tr key={wo._id || wo.id || i} className="border-b hover:bg-slate-50">
-                      <td className="px-4 py-2 font-medium">{wo.wo_no || wo.number || "—"}</td>
+                      <td className="px-4 py-2 font-medium">{wo.wo_no || wo.code || wo.number || "—"}</td>
                       <td className="px-4 py-2">{wo.customer_name || wo.customer || "—"}</td>
                       <td className="px-4 py-2">
-                        <div className="text-slate-700">{wo.part_name || wo.item_name || "—"}</div>
+                        <div className="text-slate-700">{wo.product || wo.part_name || wo.item_name || "—"}</div>
                         {wo.part_number && <div className="text-xs text-slate-400">{wo.part_number}</div>}
                       </td>
                       <td className="px-4 py-2 text-right">{wo.qty || wo.quantity || 0}</td>
                       <td className="px-4 py-2">{wo.due_date || "—"}</td>
                       <td className="px-4 py-2"><StatusBadge status={wo.status || "planned"} /></td>
+                      <td className="px-4 py-2 text-right whitespace-nowrap">
+                        <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => openEdit(wo)} title="Edit">
+                          <Pencil className="h-4 w-4" />
+                        </Button>
+                        <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => del(wo)} title="Delete">
+                          <Trash2 className="h-4 w-4 text-red-600" />
+                        </Button>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -163,12 +203,12 @@ export default function WorkOrders() {
         </CardContent>
       </Card>
 
-      {/* === Dialog: native selects only, no Radix Select === */}
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="sm:max-w-lg">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
-              <Factory className="w-5 h-5 text-blue-600" /> New Work Order
+              <Factory className="w-5 h-5 text-blue-600" />
+              {editingId ? "Edit Work Order" : "New Work Order"}
             </DialogTitle>
           </DialogHeader>
 
@@ -180,7 +220,6 @@ export default function WorkOrders() {
             )}
 
             <div className="grid grid-cols-2 gap-3">
-              {/* Customer — text input with autocomplete suggestions */}
               <div className="col-span-2">
                 <Label htmlFor="customer">Customer Name *</Label>
                 <Input
@@ -199,7 +238,6 @@ export default function WorkOrders() {
                 </datalist>
               </div>
 
-              {/* Part name */}
               <div>
                 <Label htmlFor="part_name">Part Name *</Label>
                 <Input
@@ -218,7 +256,6 @@ export default function WorkOrders() {
                 </datalist>
               </div>
 
-              {/* Part number */}
               <div>
                 <Label htmlFor="part_number">Part Number</Label>
                 <Input
@@ -229,7 +266,6 @@ export default function WorkOrders() {
                 />
               </div>
 
-              {/* Qty */}
               <div>
                 <Label htmlFor="qty">Quantity *</Label>
                 <Input
@@ -242,7 +278,6 @@ export default function WorkOrders() {
                 />
               </div>
 
-              {/* Due date */}
               <div>
                 <Label htmlFor="due_date">Due Date</Label>
                 <Input
@@ -253,7 +288,6 @@ export default function WorkOrders() {
                 />
               </div>
 
-              {/* Priority — native select */}
               <div>
                 <Label htmlFor="priority">Priority</Label>
                 <select
@@ -270,7 +304,6 @@ export default function WorkOrders() {
                 </select>
               </div>
 
-              {/* Status — native select */}
               <div>
                 <Label htmlFor="status">Status</Label>
                 <select
@@ -287,7 +320,6 @@ export default function WorkOrders() {
                 </select>
               </div>
 
-              {/* Notes */}
               <div className="col-span-2">
                 <Label htmlFor="notes">Notes</Label>
                 <Textarea
@@ -314,7 +346,7 @@ export default function WorkOrders() {
                 disabled={saving}
                 className="bg-red-600 hover:bg-red-700 text-white"
               >
-                {saving ? "Saving…" : "Create Work Order"}
+                {saving ? "Saving…" : (editingId ? "Update Work Order" : "Create Work Order")}
               </Button>
             </DialogFooter>
           </form>
