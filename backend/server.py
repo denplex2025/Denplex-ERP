@@ -752,6 +752,384 @@ class QCReport(BaseModel):
     notes: Optional[str] = ""
     created_at: str = Field(default_factory=now_iso)
 
+# ============================================================================
+# PHASE Q.QC.1 — DIMENSIONAL QC INSPECTION REPORTS (Backend Models + Endpoints)
+# ============================================================================
+# Add this section to backend/server.py after the existing QCReport model (around line 500)
+# Includes: models, CRUD endpoints, PDF/Excel export helpers
+
+# --- Models ---
+class QCDimensionSpec(BaseModel):
+    """One column/parameter in the dimensional QC report."""
+    label: str                          # e.g., "250", "120 (+0.17/-0.12)", "Ø130 H7"
+    nominal: Optional[float] = None     # parsed nominal value (250, 120, 130)
+    tol_upper: Optional[float] = None   # upper tolerance (+0.17, +0.04, etc.)
+    tol_lower: Optional[float] = None   # lower tolerance (-0.12, 0, etc.)
+    unit: str = "mm"                    # measurement unit
+    raw_spec: str                       # original spec string from drawing
+
+class QCSampleRow(BaseModel):
+    """One row of measurements (one sample piece, all dimensions)."""
+    sample_no: int                      # 1-10
+    measurements: List[Optional[float]] = []  # parallel array to dimensions
+    result: Optional[str] = ""          # "pass" | "fail" | "" (unset)
+    sign: Optional[str] = ""            # inspector signature/initials
+    note: Optional[str] = ""            # per-row note
+
+class QCInspection(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    code: Optional[str] = None          # auto-generated QCI-0001, QCI-0002, etc.
+    # --- Header ---
+    report_no: Optional[str] = ""
+    inspection_date: str = Field(default_factory=now_iso)
+    supplier_name: Optional[str] = ""   # supplier/vendor name
+    invoice_no: Optional[str] = ""
+    invoice_date: Optional[str] = ""
+    part_number: Optional[str] = ""
+    part_name: str                      # BEARING HOUSING, SHAFT, etc.
+    drawing_name: Optional[str] = ""    # 600NL-0441-1, BRMG0100H01CHAS010
+    drawing_pdf_b64: Optional[str] = None  # uploaded PDF (base64, optional)
+    # --- Inspection Data ---
+    dimensions: List[QCDimensionSpec] = []  # column headers (specs)
+    samples: List[QCSampleRow] = []     # 10 sample rows with measurements
+    # --- Overall ---
+    overall_result: Optional[str] = "pending"  # pass | fail | pending
+    inspector_name: Optional[str] = ""
+    notes: Optional[str] = ""
+    created_at: str = Field(default_factory=now_iso)
+    created_by: Optional[str] = ""
+    updated_at: Optional[str] = None
+
+# --- Helpers: Tolerance Parsing ---
+def parse_tolerance_spec(spec: str) -> tuple[Optional[float], Optional[float]]:
+    """Parse tolerance string: '+0.17/-0.12', '±0.2', '+0.04/0', '-0.5', etc.
+    Returns: (tol_upper, tol_lower)
+    """
+    if not spec or not spec.strip():
+        return None, None
+    spec = spec.strip().replace(" ", "")
+    try:
+        if "±" in spec:
+            val = float(spec.split("±")[1])
+            return val, -val
+        elif "/" in spec:
+            parts = spec.split("/")
+            upper = float(parts[0].replace("+", "")) if parts[0] else 0
+            lower = float(parts[1]) if len(parts) > 1 else 0
+            return upper, lower
+        else:
+            val = float(spec.replace("+", ""))
+            return val, 0
+    except:
+        return None, None
+
+def extract_nominal_from_label(label: str) -> Optional[float]:
+    """Try to extract nominal value from label like '120 (+0.17/-0.12)' → 120.0"""
+    try:
+        base = label.split("(")[0].strip() if "(" in label else label.strip()
+        base = base.replace("Ø", "").replace("M", "").replace("H", "").replace("E", "").strip()
+        if base and base[0].isdigit():
+            return float(base.split()[0])
+    except:
+        pass
+    return None
+
+def check_tolerance(measured: Optional[float], nominal: Optional[float], tol_upper: Optional[float], tol_lower: Optional[float]) -> str:
+    """Return 'pass' or 'fail' based on tolerance check. Returns '' if any value is None."""
+    if measured is None or nominal is None or tol_upper is None or tol_lower is None:
+        return ""
+    try:
+        upper_bound = nominal + tol_upper
+        lower_bound = nominal + tol_lower
+        if lower_bound <= measured <= upper_bound:
+            return "pass"
+        else:
+            return "fail"
+    except:
+        return ""
+
+# --- Auto-code generation ---
+async def get_next_qc_inspection_code() -> str:
+    """Generate next QCI code: QCI-0001, QCI-0002, etc."""
+    last = await db.qc_inspections.find_one({}, sort=[("code", -1)])
+    if not last or not last.get("code"):
+        return "QCI-0001"
+    try:
+        num = int(last["code"].split("-")[1]) + 1
+        return f"QCI-{num:04d}"
+    except:
+        return "QCI-0001"
+
+# --- Endpoints ---
+@api.post("/qc-inspections")
+async def create_qc_inspection(req: QCInspection, claims: dict = Depends(check_jwt)):
+    """Create a new dimensional QC inspection."""
+    req.created_by = claims.get("sub", "unknown")
+    req.code = await get_next_qc_inspection_code()
+    req.created_at = now_iso()
+    result = await db.qc_inspections.insert_one(req.model_dump(by_alias=False))
+    return {"id": str(result.inserted_id), "code": req.code}
+
+@api.get("/qc-inspections")
+async def list_qc_inspections(claims: dict = Depends(check_jwt)):
+    """List all dimensional QC inspections."""
+    items = await db.qc_inspections.find().to_list(1000)
+    return [fixup(i) for i in items]
+
+@api.get("/qc-inspections/{qid}")
+async def get_qc_inspection(qid: str, claims: dict = Depends(check_jwt)):
+    """Get a single dimensional QC inspection (includes drawing PDF if present)."""
+    doc = await db.qc_inspections.find_one({"_id": ObjectId(qid)})
+    if not doc:
+        raise HTTPException(status_code=404, detail="QC inspection not found")
+    return fixup(doc)
+
+@api.put("/qc-inspections/{qid}")
+async def update_qc_inspection(qid: str, req: QCInspection, claims: dict = Depends(check_jwt)):
+    """Update a dimensional QC inspection."""
+    req.updated_at = now_iso()
+    await db.qc_inspections.update_one({"_id": ObjectId(qid)}, {"$set": req.model_dump(by_alias=False)})
+    return {"ok": True}
+
+@api.delete("/qc-inspections/{qid}")
+async def delete_qc_inspection(qid: str, claims: dict = Depends(check_jwt)):
+    """Delete a dimensional QC inspection."""
+    await db.qc_inspections.delete_one({"_id": ObjectId(qid)})
+    return {"ok": True}
+
+@api.post("/qc-inspections/{qid}/drawing")
+async def upload_qc_drawing(qid: str, file: UploadFile = File(...), claims: dict = Depends(check_jwt)):
+    """Upload a drawing PDF to a QC inspection. Stores as base64."""
+    content = await file.read()
+    b64 = base64.b64encode(content).decode("utf-8")
+    await db.qc_inspections.update_one(
+        {"_id": ObjectId(qid)},
+        {"$set": {"drawing_pdf_b64": b64}}
+    )
+    return {"ok": True, "size": len(content)}
+
+# --- Export Helpers ---
+def build_qc_pdf(inspection: dict) -> bytes:
+    """Generate a PDF matching the Denplex QC report template.
+
+    Layout:
+    - Header: Report No, Date, Supplier, Invoice, Part Name, Drawing Name
+    - Dimensions row (specs with tolerances)
+    - 10 sample measurement rows
+    - QC Result + Sign columns
+    - Overall pass/fail at bottom
+    """
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.units import mm
+    from reportlab.platypus import Table, TableStyle, Paragraph, Spacer, PageTemplate, BaseDocTemplate
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+
+    # Use landscape A4
+    w, h = landscape(A4)  # ~297 x 210 mm
+
+    buffer = BytesIO()
+    doc = BaseDocTemplate(buffer, pagesize=landscape(A4), topMargin=10*mm, bottomMargin=10*mm, leftMargin=10*mm, rightMargin=10*mm)
+    story = []
+    styles = getSampleStyleSheet()
+
+    # --- Header Section ---
+    header_style = ParagraphStyle("header", parent=styles["Normal"], fontSize=10, fontName="Helvetica-Bold")
+    story.append(Paragraph(f"DENPLEX — Quality Inspection Report", header_style))
+    story.append(Spacer(1, 5*mm))
+
+    # Header grid
+    header_data = [
+        ["Report No.", inspection.get("report_no", "—")],
+        ["Date", inspection.get("inspection_date", "—")],
+        ["Supplier", inspection.get("supplier_name", "—")],
+        ["Invoice No & Date", f"{inspection.get('invoice_no', '—')} / {inspection.get('invoice_date', '—')}"],
+        ["Part Name", inspection.get("part_name", "—")],
+        ["Part Number", inspection.get("part_number", "—")],
+        ["Drawing Name", inspection.get("drawing_name", "—")],
+        ["Inspector", inspection.get("inspector_name", "—")],
+    ]
+    header_table = Table(header_data, colWidths=[50*mm, 130*mm])
+    header_table.setStyle(TableStyle([
+        ("FONT", (0, 0), (-1, -1), "Helvetica", 9),
+        ("TEXTCOLOR", (0, 0), (0, -1), colors.grey),
+        ("BACKGROUND", (0, 0), (0, -1), colors.lightgrey),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 3),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+    ]))
+    story.append(header_table)
+    story.append(Spacer(1, 5*mm))
+
+    # --- Measurements Table ---
+    dims = inspection.get("dimensions", [])
+    samples = inspection.get("samples", [])
+
+    # Column headers: [Sample #, then one column per dimension, QC Result, Sign]
+    table_data = [["Sample #"] + [d.get("label", "?") for d in dims] + ["QC Result", "Sign"]]
+
+    # Specs row
+    specs_row = ["SPEC"] + [d.get("raw_spec", "—") for d in dims] + ["", ""]
+    table_data.append(specs_row)
+
+    # Sample rows (1-10)
+    for sample in samples[:10]:
+        measurements = sample.get("measurements", [])
+        result = sample.get("result", "")
+        sign = sample.get("sign", "")
+        row = [str(sample.get("sample_no", ""))]
+        for i, m in enumerate(measurements):
+            row.append(str(m) if m is not None else "")
+        row.extend([result.upper() if result else "", sign])
+        table_data.append(row)
+
+    # Pad to 10 sample rows if needed
+    while len(table_data) < 12:  # header + spec + 10 samples
+        table_data.append([""] * len(table_data[0]))
+
+    col_width = (w - 20*mm) / len(table_data[0])
+    meas_table = Table(table_data, colWidths=[col_width] * len(table_data[0]))
+    meas_table.setStyle(TableStyle([
+        ("FONT", (0, 0), (-1, -1), "Helvetica", 8),
+        ("FONT", (0, 0), (-1, 1), "Helvetica-Bold", 9),
+        ("BACKGROUND", (0, 0), (-1, 1), colors.lightgrey),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("HEIGHT", (0, 0), (-1, -1), 18),
+    ]))
+    story.append(meas_table)
+    story.append(Spacer(1, 3*mm))
+
+    # --- Overall Result ---
+    overall = inspection.get("overall_result", "pending").upper()
+    overall_color = colors.green if overall == "PASS" else colors.red if overall == "FAIL" else colors.yellow
+    overall_text = ParagraphStyle("overall", parent=styles["Normal"], fontSize=12, fontName="Helvetica-Bold", textColor=overall_color)
+    story.append(Paragraph(f"Overall Result: {overall}", overall_text))
+
+    # Build PDF
+    doc.build(story)
+    return buffer.getvalue()
+
+def build_qc_excel(inspection: dict) -> bytes:
+    """Generate Excel file matching the Denplex QC report template."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "QC Report"
+
+    row = 1
+    # --- Header ---
+    ws[f"A{row}"] = "DENPLEX — Quality Inspection Report"
+    ws[f"A{row}"].font = Font(bold=True, size=12)
+    row += 2
+
+    # Header info
+    header_fields = [
+        ("Report No.", inspection.get("report_no", "—")),
+        ("Date", inspection.get("inspection_date", "—")),
+        ("Supplier", inspection.get("supplier_name", "—")),
+        ("Invoice No & Date", f"{inspection.get('invoice_no', '—')} / {inspection.get('invoice_date', '—')}"),
+        ("Part Name", inspection.get("part_name", "—")),
+        ("Part Number", inspection.get("part_number", "—")),
+        ("Drawing Name", inspection.get("drawing_name", "—")),
+        ("Inspector", inspection.get("inspector_name", "—")),
+    ]
+    for label, value in header_fields:
+        ws[f"A{row}"] = label
+        ws[f"B{row}"] = value
+        ws[f"A{row}"].font = Font(bold=True, size=10)
+        row += 1
+
+    row += 1
+    # --- Measurements Table ---
+    dims = inspection.get("dimensions", [])
+    samples = inspection.get("samples", [])
+
+    # Headers
+    headers = ["Sample #"] + [d.get("label", "?") for d in dims] + ["QC Result", "Sign"]
+    for col_idx, header in enumerate(headers, start=1):
+        cell = ws.cell(row=row, column=col_idx, value=header)
+        cell.font = Font(bold=True, size=10)
+        cell.fill = PatternFill(start_color="CCCCCC", end_color="CCCCCC", fill_type="solid")
+    row += 1
+
+    # Specs row
+    specs = ["SPEC"] + [d.get("raw_spec", "—") for d in dims] + ["", ""]
+    for col_idx, spec in enumerate(specs, start=1):
+        cell = ws.cell(row=row, column=col_idx, value=spec)
+        cell.font = Font(bold=True, size=9)
+        cell.fill = PatternFill(start_color="E8E8E8", end_color="E8E8E8", fill_type="solid")
+    row += 1
+
+    # Sample rows
+    for sample in samples[:10]:
+        measurements = sample.get("measurements", [])
+        result = sample.get("result", "")
+        sign = sample.get("sign", "")
+        sample_no = sample.get("sample_no", "")
+
+        ws.cell(row=row, column=1, value=sample_no)
+        for col_idx, m in enumerate(measurements, start=2):
+            ws.cell(row=row, column=col_idx, value=m)
+        ws.cell(row=row, column=len(dims) + 2, value=result.upper() if result else "")
+        ws.cell(row=row, column=len(dims) + 3, value=sign)
+        row += 1
+
+    # Pad to 10 rows
+    while row < 13 + len(header_fields):
+        row += 1
+
+    # Overall result
+    row += 1
+    ws[f"A{row}"] = "Overall Result:"
+    ws[f"B{row}"] = inspection.get("overall_result", "pending").upper()
+    ws[f"A{row}"].font = Font(bold=True, size=11)
+    ws[f"B{row}"].font = Font(bold=True, size=11, color="FF0000" if inspection.get("overall_result") == "fail" else "00AA00")
+
+    # Adjust column widths
+    ws.column_dimensions["A"].width = 15
+    for col_idx in range(2, len(headers) + 1):
+        ws.column_dimensions[chr(64 + col_idx)].width = 12
+
+    buffer = BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
+
+@api.get("/qc-inspections/{qid}/pdf")
+async def export_qc_pdf(qid: str, claims: dict = Depends(check_jwt)):
+    """Export QC inspection as PDF (Denplex template format)."""
+    doc = await db.qc_inspections.find_one({"_id": ObjectId(qid)})
+    if not doc:
+        raise HTTPException(status_code=404, detail="QC inspection not found")
+
+    pdf_bytes = build_qc_pdf(doc)
+    return StreamingResponse(
+        BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename=qc-{doc.get('code', 'report')}.pdf"}
+    )
+
+@api.get("/qc-inspections/{qid}/xlsx")
+async def export_qc_xlsx(qid: str, claims: dict = Depends(check_jwt)):
+    """Export QC inspection as Excel (Denplex template format)."""
+    doc = await db.qc_inspections.find_one({"_id": ObjectId(qid)})
+    if not doc:
+        raise HTTPException(status_code=404, detail="QC inspection not found")
+
+    xlsx_bytes = build_qc_excel(doc)
+    return StreamingResponse(
+        BytesIO(xlsx_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename=qc-{doc.get('code', 'report')}.xlsx"}
+    )
+
+
 class DocumentMeta(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: str = Field(default_factory=new_id)
