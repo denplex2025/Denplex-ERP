@@ -49,6 +49,7 @@ const NAV_GROUPS = [
       { to: "/app/parts", label: "Part Master", icon: Cog, testid: "nav-parts" },
       { to: "/app/bom", label: "BOM", icon: Layers, testid: "nav-bom" },
       { to: "/app/work-orders", label: "Work Orders", icon: ClipboardList, testid: "nav-work-orders" },
+      { to: "/app/machines", label: "Machines", icon: Cog, testid: "nav-machines" },
       { to: "/app/job-cards", label: "Job Cards", icon: FileText, testid: "nav-job-cards" },
       { to: "/app/docs/job-work-out", label: "Job Work Out", icon: Wrench, testid: "nav-job-work-out" },
       { to: "/app/inventory", label: "Inventory", icon: Boxes, testid: "nav-inventory" },

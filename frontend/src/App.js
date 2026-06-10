@@ -46,6 +46,7 @@ import ProformaInvoices from "./pages/ProformaInvoices";
 import SaleReturns from "./pages/SaleReturns";
 import PurchaseReturns from "./pages/PurchaseReturns";
 import Parts from "./pages/Parts";
+import Machines from "./pages/Machines";
 
 function App() {
   return (
@@ -87,6 +88,7 @@ function App() {
               <Route path="sale-returns" element={<SaleReturns />} />
               <Route path="purchase-returns" element={<PurchaseReturns />} />
               <Route path="parts" element={<Parts />} />
+              <Route path="machines" element={<Machines />} />
             </Route>
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>

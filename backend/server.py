@@ -37,6 +37,8 @@ import email as emaillib
 import re
 import ssl
 import hashlib
+from bson import ObjectId
+from io import BytesIO
 from cryptography.fernet import Fernet, InvalidToken
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
@@ -849,6 +851,115 @@ def check_tolerance(measured: Optional[float], nominal: Optional[float], tol_upp
     except:
         return ""
 
+# --- Q.QC.1 helper: Mongo doc normalization ---
+def fixup(doc):
+    """Normalize a MongoDB document for JSON return: stringify _id and mirror to id."""
+    if not doc:
+        return doc
+    if "_id" in doc:
+        doc["_id"] = str(doc["_id"])
+        doc["id"] = doc["_id"]
+    return doc
+
+# --- Q.QC.3 helpers: dimension enrichment + auto pass/fail ---
+def enrich_dimensions(dims):
+    """Fill nominal + tolerances from the label / raw_spec when left blank by the user."""
+    out = []
+    for d in (dims or []):
+        d = dict(d)
+        if d.get("nominal") in (None, ""):
+            nom = extract_nominal_from_label(d.get("label", "") or "")
+            if nom is not None:
+                d["nominal"] = nom
+        if d.get("tol_upper") in (None, "") and d.get("tol_lower") in (None, ""):
+            tu, tl = parse_tolerance_spec((d.get("raw_spec") or d.get("label") or ""))
+            if tu is not None:
+                d["tol_upper"] = tu
+            if tl is not None:
+                d["tol_lower"] = tl
+        out.append(d)
+    return out
+
+def validate_inspection(doc):
+    """Compute per-sample pass/fail and the overall result from measurements vs tolerances.
+    Mutates and returns doc. Samples with no measurements are left untouched."""
+    dims = doc.get("dimensions", []) or []
+    samples = doc.get("samples", []) or []
+    any_fail = False
+    any_measured = False
+    for s in samples:
+        meas = s.get("measurements", []) or []
+        has_val = False
+        sample_fail = False
+        for i, d in enumerate(dims):
+            m = meas[i] if i < len(meas) else None
+            if m is None or m == "":
+                continue
+            try:
+                mv = float(m)
+            except (TypeError, ValueError):
+                continue
+            has_val = True
+            if check_tolerance(mv, d.get("nominal"), d.get("tol_upper"), d.get("tol_lower")) == "fail":
+                sample_fail = True
+        if has_val:
+            any_measured = True
+            s["result"] = "fail" if sample_fail else "pass"
+            if sample_fail:
+                any_fail = True
+    doc["overall_result"] = ("fail" if any_fail else "pass") if any_measured else "pending"
+    return doc
+
+# --- Q.QC.2 config: AI drawing extraction (Claude vision) ---
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+ANTHROPIC_BASE_URL = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
+QC_VISION_MODEL = os.environ.get("QC_VISION_MODEL", "claude-sonnet-4-5")
+
+QC_EXTRACT_PROMPT = (
+    "You are a precision-machining QC engineer. Read this engineering drawing and extract every "
+    "controlled dimension/parameter that should be inspected. Return ONLY a JSON array, no prose. "
+    "Each element: {\"label\": str, \"nominal\": number|null, \"tol_upper\": number|null, "
+    "\"tol_lower\": number|null, \"unit\": str, \"raw_spec\": str}. "
+    "nominal is the basic size; tol_upper/tol_lower are signed deviations (e.g. +0.04 and -0.00, "
+    "or +/-0.1 => +0.1/-0.1). For a fit code like H7/g6, convert to numeric deviations if the drawing "
+    "shows them, otherwise leave tolerances null and keep the fit code in raw_spec. unit defaults to "
+    "\"mm\". raw_spec is the exact text as drawn. Skip surface-finish/notes that are not measurable dimensions."
+)
+
+def _parse_dims_json(text: str):
+    """Parse the model's JSON array out of its reply and normalize to QCDimensionSpec dicts."""
+    import json
+    t = (text or "").strip()
+    if "```" in t:
+        for p in t.split("```"):
+            p = p.strip()
+            if p.startswith("json"):
+                p = p[4:].strip()
+            if p.startswith("[") or p.startswith("{"):
+                t = p
+                break
+    if not t.startswith("[") and "[" in t and "]" in t:
+        t = t[t.index("["): t.rindex("]") + 1]
+    try:
+        raw = json.loads(t)
+    except Exception:
+        return []
+    if isinstance(raw, dict):
+        raw = raw.get("dimensions") or raw.get("data") or []
+    dims = []
+    for d in (raw if isinstance(raw, list) else []):
+        if not isinstance(d, dict):
+            continue
+        dims.append({
+            "label": str(d.get("label") or d.get("name") or "").strip(),
+            "nominal": d.get("nominal"),
+            "tol_upper": d.get("tol_upper"),
+            "tol_lower": d.get("tol_lower"),
+            "unit": d.get("unit") or "mm",
+            "raw_spec": str(d.get("raw_spec") or d.get("label") or "").strip(),
+        })
+    return enrich_dimensions([d for d in dims if d["label"]])
+
 # --- Auto-code generation ---
 async def get_next_qc_inspection_code() -> str:
     """Generate next QCI code: QCI-0001, QCI-0002, etc."""
@@ -868,8 +979,11 @@ async def create_qc_inspection(req: QCInspection, claims: dict = Depends(get_cur
     req.created_by = claims.get("sub", "unknown")
     req.code = await get_next_qc_inspection_code()
     req.created_at = now_iso()
-    result = await db.qc_inspections.insert_one(req.model_dump(by_alias=False))
-    return {"id": str(result.inserted_id), "code": req.code}
+    data = req.model_dump(by_alias=False)
+    data["dimensions"] = enrich_dimensions(data.get("dimensions"))
+    validate_inspection(data)  # Q.QC.3 auto pass/fail
+    result = await db.qc_inspections.insert_one(data)
+    return {"id": str(result.inserted_id), "code": req.code, "overall_result": data.get("overall_result")}
 
 @api.get("/qc-inspections")
 async def list_qc_inspections(claims: dict = Depends(get_current_user)):
@@ -889,8 +1003,11 @@ async def get_qc_inspection(qid: str, claims: dict = Depends(get_current_user)):
 async def update_qc_inspection(qid: str, req: QCInspection, claims: dict = Depends(get_current_user)):
     """Update a dimensional QC inspection."""
     req.updated_at = now_iso()
-    await db.qc_inspections.update_one({"_id": ObjectId(qid)}, {"$set": req.model_dump(by_alias=False)})
-    return {"ok": True}
+    data = req.model_dump(by_alias=False)
+    data["dimensions"] = enrich_dimensions(data.get("dimensions"))
+    validate_inspection(data)  # Q.QC.3 auto pass/fail
+    await db.qc_inspections.update_one({"_id": ObjectId(qid)}, {"$set": data})
+    return {"ok": True, "overall_result": data.get("overall_result")}
 
 @api.delete("/qc-inspections/{qid}")
 async def delete_qc_inspection(qid: str, claims: dict = Depends(get_current_user)):
@@ -908,6 +1025,60 @@ async def upload_qc_drawing(qid: str, file: UploadFile = File(...), claims: dict
         {"$set": {"drawing_pdf_b64": b64}}
     )
     return {"ok": True, "size": len(content)}
+
+@api.post("/qc-inspections/{qid}/validate")
+async def validate_qc_inspection_endpoint(qid: str, claims: dict = Depends(get_current_user)):
+    """Q.QC.3 - recompute per-sample pass/fail + overall result for a saved inspection."""
+    doc = await db.qc_inspections.find_one({"_id": ObjectId(qid)})
+    if not doc:
+        raise HTTPException(status_code=404, detail="QC inspection not found")
+    doc["dimensions"] = enrich_dimensions(doc.get("dimensions"))
+    validate_inspection(doc)
+    await db.qc_inspections.update_one(
+        {"_id": ObjectId(qid)},
+        {"$set": {"dimensions": doc["dimensions"], "samples": doc.get("samples", []),
+                  "overall_result": doc.get("overall_result"), "updated_at": now_iso()}},
+    )
+    return fixup(doc)
+
+@api.post("/qc-inspections/extract-dimensions")
+async def extract_qc_dimensions(file: UploadFile = File(...), claims: dict = Depends(get_current_user)):
+    """Q.QC.2 - read an engineering drawing (PDF or image) with Claude vision and return a list
+    of inspectable dimensions to pre-fill a new inspection."""
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(503, "AI drawing extraction is not configured. Set ANTHROPIC_API_KEY "
+                                 "(optionally QC_VISION_MODEL / ANTHROPIC_BASE_URL) in the backend environment.")
+    content = await file.read()
+    if not content:
+        raise HTTPException(400, "Empty file.")
+    b64 = base64.b64encode(content).decode("utf-8")
+    ctype = (file.content_type or "").lower()
+    fname = (file.filename or "").lower()
+    if "pdf" in ctype or fname.endswith(".pdf"):
+        media_block = {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": b64}}
+    else:
+        media = ctype if ctype.startswith("image/") else "image/png"
+        media_block = {"type": "image", "source": {"type": "base64", "media_type": media, "data": b64}}
+    payload = {
+        "model": QC_VISION_MODEL,
+        "max_tokens": 2500,
+        "messages": [{"role": "user", "content": [media_block, {"type": "text", "text": QC_EXTRACT_PROMPT}]}],
+    }
+    headers = {"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=120) as cx:
+            r = await cx.post(f"{ANTHROPIC_BASE_URL}/v1/messages", json=payload, headers=headers)
+    except Exception as e:
+        raise HTTPException(502, f"Could not reach the vision API: {e}")
+    if r.status_code >= 400:
+        raise HTTPException(502, f"Vision API error {r.status_code}: {r.text[:300]}")
+    try:
+        body = r.json()
+        text = "".join(b.get("text", "") for b in body.get("content", []) if b.get("type") == "text")
+    except Exception as e:
+        raise HTTPException(502, f"Unexpected vision API response: {e}")
+    dims = _parse_dims_json(text)
+    return {"dimensions": dims, "count": len(dims)}
 
 # --- Export Helpers ---
 def build_qc_pdf(inspection: dict) -> bytes:
@@ -1577,6 +1748,181 @@ async def update_jc(jid: str, j: JobCard, user=Depends(get_current_user)):
 async def del_jc(jid: str, user=Depends(get_current_user)):
     await db.job_cards.delete_one({"id": jid})
     return {"ok": True}
+
+# ---------------- Machines (master) ----------------
+class Machine(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    code: Optional[str] = None
+    name: str
+    machine_type: Optional[str] = ""        # CNC Turning, VMC, Surface Grinder, Bandsaw ...
+    group: Optional[str] = ""               # work-center group (for future capacity planning)
+    status: Literal["available", "running", "maintenance", "idle"] = "available"
+    hourly_rate: float = 0                  # machine-hour cost (for future job costing)
+    location: Optional[str] = ""
+    is_active: bool = True
+    notes: Optional[str] = ""
+    created_at: str = Field(default_factory=now_iso)
+
+@api.post("/machines")
+async def create_machine(m: Machine, user=Depends(get_current_user)):
+    doc = m.model_dump()
+    if not doc.get("code"):
+        doc["code"] = await gen_code("MC", "machine")
+    await db.machines.insert_one(doc)
+    return serialize(doc)
+
+@api.get("/machines")
+async def list_machines(user=Depends(get_current_user)):
+    return await list_collection(db.machines)
+
+@api.put("/machines/{mid}")
+async def update_machine(mid: str, m: Machine, user=Depends(get_current_user)):
+    data = m.model_dump(); data.pop("id", None); data.pop("created_at", None)
+    await db.machines.update_one({"id": mid}, {"$set": data})
+    return {"ok": True}
+
+@api.delete("/machines/{mid}")
+async def del_machine(mid: str, user=Depends(require_roles("admin", "manager"))):
+    await db.machines.delete_one({"id": mid})
+    return {"ok": True}
+
+
+# ---------------- Work Order Operations (MES routing) ----------------
+class WOOperation(BaseModel):
+    """A single routing operation on a Work Order — the MES layer.
+    Operation -> Machine -> Operator -> Status -> Time."""
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    work_order_id: str = ""
+    work_order_code: Optional[str] = ""
+    seq: int = 0                              # routing sequence (10, 20, 30 ...)
+    operation: str                            # Cutting, CNC Turning, Grinding, QC ...
+    machine: Optional[str] = ""               # machine name / code
+    machine_id: Optional[str] = ""
+    operator: Optional[str] = ""              # operator name
+    operator_id: Optional[str] = ""
+    status: Literal["pending", "running", "done", "hold"] = "pending"
+    planned_minutes: float = 0
+    actual_minutes: float = 0
+    qty_done: float = 0
+    started_at: Optional[str] = ""
+    finished_at: Optional[str] = ""
+    notes: Optional[str] = ""
+    created_at: str = Field(default_factory=now_iso)
+
+def _op_minutes(start_iso: str, end_iso: str) -> float:
+    try:
+        s = datetime.fromisoformat((start_iso or "").replace("Z", "+00:00"))
+        e = datetime.fromisoformat((end_iso or "").replace("Z", "+00:00"))
+        return round(max(0.0, (e - s).total_seconds() / 60.0), 1)
+    except Exception:
+        return 0.0
+
+async def _wo_or_404(wid: str):
+    wo = await db.work_orders.find_one({"id": wid}, {"_id": 0})
+    if not wo:
+        raise HTTPException(404, "Work order not found")
+    return wo
+
+@api.get("/work-orders/{wid}/operations")
+async def list_wo_operations(wid: str, user=Depends(get_current_user)):
+    ops = await db.wo_operations.find({"work_order_id": wid}, {"_id": 0}).to_list(500)
+    ops.sort(key=lambda o: (o.get("seq", 0), o.get("created_at", "")))
+    return ops
+
+@api.post("/work-orders/{wid}/operations")
+async def add_wo_operation(wid: str, op: WOOperation, user=Depends(get_current_user)):
+    wo = await _wo_or_404(wid)
+    doc = op.model_dump()
+    doc["work_order_id"] = wid
+    doc["work_order_code"] = wo.get("code", "")
+    if not doc.get("seq"):
+        last = await db.wo_operations.find(
+            {"work_order_id": wid}, {"_id": 0, "seq": 1}).sort("seq", -1).to_list(1)
+        doc["seq"] = (last[0]["seq"] + 10) if last else 10
+    await db.wo_operations.insert_one(doc)
+    return serialize(doc)
+
+@api.put("/work-orders/{wid}/operations/{op_id}")
+async def update_wo_operation(wid: str, op_id: str, op: WOOperation, user=Depends(get_current_user)):
+    data = op.model_dump(); data.pop("id", None); data.pop("created_at", None)
+    data.pop("work_order_id", None); data.pop("work_order_code", None)
+    if data.get("started_at") and data.get("finished_at"):
+        data["actual_minutes"] = _op_minutes(data["started_at"], data["finished_at"])
+    await db.wo_operations.update_one({"id": op_id, "work_order_id": wid}, {"$set": data})
+    return {"ok": True}
+
+@api.delete("/work-orders/{wid}/operations/{op_id}")
+async def del_wo_operation(wid: str, op_id: str, user=Depends(get_current_user)):
+    await db.wo_operations.delete_one({"id": op_id, "work_order_id": wid})
+    return {"ok": True}
+
+@api.post("/work-orders/{wid}/operations/{op_id}/start")
+async def start_wo_operation(wid: str, op_id: str, user=Depends(get_current_user)):
+    now = now_iso()
+    await db.wo_operations.update_one(
+        {"id": op_id, "work_order_id": wid},
+        {"$set": {"status": "running", "started_at": now}},
+    )
+    wo = await db.work_orders.find_one({"id": wid}, {"_id": 0})
+    if wo and wo.get("status") == "planned":
+        await db.work_orders.update_one({"id": wid}, {"$set": {"status": "in_progress"}})
+    return {"ok": True, "started_at": now}
+
+@api.post("/work-orders/{wid}/operations/{op_id}/complete")
+async def complete_wo_operation(wid: str, op_id: str, qty_done: Optional[float] = None,
+                                user=Depends(get_current_user)):
+    op = await db.wo_operations.find_one({"id": op_id, "work_order_id": wid}, {"_id": 0})
+    if not op:
+        raise HTTPException(404, "Operation not found")
+    now = now_iso()
+    started = op.get("started_at") or now
+    upd = {"status": "done", "finished_at": now, "started_at": started,
+           "actual_minutes": _op_minutes(started, now)}
+    if qty_done is not None:
+        upd["qty_done"] = qty_done
+    await db.wo_operations.update_one({"id": op_id, "work_order_id": wid}, {"$set": upd})
+    remaining = await db.wo_operations.count_documents(
+        {"work_order_id": wid, "status": {"$ne": "done"}})
+    if remaining == 0:
+        wo = await db.work_orders.find_one({"id": wid}, {"_id": 0})
+        if wo and wo.get("status") in ("planned", "in_progress"):
+            await db.work_orders.update_one({"id": wid}, {"$set": {"status": "qc"}})
+    return {"ok": True, "finished_at": now, "actual_minutes": upd["actual_minutes"]}
+
+@api.post("/work-orders/{wid}/operations/seed-from-part")
+async def seed_operations_from_part(wid: str, user=Depends(get_current_user)):
+    """Generate routing operations from the WO part's Part Master process list."""
+    wo = await _wo_or_404(wid)
+    part = None
+    pn = wo.get("part_number") or ""
+    if pn:
+        part = await db.parts.find_one({"part_number": pn}, {"_id": 0})
+    if not part:
+        raise HTTPException(404, "No Part Master matches this work order's part number. "
+                                 "Create the part (with a process list) first.")
+    processes = part.get("process") or []
+    if not processes:
+        raise HTTPException(400, "The matched Part Master has no process list to seed from.")
+    existing = await db.wo_operations.count_documents({"work_order_id": wid})
+    if existing:
+        raise HTTPException(400, "This work order already has operations. Delete them to re-seed.")
+    created = []
+    seq = 10
+    cyc = float(part.get("cycle_time_minutes") or 0)
+    qty = float(wo.get("qty") or 0)
+    for p in processes:
+        doc = WOOperation(
+            work_order_id=wid, work_order_code=wo.get("code", ""),
+            seq=seq, operation=str(p),
+            planned_minutes=round(cyc * qty, 1) if (cyc and qty) else 0,
+        ).model_dump()
+        await db.wo_operations.insert_one(doc)
+        created.append(serialize(doc))
+        seq += 10
+    return {"ok": True, "created": created, "count": len(created)}
+
 
 # ---------------- Helper: totals ----------------
 def compute_totals(lines: List[Dict[str, Any]]) -> Dict[str, float]:
@@ -4475,6 +4821,32 @@ async def dashboard_shopfloor(user=Depends(get_current_user)):
         {"_id": 0, "code": 1, "customer_name": 1, "product": 1, "due_date": 1, "status": 1, "priority": 1, "id": 1}
     ).sort("due_date", 1).to_list(5)
 
+    # M.5 — operation-level live counts (MES). Group active operations by name.
+    operation_stages = []
+    try:
+        op_pipeline = [
+            {"$match": {"status": {"$in": ["pending", "running", "hold", "done"]}}},
+            {"$group": {
+                "_id": "$operation",
+                "running": {"$sum": {"$cond": [{"$eq": ["$status", "running"]}, 1, 0]}},
+                "pending": {"$sum": {"$cond": [{"$eq": ["$status", "pending"]}, 1, 0]}},
+                "hold":    {"$sum": {"$cond": [{"$eq": ["$status", "hold"]}, 1, 0]}},
+                "done":    {"$sum": {"$cond": [{"$eq": ["$status", "done"]}, 1, 0]}},
+            }},
+        ]
+        op_rows = await db.wo_operations.aggregate(op_pipeline).to_list(100)
+        for r in op_rows:
+            running = r.get("running", 0); pending = r.get("pending", 0); hold = r.get("hold", 0)
+            operation_stages.append({
+                "operation": r["_id"] or "—",
+                "running": running, "pending": pending, "hold": hold,
+                "done": r.get("done", 0),
+                "active": running + pending + hold,
+            })
+        operation_stages.sort(key=lambda x: x["active"], reverse=True)
+    except Exception:
+        operation_stages = []
+
     return {
         "active_wo": active_wo,
         "delayed_jobs": delayed_count,
@@ -4482,6 +4854,7 @@ async def dashboard_shopfloor(user=Depends(get_current_user)):
         "today_dispatches": dispatches_today,
         "material_shortage": len(low_stock),
         "machine_utilization_pct": None,
+        "operation_stages": operation_stages,
         "workflow_stages": workflow_stages,
         "delayed_list": delayed_list,
         "low_stock_top": low_stock[:5],
