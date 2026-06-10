@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import api from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -9,7 +9,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PageHeader, Card, Th, Td, Empty, fmtDate } from "@/components/erp/Primitives";
 import { StatusBadge } from "@/components/erp/CrudPage";
-import { Plus, Trash2, X, ImageIcon, Download, DownloadCloud } from "lucide-react";
+import { Plus, Trash2, X, ImageIcon, Download, DownloadCloud, Sparkles } from "lucide-react";
 import { toast } from "sonner";
 
 export default function QC() {
@@ -160,6 +160,7 @@ function DimensionalQC() {
     samples: [],
     overall_result: "pending",
   });
+  const fileRef = useRef(null);
 
   const load = async () => {
     try {
@@ -219,6 +220,30 @@ function DimensionalQC() {
       });
     }
     setForm(p => ({ ...p, samples }));
+  };
+
+  const extractFromDrawing = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const fd = new FormData();
+    fd.append("file", file);
+    const tid = toast.loading("Reading drawing with AI\u2026");
+    try {
+      const res = await api.post("/qc-inspections/extract-dimensions", fd, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      const dims = res.data?.dimensions || [];
+      if (!dims.length) { toast.error("No dimensions found in the drawing"); }
+      else {
+        setForm((p) => ({ ...p, dimensions: dims, samples: [] }));
+        toast.success("Extracted " + dims.length + " dimension(s)");
+      }
+    } catch (err) {
+      toast.error(err?.response?.data?.detail || "Extraction failed");
+    } finally {
+      toast.dismiss(tid);
+      if (e.target) e.target.value = "";
+    }
   };
 
   const save = async () => {
@@ -409,9 +434,16 @@ function DimensionalQC() {
           <div className="mb-4">
             <div className="flex justify-between items-center mb-2">
               <Label className="font-semibold">Dimensions / Parameters</Label>
-              <Button size="sm" onClick={addDimension} className="rounded-sm bg-slate-200 text-slate-900 hover:bg-slate-300">
-                + Add Dimension
-              </Button>
+              <div className="flex items-center gap-2">
+                <input ref={fileRef} type="file" accept=".pdf,image/*" hidden onChange={extractFromDrawing} />
+                <Button size="sm" variant="outline" className="rounded-sm" onClick={() => fileRef.current?.click()}
+                  title="Extract dimensions from an engineering drawing using AI">
+                  <Sparkles className="h-3.5 w-3.5 mr-1 text-red-600" /> Extract from Drawing (AI)
+                </Button>
+                <Button size="sm" onClick={addDimension} className="rounded-sm bg-slate-200 text-slate-900 hover:bg-slate-300">
+                  + Add Dimension
+                </Button>
+              </div>
             </div>
             {(!form.dimensions || form.dimensions.length === 0) ? (
               <p className="text-sm text-slate-500">No dimensions added yet.</p>
