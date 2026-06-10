@@ -1081,108 +1081,171 @@ async def extract_qc_dimensions(file: UploadFile = File(...), claims: dict = Dep
     return {"dimensions": dims, "count": len(dims)}
 
 # --- Export Helpers ---
-def build_qc_pdf(inspection: dict) -> bytes:
-    """Generate a PDF matching the Denplex QC report template.
+def _qc_header_footer(canvas, doc):
+    """Denplex letterhead header + footer drawn on every QC report page."""
+    from reportlab.lib.units import mm
+    from reportlab.lib.utils import ImageReader
+    from reportlab.lib.colors import HexColor
+    W, H = doc.pagesize
+    RED = HexColor("#CC0000"); BLACK = HexColor("#1A1A1A"); GREY = HexColor("#666666")
+    canvas.saveState()
+    # ---- HEADER ----
+    try:
+        logo = ImageReader(str(ROOT_DIR / "logo.png"))
+        lw = 24*mm; lh = lw * 658.0/767.0
+        canvas.drawImage(logo, 12*mm, H - 8*mm - lh, width=lw, height=lh,
+                         preserveAspectRatio=True, mask='auto')
+    except Exception:
+        pass
+    cx = 40*mm
+    canvas.setFillColor(BLACK); canvas.setFont(_PDF_FONT_BOLD, 16)
+    canvas.drawString(cx, H - 13*mm, "DENPLEX ENGINEERING COMPANY")
+    canvas.setFillColor(GREY); canvas.setFont(_PDF_FONT_REGULAR, 8)
+    canvas.drawString(cx, H - 17*mm, "Complete Engineering Solutions  -  Since 2015")
+    canvas.setFillColor(RED); canvas.setFont(_PDF_FONT_BOLD, 7.5)
+    canvas.drawString(cx, H - 21*mm, "JIGS & FIXTURES   |   3D PRINTING   |   CAD/CAM   |   PRECISION MACHINING")
+    # right-aligned contact block
+    canvas.setFillColor(BLACK); canvas.setFont(_PDF_FONT_REGULAR, 7)
+    rx = W - 12*mm
+    canvas.drawRightString(rx, H - 11*mm, "Shed No.20, Pushkar Mahadev Estate-1, Vatva, Ahmedabad-382445")
+    canvas.drawRightString(rx, H - 14.5*mm, "+91 90333 38999   |   contact@denplex.co   |   www.denplex.co")
+    canvas.setFont(_PDF_FONT_BOLD, 7)
+    canvas.drawRightString(rx, H - 18*mm, "GST: 24AALFD1671P1Z2")
+    # red rule under header
+    canvas.setStrokeColor(RED); canvas.setLineWidth(1.4)
+    canvas.line(12*mm, H - 24*mm, W - 12*mm, H - 24*mm)
+    # ---- FOOTER ----
+    canvas.setFillColor(BLACK)
+    canvas.rect(0, 8*mm, W, 11*mm, stroke=0, fill=1)
+    canvas.setFillColor(HexColor("#DDDDDD")); canvas.setFont(_PDF_FONT_REGULAR, 7)
+    canvas.drawString(12*mm, 13.6*mm,
+        "Reg. Office: Shed No.4, Shriram Estate, Santej, Gandhinagar-382721")
+    canvas.drawCentredString(W/2.0, 13.6*mm,
+        "+91 90333 38999  -  contact@denplex.co  -  www.denplex.co")
+    canvas.setFillColor(RED); canvas.setFont(_PDF_FONT_BOLD, 7)
+    canvas.drawRightString(W - 12*mm, 13.6*mm, "GST: 24AALFD1671P1Z2")
+    canvas.setFillColor(HexColor("#888888")); canvas.setFont(_PDF_FONT_REGULAR, 7)
+    canvas.drawCentredString(W/2.0, 10*mm, "Complete Engineering Solutions  -  Since 2015  -  600+ Clients Served   |   Page %d" % canvas.getPageNumber())
+    canvas.restoreState()
 
-    Layout:
-    - Header: Report No, Date, Supplier, Invoice, Part Name, Drawing Name
-    - Dimensions row (specs with tolerances)
-    - 10 sample measurement rows
-    - QC Result + Sign columns
-    - Overall pass/fail at bottom
-    """
+
+def build_qc_pdf(inspection: dict) -> bytes:
+    """Denplex-branded dimensional Quality Inspection Report.
+    Letterhead header/footer + sample-format table (specified dims row + up to 10
+    actual-measurement rows + QC Result + Sign). Dimensions paginate in chunks."""
     from reportlab.lib.pagesizes import A4, landscape
-    from reportlab.pdfgen import canvas
     from reportlab.lib.units import mm
     from reportlab.platypus import Table, TableStyle, Paragraph, Spacer, SimpleDocTemplate
     from reportlab.lib import colors
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
-    # Use landscape A4
-    w, h = landscape(A4)  # ~297 x 210 mm
-
+    W, H = landscape(A4)
+    RED = colors.HexColor("#CC0000"); BLACK = colors.HexColor("#1A1A1A")
+    LGREY = colors.HexColor("#EFEFEF")
     buffer = BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), topMargin=10*mm, bottomMargin=10*mm, leftMargin=10*mm, rightMargin=10*mm)
-    story = []
+    doc = SimpleDocTemplate(
+        buffer, pagesize=landscape(A4),
+        topMargin=27*mm, bottomMargin=22*mm, leftMargin=10*mm, rightMargin=10*mm,
+        title="Quality Inspection Report",
+    )
     styles = getSampleStyleSheet()
+    P = lambda t, s=8, b=False, c=BLACK, a=0: Paragraph(
+        str(t), ParagraphStyle("p", parent=styles["Normal"], fontSize=s,
+            leading=s+2, fontName=(_PDF_FONT_BOLD if b else _PDF_FONT_REGULAR),
+            textColor=c, alignment=a))
+    story = []
 
-    # --- Header Section ---
-    header_style = ParagraphStyle("header", parent=styles["Normal"], fontSize=10, fontName="Helvetica-Bold")
-    story.append(Paragraph(f"DENPLEX — Quality Inspection Report", header_style))
-    story.append(Spacer(1, 5*mm))
+    # ---- Title ----
+    story.append(Paragraph("Quality Inspection Report",
+        ParagraphStyle("t", parent=styles["Title"], fontSize=15,
+            fontName=_PDF_FONT_BOLD, textColor=BLACK, alignment=1, spaceAfter=4)))
 
-    # Header grid
-    header_data = [
-        ["Report No.", inspection.get("report_no", "—")],
-        ["Date", inspection.get("inspection_date", "—")],
-        ["Supplier", inspection.get("supplier_name", "—")],
-        ["Invoice No & Date", f"{inspection.get('invoice_no', '—')} / {inspection.get('invoice_date', '—')}"],
-        ["Part Name", inspection.get("part_name", "—")],
-        ["Part Number", inspection.get("part_number", "—")],
-        ["Drawing Name", inspection.get("drawing_name", "—")],
-        ["Inspector", inspection.get("inspector_name", "—")],
+    # ---- Report header grid ----
+    hdr = [
+        [P("Report No.", 8, True), P(inspection.get("report_no") or inspection.get("code") or "-"),
+         P("Date", 8, True), P(inspection.get("inspection_date", "-"))],
+        [P("Supplier", 8, True), P(inspection.get("supplier_name", "-")),
+         P("Invoice No. & Date", 8, True),
+         P(f"{inspection.get('invoice_no','-')}  /  {inspection.get('invoice_date','-')}")],
+        [P("Part Name", 8, True), P(inspection.get("part_name", "-")),
+         P("Part Number", 8, True), P(inspection.get("part_number", "-"))],
+        [P("Drawing Name", 8, True), P(inspection.get("drawing_name", "-")),
+         P("Inspector", 8, True), P(inspection.get("inspector_name", "-"))],
     ]
-    header_table = Table(header_data, colWidths=[50*mm, 130*mm])
-    header_table.setStyle(TableStyle([
-        ("FONT", (0, 0), (-1, -1), "Helvetica", 9),
-        ("TEXTCOLOR", (0, 0), (0, -1), colors.grey),
-        ("BACKGROUND", (0, 0), (0, -1), colors.lightgrey),
-        ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 3),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+    htab = Table(hdr, colWidths=[34*mm, 95*mm, 38*mm, (W-20*mm-167*mm)])
+    htab.setStyle(TableStyle([
+        ("FONT", (0,0), (-1,-1), _PDF_FONT_REGULAR, 8),
+        ("GRID", (0,0), (-1,-1), 0.5, colors.black),
+        ("BACKGROUND", (0,0), (0,-1), LGREY),
+        ("BACKGROUND", (2,0), (2,-1), LGREY),
+        ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+        ("LEFTPADDING", (0,0), (-1,-1), 4), ("RIGHTPADDING", (0,0), (-1,-1), 4),
+        ("TOPPADDING", (0,0), (-1,-1), 3), ("BOTTOMPADDING", (0,0), (-1,-1), 3),
     ]))
-    story.append(header_table)
-    story.append(Spacer(1, 5*mm))
+    story.append(htab); story.append(Spacer(1, 4*mm))
 
-    # --- Measurements Table ---
-    dims = inspection.get("dimensions", [])
-    samples = inspection.get("samples", [])
+    dims = inspection.get("dimensions", []) or []
+    samples = (inspection.get("samples", []) or [])[:10]
+    if not dims:
+        dims = []
+    CHUNK = 9
+    chunks = [dims[i:i+CHUNK] for i in range(0, len(dims), CHUNK)] or [[]]
 
-    # Column headers: [Sample #, then one column per dimension, QC Result, Sign]
-    table_data = [["Sample #"] + [d.get("label", "?") for d in dims] + ["QC Result", "Sign"]]
+    for ci, chunk in enumerate(chunks):
+        ndim = len(chunk)
+        # header row: label + dim labels + QC Result + Sign
+        row0 = [P("Dimensions & Tolerances<br/>Specified in the Drawing", 7.5, True, a=1)]
+        row0 += [P(d.get("label", "-"), 8, True, a=1) for d in chunk]
+        row0 += [P("QC Result<br/>PASS / FAIL", 7.5, True, a=1), P("Sign", 7.5, True, a=1)]
+        # spec/tolerance row
+        rowspec = [P("ACTUAL MEASURED DIMENSIONS", 7.5, True, RED, a=1)]
+        rowspec += [P(d.get("raw_spec") or "-", 7, a=1) for d in chunk]
+        rowspec += [P("", 7), P("", 7)]
+        data = [row0, rowspec]
+        # 10 sample rows
+        for si in range(10):
+            s = samples[si] if si < len(samples) else {}
+            meas = s.get("measurements", []) or []
+            cells = [P(str(si+1), 8, True, a=1)]
+            for di in range(ndim):
+                gi = ci*CHUNK + di
+                v = meas[gi] if gi < len(meas) else None
+                cells.append(P("" if v is None else str(v), 8, a=1))
+            res = (s.get("result") or "").upper()
+            rc = colors.green if res == "PASS" else (RED if res == "FAIL" else BLACK)
+            cells.append(P(res or "", 8, True, rc, a=1))
+            cells.append(P(s.get("sign") or "", 8, a=1))
+            data.append(cells)
 
-    # Specs row
-    specs_row = ["SPEC"] + [d.get("raw_spec", "—") for d in dims] + ["", ""]
-    table_data.append(specs_row)
+        label_w = 42*mm; tail_w = 24*mm + 16*mm
+        dim_w = (W - 20*mm - label_w - tail_w) / max(ndim, 1)
+        col_w = [label_w] + [dim_w]*ndim + [24*mm, 16*mm]
+        t = Table(data, colWidths=col_w, rowHeights=[12*mm, 7*mm] + [7.6*mm]*10)
+        t.setStyle(TableStyle([
+            ("FONT", (0,0), (-1,-1), _PDF_FONT_REGULAR, 8),
+            ("GRID", (0,0), (-1,-1), 0.5, colors.black),
+            ("BACKGROUND", (0,0), (-1,0), LGREY),
+            ("BACKGROUND", (0,1), (0,1), colors.HexColor("#FBE9E9")),
+            ("SPAN", (0,1), (0,1)),
+            ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+            ("ALIGN", (0,0), (-1,-1), "CENTER"),
+        ]))
+        story.append(t)
+        # overall result under last chunk
+        if ci == len(chunks) - 1:
+            overall = (inspection.get("overall_result") or "pending").upper()
+            oc = colors.green if overall == "PASS" else (RED if overall == "FAIL" else colors.HexColor("#B8860B"))
+            story.append(Spacer(1, 3*mm))
+            story.append(Paragraph(f"Overall Result: {overall}",
+                ParagraphStyle("ov", parent=styles["Normal"], fontSize=12,
+                    fontName=_PDF_FONT_BOLD, textColor=oc)))
+        if ci < len(chunks) - 1:
+            from reportlab.platypus import PageBreak
+            story.append(PageBreak())
 
-    # Sample rows (1-10)
-    for sample in samples[:10]:
-        measurements = sample.get("measurements", [])
-        result = sample.get("result", "")
-        sign = sample.get("sign", "")
-        row = [str(sample.get("sample_no", ""))]
-        for i, m in enumerate(measurements):
-            row.append(str(m) if m is not None else "")
-        row.extend([result.upper() if result else "", sign])
-        table_data.append(row)
-
-    # Pad to 10 sample rows if needed
-    while len(table_data) < 12:  # header + spec + 10 samples
-        table_data.append([""] * len(table_data[0]))
-
-    col_width = (w - 20*mm) / len(table_data[0])
-    meas_table = Table(table_data, colWidths=[col_width] * len(table_data[0]))
-    meas_table.setStyle(TableStyle([
-        ("FONT", (0, 0), (-1, -1), "Helvetica", 8),
-        ("FONT", (0, 0), (-1, 1), "Helvetica-Bold", 9),
-        ("BACKGROUND", (0, 0), (-1, 1), colors.lightgrey),
-        ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
-        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-    ]))
-    story.append(meas_table)
-    story.append(Spacer(1, 3*mm))
-
-    # --- Overall Result ---
-    overall = inspection.get("overall_result", "pending").upper()
-    overall_color = colors.green if overall == "PASS" else colors.red if overall == "FAIL" else colors.yellow
-    overall_text = ParagraphStyle("overall", parent=styles["Normal"], fontSize=12, fontName="Helvetica-Bold", textColor=overall_color)
-    story.append(Paragraph(f"Overall Result: {overall}", overall_text))
-
-    # Build PDF
-    doc.build(story)
+    doc.build(story, onFirstPage=_qc_header_footer, onLaterPages=_qc_header_footer)
     return buffer.getvalue()
+
 
 def build_qc_excel(inspection: dict) -> bytes:
     """Generate Excel file matching the Denplex QC report template."""
