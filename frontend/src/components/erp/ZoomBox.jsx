@@ -9,7 +9,7 @@ import { ZoomIn, ZoomOut } from "lucide-react";
  *
  * Usage: <ZoomBox>{...big content...}</ZoomBox>
  */
-export default function ZoomBox({ children, min = 0.5, max = 1.6, step = 0.1, defaultZoom = 1, className = "" }) {
+export default function ZoomBox({ children, min = 0.7, max = 1.6, step = 0.1, defaultZoom = 1, className = "" }) {
   const [z, setZ] = useState(defaultZoom);
   const dec = () => setZ((v) => Math.max(min, +(v - step).toFixed(2)));
   const inc = () => setZ((v) => Math.min(max, +(v + step).toFixed(2)));
