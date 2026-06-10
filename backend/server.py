@@ -1094,7 +1094,7 @@ def build_qc_pdf(inspection: dict) -> bytes:
     from reportlab.lib.pagesizes import A4, landscape
     from reportlab.pdfgen import canvas
     from reportlab.lib.units import mm
-    from reportlab.platypus import Table, TableStyle, Paragraph, Spacer, PageTemplate, BaseDocTemplate
+    from reportlab.platypus import Table, TableStyle, Paragraph, Spacer, SimpleDocTemplate
     from reportlab.lib import colors
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
@@ -1102,7 +1102,7 @@ def build_qc_pdf(inspection: dict) -> bytes:
     w, h = landscape(A4)  # ~297 x 210 mm
 
     buffer = BytesIO()
-    doc = BaseDocTemplate(buffer, pagesize=landscape(A4), topMargin=10*mm, bottomMargin=10*mm, leftMargin=10*mm, rightMargin=10*mm)
+    doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), topMargin=10*mm, bottomMargin=10*mm, leftMargin=10*mm, rightMargin=10*mm)
     story = []
     styles = getSampleStyleSheet()
 
@@ -1170,7 +1170,6 @@ def build_qc_pdf(inspection: dict) -> bytes:
         ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
         ("ALIGN", (0, 0), (-1, -1), "CENTER"),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("HEIGHT", (0, 0), (-1, -1), 18),
     ]))
     story.append(meas_table)
     story.append(Spacer(1, 3*mm))
