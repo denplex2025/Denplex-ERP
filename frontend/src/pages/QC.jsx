@@ -9,7 +9,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PageHeader, Card, Th, Td, Empty, fmtDate } from "@/components/erp/Primitives";
 import { StatusBadge } from "@/components/erp/CrudPage";
-import { Plus, Trash2, X, ImageIcon, Download, DownloadCloud, Sparkles } from "lucide-react";
+import { Plus, Trash2, X, ImageIcon, Download, DownloadCloud, Sparkles, CheckCircle2 } from "lucide-react";
 import { toast } from "sonner";
 
 export default function QC() {
@@ -244,6 +244,28 @@ function DimensionalQC() {
       toast.dismiss(tid);
       if (e.target) e.target.value = "";
     }
+  };
+
+  const autoValidate = () => {
+    const dims = form.dimensions || [];
+    let anyFail = false, anyMeasured = false;
+    const samples = (form.samples || []).map((s) => {
+      const meas = s.measurements || [];
+      let hasVal = false, fail = false;
+      dims.forEach((d, i) => {
+        const m = meas[i];
+        if (m === null || m === undefined || m === "") return;
+        hasVal = true;
+        const nom = d.nominal, tu = d.tol_upper, tl = d.tol_lower;
+        if (nom != null && tu != null && tl != null) {
+          if (m > nom + tu || m < nom + tl) fail = true;
+        }
+      });
+      if (hasVal) { anyMeasured = true; if (fail) anyFail = true; return { ...s, result: fail ? "fail" : "pass" }; }
+      return s;
+    });
+    setForm((p) => ({ ...p, samples, overall_result: anyMeasured ? (anyFail ? "fail" : "pass") : "pending" }));
+    toast.success("Auto pass/fail applied");
   };
 
   const save = async () => {
@@ -501,11 +523,19 @@ function DimensionalQC() {
           <div className="mb-4">
             <div className="flex justify-between items-center mb-2">
               <Label className="font-semibold">Sample Measurements (up to 10)</Label>
-              {form.samples && form.samples.length === 0 && (
-                <Button size="sm" onClick={initSamples} className="rounded-sm bg-slate-200 text-slate-900 hover:bg-slate-300">
-                  Initialize 10 Samples
-                </Button>
-              )}
+              <div className="flex items-center gap-2">
+                {form.samples && form.samples.length > 0 && (
+                  <Button size="sm" variant="outline" className="rounded-sm" onClick={autoValidate}
+                    title="Compare every measurement to its tolerance and set pass/fail automatically">
+                    <CheckCircle2 className="h-3.5 w-3.5 mr-1 text-emerald-600" /> Auto Pass/Fail
+                  </Button>
+                )}
+                {form.samples && form.samples.length === 0 && (
+                  <Button size="sm" onClick={initSamples} className="rounded-sm bg-slate-200 text-slate-900 hover:bg-slate-300">
+                    Initialize 10 Samples
+                  </Button>
+                )}
+              </div>
             </div>
 
             {form.samples && form.samples.length > 0 && (
