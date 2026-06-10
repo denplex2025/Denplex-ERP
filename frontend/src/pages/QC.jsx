@@ -9,6 +9,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PageHeader, Card, Th, Td, Empty, fmtDate } from "@/components/erp/Primitives";
 import { StatusBadge } from "@/components/erp/CrudPage";
+import ZoomBox from "@/components/erp/ZoomBox";
 import { Plus, Trash2, X, ImageIcon, Download, DownloadCloud, Sparkles, CheckCircle2 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -430,6 +431,7 @@ function DimensionalQC() {
             </DialogTitle>
           </DialogHeader>
 
+          <ZoomBox>
           {/* Header Section */}
           <div className="grid grid-cols-3 gap-3 border-b pb-3 mb-3">
             <Field label="Part Name *">
@@ -619,6 +621,7 @@ function DimensionalQC() {
               </Select>
             </Field>
           </div>
+          </ZoomBox>
 
           <DialogFooter>
             <Button variant="outline" className="rounded-sm" onClick={() => setOpen(false)}>
