@@ -20,10 +20,6 @@
   --ink: #0A0A0A;
 }
 
-/* Global readability: +12% base font size across the whole ERP (16px -> 18px).
-   Tailwind text-* sizes are rem-based, so they all scale from here. */
-html { font-size: 18px; }
-
 body {
   margin: 0;
   font-family: 'IBM Plex Sans', system-ui, sans-serif;
