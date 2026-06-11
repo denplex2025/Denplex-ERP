@@ -12,6 +12,7 @@ export default function Quotations() {
       partyNameField="customer_name"
       partyKey="customer"
       statusOptions={["draft","sent","accepted","rejected"]}
+      aiQuote
     />
   );
 }

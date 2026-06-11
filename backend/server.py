@@ -2111,6 +2111,280 @@ def compute_totals(lines: List[Dict[str, Any]]) -> Dict[str, float]:
     return {"subtotal": round(subtotal, 2), "gst_total": round(gst_total, 2), "total": round(subtotal + gst_total, 2)}
 
 # ---------------- Quotations ----------------
+class QuoteEstimateIn(BaseModel):
+    image_base64: str = ""
+    mime: str = "image/png"
+    material: str = ""
+    qty: float = 1
+    part_name: str = ""
+
+QUOTE_ESTIMATE_PROMPT = (
+    "You are a senior estimator at a precision-machining / jigs & fixtures company. From this "
+    "engineering drawing, estimate a manufacturing quote AND draft techno-commercial content. "
+    "Return ONLY JSON, no prose: {\"part_name\":str, \"process_sequence\":[str], "
+    "\"machining_minutes_per_pc\":number, \"material_cost_per_pc\":number, \"machining_cost_per_pc\":number, "
+    "\"suggested_unit_price\":number, \"assumptions\":str, \"key_highlights\":[str], "
+    "\"technical_specifications\":[str], \"cycle_of_operation\":[str], \"inspection_criteria\":[str], "
+    "\"scope_of_buyer\":[str]}. All money in INR. suggested_unit_price = (material + machining) per piece "
+    "plus a reasonable margin (~25-35%). key_highlights: 3-5 selling points. technical_specifications: key "
+    "material/tolerances/specs. cycle_of_operation: ordered manufacturing or usage steps. inspection_criteria: "
+    "what is checked. scope_of_buyer: what the customer must provide. Be realistic for an Indian SME shop."
+)
+
+def _parse_quote_json(text: str):
+    import json
+    t = (text or "").strip()
+    if "```" in t:
+        for part in t.split("```"):
+            part = part.strip()
+            if part.startswith("json"):
+                part = part[4:].strip()
+            if part.startswith("{"):
+                t = part; break
+    if not t.startswith("{") and "{" in t and "}" in t:
+        t = t[t.index("{"): t.rindex("}") + 1]
+    try:
+        raw = json.loads(t)
+    except Exception:
+        return {}
+    return {
+        "part_name": str(raw.get("part_name") or "").strip(),
+        "process_sequence": [str(x) for x in (raw.get("process_sequence") or []) if str(x).strip()],
+        "machining_minutes_per_pc": raw.get("machining_minutes_per_pc") or 0,
+        "material_cost_per_pc": raw.get("material_cost_per_pc") or 0,
+        "machining_cost_per_pc": raw.get("machining_cost_per_pc") or 0,
+        "suggested_unit_price": raw.get("suggested_unit_price") or 0,
+        "assumptions": str(raw.get("assumptions") or "").strip(),
+        "key_highlights": [str(x) for x in (raw.get("key_highlights") or []) if str(x).strip()],
+        "technical_specifications": [str(x) for x in (raw.get("technical_specifications") or []) if str(x).strip()],
+        "cycle_of_operation": [str(x) for x in (raw.get("cycle_of_operation") or []) if str(x).strip()],
+        "inspection_criteria": [str(x) for x in (raw.get("inspection_criteria") or []) if str(x).strip()],
+        "scope_of_buyer": [str(x) for x in (raw.get("scope_of_buyer") or []) if str(x).strip()],
+    }
+
+@api.post("/quotations/ai-estimate")
+async def ai_quote_estimate(body: QuoteEstimateIn, user=Depends(get_current_user)):
+    """AI Quote Generator: drawing + material -> machining time, costs, process, suggested price."""
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(503, "AI quote estimation is not configured. Set ANTHROPIC_API_KEY in the backend environment.")
+    raw = (body.image_base64 or "").split(",")[-1].strip()
+    if not raw:
+        raise HTTPException(400, "Please attach a drawing (PDF or image).")
+    mime = (body.mime or "image/png").lower()
+    if "pdf" in mime:
+        block = {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": raw}}
+    else:
+        media = mime if mime.startswith("image/") else "image/png"
+        block = {"type": "image", "source": {"type": "base64", "media_type": media, "data": raw}}
+    ctx = f"Material: {body.material or 'unspecified'}. Quantity: {body.qty or 1} pcs. Part name: {body.part_name or '(read from drawing)'}.\n"
+    payload = {"model": QC_VISION_MODEL, "max_tokens": 1500,
+               "messages": [{"role": "user", "content": [block, {"type": "text", "text": ctx + QUOTE_ESTIMATE_PROMPT}]}]}
+    headers = {"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=120) as cx:
+            r = await cx.post(f"{ANTHROPIC_BASE_URL}/v1/messages", json=payload, headers=headers)
+    except Exception as e:
+        raise HTTPException(502, f"Could not reach the vision API: {e}")
+    if r.status_code >= 400:
+        raise HTTPException(502, f"Vision API error {r.status_code}: {r.text[:300]}")
+    try:
+        data = r.json()
+        text = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
+    except Exception as e:
+        raise HTTPException(502, f"Unexpected vision API response: {e}")
+    est = _parse_quote_json(text)
+    if not est:
+        raise HTTPException(502, "Could not parse an estimate from the drawing.")
+    return {"estimate": est}
+
+
+# ---------------- Quotation Word (.docx) generator ----------------
+_QD_BANK = [("GST No.", "24AALFD1671P1Z2"), ("PAN Card No.", "AALFD1671P"),
+            ("MSME UDYAM No.", "UDYAM-GJ-09-0005351"), ("Account Name", "DENPLEX ENGINEERING COMPANY"),
+            ("Bank Name", "INDUSIND BANK"), ("Branch", "BODAKDEV BRANCH"),
+            ("IFSC Code", "INDB0000232"), ("A/C Number", "259033338999")]
+_QD_TERMS = [("Payment Terms", "{payment}"),
+             ("Delivery Timeline", "Within 35-45 working days from date of PO and receipt of advance payment."),
+             ("Installation & Commissioning (I&C)", "{ic}"),
+             ("Standard Warranty", "1 year / standard warranty for electronic parts provided by manufacturer."),
+             ("Packaging & Forwarding (P&F)", "Charges applicable at actuals."),
+             ("Freight", "To be borne by the buyer at actuals."),
+             ("GST", "18% applicable as per prevailing tax laws."),
+             ("Offer Validity", "{validity} days from the date of quotation."),
+             ("Site Visit", "{sitevisit}"),
+             ("Jurisdiction", "All disputes are subject to Ahmedabad jurisdiction only.")]
+
+def build_quotation_docx(d, fmt="general"):
+    """Render a Denplex-letterhead quotation as editable .docx (general | techno)."""
+    import io as _io
+    from docx import Document
+    from docx.shared import Pt, RGBColor, Mm
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+    RED = RGBColor(0xCC, 0x00, 0x00); BLACK = RGBColor(0x1A, 0x1A, 0x1A)
+    GREY = RGBColor(0x55, 0x55, 0x55); WHITE = RGBColor(0xFF, 0xFF, 0xFF)
+    LETTERHEAD = str(ROOT_DIR / "letterhead.docx")
+
+    def shade(cell, hexc):
+        tcPr = cell._tc.get_or_add_tcPr(); sh = OxmlElement('w:shd')
+        sh.set(qn('w:val'), 'clear'); sh.set(qn('w:fill'), hexc); tcPr.append(sh)
+    def borders(table, color="999999", sz="4"):
+        tblPr = table._tbl.tblPr; b = OxmlElement('w:tblBorders')
+        for edge in ('top', 'left', 'bottom', 'right', 'insideH', 'insideV'):
+            e = OxmlElement('w:' + edge); e.set(qn('w:val'), 'single'); e.set(qn('w:sz'), sz)
+            e.set(qn('w:space'), '0'); e.set(qn('w:color'), color); b.append(e)
+        tblPr.append(b)
+    def run(par, text, size=10, bold=False, color=BLACK):
+        r = par.add_run(text); r.font.size = Pt(size); r.font.bold = bold
+        r.font.color.rgb = color; r.font.name = "Arial"; return r
+    def li(doc, marker="•  "):
+        par = doc.add_paragraph(); par.paragraph_format.left_indent = Mm(5)
+        par.paragraph_format.space_after = Pt(2); run(par, marker, 9); return par
+    def kv(doc, k, v):
+        par = li(doc); run(par, f"{k}: ", 9, True); run(par, v, 9)
+    def heading(doc, text):
+        par = doc.add_paragraph(); par.paragraph_format.space_before = Pt(6)
+        par.paragraph_format.space_after = Pt(2); run(par, text, 12, True, RED); return par
+    def inr(n):
+        try: return f"₹ {float(n):,.0f}/-"
+        except Exception: return str(n)
+
+    try:
+        doc = Document(LETTERHEAD)
+    except Exception:
+        doc = Document()
+    doc._body.clear_content()
+    try:
+        nrm = doc.styles["Normal"].font; nrm.name = "Arial"; nrm.size = Pt(10)
+    except Exception:
+        pass
+
+    t = doc.add_table(rows=3, cols=2); borders(t)
+    run(t.cell(0, 0).paragraphs[0], "TO,", 9, True); run(t.cell(0, 1).paragraphs[0], f"Date: {d['date']}", 9, True)
+    run(t.cell(1, 0).paragraphs[0], d.get('attn', ''), 9); run(t.cell(1, 1).paragraphs[0], f"Qtn. No.: {d.get('qtn_no','')}", 9)
+    run(t.cell(2, 0).paragraphs[0], d.get('customer', ''), 9, True); run(t.cell(2, 1).paragraphs[0], d.get('customer_addr', ''), 8)
+    doc.add_paragraph()
+
+    par = doc.add_paragraph(); par.alignment = WD_ALIGN_PARAGRAPH.CENTER; run(par, d.get('title', 'Quotation'), 14, True, BLACK)
+    if d.get('subtitle'):
+        ps = doc.add_paragraph(); ps.alignment = WD_ALIGN_PARAGRAPH.CENTER; run(ps, d['subtitle'], 10, False, GREY)
+    doc.add_paragraph()
+
+    def pricing():
+        tb = doc.add_table(rows=1, cols=5); borders(tb)
+        for i, cn in enumerate(["Sr.", "Description", "Qty", "Rate (INR)", "Total (INR)"]):
+            run(tb.rows[0].cells[i].paragraphs[0], cn, 9, True, WHITE); shade(tb.rows[0].cells[i], "1A1A1A")
+        sub = 0
+        for i, line in enumerate(d['lines'], 1):
+            row = tb.add_row().cells; tot = float(line['qty']) * float(line['rate']); sub += tot
+            run(row[0].paragraphs[0], str(i), 9); run(row[1].paragraphs[0], line['description'], 9)
+            run(row[2].paragraphs[0], str(line['qty']), 9)
+            run(row[3].paragraphs[0], inr(line['rate']) if float(line['rate']) else "Included", 9)
+            run(row[4].paragraphs[0], inr(tot) if tot else "Included", 9)
+        gst = sub * 0.18
+        for label, val, hexc, white in [("Sub Total", sub, "EFEFEF", False), ("GST @ 18%", gst, "EFEFEF", False), ("GRAND TOTAL (INR)", sub + gst, "CC0000", True)]:
+            row = tb.add_row().cells; m = row[0].merge(row[1]).merge(row[2]).merge(row[3])
+            run(m.paragraphs[0], label, 9, True, WHITE if white else BLACK); m.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.RIGHT
+            run(row[4].paragraphs[0], inr(val), 9, True, WHITE if white else BLACK)
+            for cc in row: shade(cc, hexc)
+
+    def photos():
+        if d.get('photos'):
+            heading(doc, "Concept Image (For Reference)")
+            for ph in d['photos'][:3]:
+                try: doc.add_paragraph().add_run().add_picture(_io.BytesIO(ph), width=Mm(120))
+                except Exception: pass
+
+    def terms(num=""):
+        heading(doc, f"{num}Terms & Conditions")
+        tv = {"payment": d.get('payment', "50% advance, balance before dispatch"), "ic": d.get('ic', "Not applicable"),
+              "validity": str(d.get('validity', 7)), "sitevisit": d.get('sitevisit', "Not applicable")}
+        for k, v in _QD_TERMS: kv(doc, k, v.format(**tv))
+
+    def bank(num=""):
+        heading(doc, f"{num}Company Details & Bank Details")
+        for k, v in _QD_BANK: kv(doc, k, v)
+
+    if fmt == "techno":
+        if d.get('highlights'):
+            box = doc.add_table(rows=1, cols=1); borders(box, "CC0000"); shade(box.cell(0, 0), "FBE9E9")
+            run(box.cell(0, 0).paragraphs[0], "KEY HIGHLIGHTS", 10, True, RED)
+            for hl in d['highlights']: run(box.cell(0, 0).add_paragraph(), f"•  {hl}", 9)
+            doc.add_paragraph()
+        heading(doc, "1.  Pricing Summary"); pricing(); doc.add_paragraph()
+        heading(doc, "2.  Technical Specifications")
+        for x in d.get('specs', []): run(li(doc), x, 9)
+        heading(doc, "3.  Standard Proposed Cycle of Operation")
+        for i, x in enumerate(d.get('cycle', []), 1): run(li(doc, f"{i}.  "), x, 9)
+        heading(doc, "4.  Inspection Criteria")
+        for x in d.get('inspection', []): run(li(doc), x, 9)
+        heading(doc, "5.  Scope of Buyer")
+        for x in d.get('scope', []): run(li(doc), x, 9)
+        photos(); terms("6.  "); bank("7.  ")
+    else:
+        photos(); pricing(); doc.add_paragraph(); terms(); bank()
+
+    doc.add_paragraph(); run(doc.add_paragraph(), "Looking forward to your kind acknowledgement.", 9, True)
+    run(doc.add_paragraph(), "\nFor DENPLEX ENGINEERING COMPANY\n\n\nAuthorised Signatory", 9, True)
+    out = _io.BytesIO(); doc.save(out); return out.getvalue()
+
+
+class QuoteDocLine(BaseModel):
+    description: str = ""
+    qty: float = 1
+    rate: float = 0
+
+class QuoteDocIn(BaseModel):
+    format: str = "general"
+    date: str = ""
+    qtn_no: str = ""
+    attn: str = ""
+    customer: str = ""
+    customer_addr: str = ""
+    title: str = "Quotation"
+    subtitle: str = ""
+    lines: List[QuoteDocLine] = []
+    highlights: List[str] = []
+    specs: List[str] = []
+    cycle: List[str] = []
+    inspection: List[str] = []
+    scope: List[str] = []
+    photos: List[str] = []
+    payment: str = ""
+    ic: str = ""
+    validity: int = 7
+    sitevisit: str = ""
+
+@api.post("/quotations/docx")
+async def quotation_docx(body: QuoteDocIn, user=Depends(get_current_user)):
+    """Generate an editable Word quotation (general | techno) on the Denplex letterhead."""
+    photos = []
+    for ph in (body.photos or []):
+        try: photos.append(base64.b64decode((ph or "").split(",")[-1]))
+        except Exception: pass
+    data = {
+        "date": body.date or datetime.now(timezone.utc).strftime("%d-%m-%Y"),
+        "qtn_no": body.qtn_no or "", "attn": body.attn or "",
+        "customer": body.customer or "", "customer_addr": body.customer_addr or "",
+        "title": body.title or "Quotation", "subtitle": body.subtitle or "",
+        "lines": [{"description": l.description, "qty": l.qty, "rate": l.rate} for l in body.lines] or [{"description": "Item", "qty": 1, "rate": 0}],
+        "highlights": body.highlights, "specs": body.specs, "cycle": body.cycle,
+        "inspection": body.inspection, "scope": body.scope, "photos": photos,
+        "payment": body.payment or "50% advance with PO, balance before dispatch",
+        "ic": body.ic or "As applicable", "validity": body.validity or 7,
+        "sitevisit": body.sitevisit or "As applicable",
+    }
+    fmt = "techno" if (body.format or "").lower().startswith("techno") else "general"
+    try:
+        blob = build_quotation_docx(data, fmt)
+    except Exception as e:
+        raise HTTPException(500, f"Could not generate the Word document: {e}")
+    fname = f"Quotation-{(body.qtn_no or 'draft').replace('/', '-')}.docx"
+    return Response(content=blob,
+                    media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    headers={"Content-Disposition": f"attachment; filename={fname}"})
+
 @api.post("/quotations")
 async def create_quote(q: Quotation, user=Depends(get_current_user)):
     doc = q.model_dump()

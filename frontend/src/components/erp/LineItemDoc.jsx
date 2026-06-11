@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import api from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -8,12 +8,13 @@ import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { PageHeader, Card, Th, Td, Empty, inr, fmtDate } from "@/components/erp/Primitives";
 import { StatusBadge } from "@/components/erp/CrudPage";
-import { Plus, Edit, Trash2, X, MessageCircle, FileDown, Mail, Eye, Download as DLIcon } from "lucide-react";
+import { Plus, Edit, Trash2, X, MessageCircle, FileDown, Mail, Eye, Download as DLIcon, Sparkles, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 
 /**
  * Generic document with line-items page (used for Quotations, POs, Invoices)
  */
+const _fileToB64 = (file) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(file); });
 export default function LineItemDoc({
   testid, overline, title, subtitle, endpoint,
   partyEndpoint, partyField, partyNameField, partyKey, // e.g. "customer"
@@ -21,6 +22,7 @@ export default function LineItemDoc({
   statusOptions,
   whatsappPartyEndpoint, // to look up phone for whatsapp
   isInvoice = false,
+  aiQuote = false,
 }) {
   const [items, setItems] = useState([]);
   const [parties, setParties] = useState([]);
@@ -30,6 +32,12 @@ export default function LineItemDoc({
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewUrl, setPreviewUrl] = useState("");
   const [previewRow, setPreviewRow] = useState(null);
+  const [aiOpen, setAiOpen] = useState(false);
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiResult, setAiResult] = useState(null);
+  const [aiForm, setAiForm] = useState({ customer_id: "", material: "", qty: 1, part_name: "" });
+  const aiFileRef = useRef(null);
+  const aiPhotoRef = useRef(null);
 
   const load = async () => {
     const r = await api.get(endpoint); setItems(r.data);
@@ -41,6 +49,56 @@ export default function LineItemDoc({
     setEditing(null);
     setForm({ lines: [{ description: "", qty: 1, rate: 0, gst_rate: 18 }], status: "draft", date: new Date().toISOString().slice(0,10), is_interstate: false });
     setOpen(true);
+  };
+  const runEstimate = async () => {
+    const f = aiFileRef.current?.files?.[0];
+    if (!f) { toast.error("Attach a drawing first"); return; }
+    setAiBusy(true); setAiResult(null);
+    try {
+      const b64 = await _fileToB64(f);
+      const r = await api.post("/quotations/ai-estimate", { image_base64: b64, mime: f.type, material: aiForm.material, qty: Number(aiForm.qty) || 1, part_name: aiForm.part_name });
+      setAiResult(r.data.estimate); toast.success("Estimate ready");
+    } catch (e) { toast.error(e?.response?.data?.detail || "Estimate failed"); }
+    setAiBusy(false);
+  };
+  const useEstimate = () => {
+    if (!aiResult) return;
+    const cust = parties.find(p => p.id === aiForm.customer_id);
+    const desc = (aiResult.part_name || aiForm.part_name || "Machined part") + (aiForm.material ? ` (${aiForm.material})` : "");
+    const notes = (aiResult.process_sequence?.length ? `Process: ${aiResult.process_sequence.join(" -> ")}. ` : "") + (aiResult.assumptions || "");
+    setEditing(null);
+    setForm({
+      [`${partyKey}_id`]: aiForm.customer_id || "",
+      [`${partyKey}_name`]: cust?.name || "",
+      date: new Date().toISOString().slice(0,10), status: "draft", is_interstate: false,
+      lines: [{ description: desc, qty: Number(aiForm.qty) || 1, rate: Number(aiResult.suggested_unit_price) || 0, gst_rate: 18 }],
+      notes: notes.trim(),
+    });
+    setAiOpen(false); setOpen(true);
+  };
+  const downloadWord = async (fmt) => {
+    if (!aiResult) return;
+    setAiBusy(true);
+    try {
+      const cust = parties.find(p => p.id === aiForm.customer_id);
+      const files = aiPhotoRef.current?.files ? Array.from(aiPhotoRef.current.files) : [];
+      const photos = [];
+      for (const f of files.slice(0, 3)) { photos.push(await _fileToB64(f)); }
+      const desc = (aiResult.part_name || aiForm.part_name || "Machined part") + (aiForm.material ? ` (${aiForm.material})` : "");
+      const title = aiResult.part_name ? `Quotation for ${aiResult.part_name}` : (aiForm.part_name ? `Quotation for ${aiForm.part_name}` : "Quotation");
+      const payload = {
+        format: fmt, customer: cust?.name || "", customer_addr: cust?.address || cust?.city || "",
+        title, lines: [{ description: desc, qty: Number(aiForm.qty) || 1, rate: Number(aiResult.suggested_unit_price) || 0 }],
+        highlights: aiResult.key_highlights || [], specs: aiResult.technical_specifications || [],
+        cycle: aiResult.cycle_of_operation || [], inspection: aiResult.inspection_criteria || [],
+        scope: aiResult.scope_of_buyer || [], photos,
+      };
+      const r = await api.post("/quotations/docx", payload, { responseType: "blob" });
+      const url = URL.createObjectURL(r.data); const a = document.createElement("a");
+      a.href = url; a.download = `Quotation-${fmt}.docx`; a.click(); URL.revokeObjectURL(url);
+      toast.success("Word quotation downloaded");
+    } catch (e) { toast.error(e?.response?.data?.detail || "Word download failed"); }
+    setAiBusy(false);
   };
   const openEdit = (row) => { setEditing(row); setForm({ ...row, lines: row.lines || [] }); setOpen(true); };
   const setF = (k, v) => setForm(p => ({ ...p, [k]: v }));
@@ -150,7 +208,10 @@ export default function LineItemDoc({
     <div data-testid={testid}>
       <PageHeader
         overline={overline} title={title} subtitle={subtitle}
-        actions={<Button onClick={openNew} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid={`${testid}-new`}><Plus className="h-4 w-4 mr-1" /> New</Button>}
+        actions={<div className="flex gap-2">
+          {aiQuote && <Button onClick={() => { setAiResult(null); setAiOpen(true); }} variant="outline" className="rounded-sm" data-testid={`${testid}-ai`}><Sparkles className="h-4 w-4 mr-1 text-red-600" /> AI Quote</Button>}
+          <Button onClick={openNew} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid={`${testid}-new`}><Plus className="h-4 w-4 mr-1" /> New</Button>
+        </div>}
       />
       <Card>
         {items.length === 0 ? <Empty label="No records yet." /> : (
@@ -279,6 +340,61 @@ export default function LineItemDoc({
           </div>
         </DialogContent>
       </Dialog>
+
+      {aiQuote && (
+      <Dialog open={aiOpen} onOpenChange={setAiOpen}>
+        <DialogContent className="rounded-sm sm:max-w-lg">
+          <DialogHeader><DialogTitle className="font-display flex items-center gap-2"><Sparkles className="w-5 h-5 text-red-600" /> AI Quote from Drawing</DialogTitle></DialogHeader>
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Customer">
+                <Select value={aiForm.customer_id || ""} onValueChange={v => setAiForm(p => ({ ...p, customer_id: v }))}>
+                  <SelectTrigger className="rounded-sm"><SelectValue placeholder="Select" /></SelectTrigger>
+                  <SelectContent>{parties.map(p => <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}</SelectContent>
+                </Select>
+              </Field>
+              <Field label="Quantity"><Input type="number" min="1" value={aiForm.qty} onChange={e => setAiForm(p => ({ ...p, qty: e.target.value }))} /></Field>
+              <Field label="Material"><Input value={aiForm.material} onChange={e => setAiForm(p => ({ ...p, material: e.target.value }))} placeholder="e.g. EN31, SS304, MS" /></Field>
+              <Field label="Part name (optional)"><Input value={aiForm.part_name} onChange={e => setAiForm(p => ({ ...p, part_name: e.target.value }))} /></Field>
+            </div>
+            <div>
+              <Label className="text-xs uppercase tracking-wider text-slate-600">Drawing (PDF or image)</Label>
+              <input ref={aiFileRef} type="file" accept=".pdf,image/*" className="mt-1.5 text-xs block w-full" />
+            </div>
+            <Button onClick={runEstimate} disabled={aiBusy} className="w-full rounded-sm bg-red-600 hover:bg-red-700">
+              {aiBusy ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : <Sparkles className="h-4 w-4 mr-1" />} Estimate
+            </Button>
+            {aiResult && (
+              <div className="border rounded-md p-3 bg-slate-50 text-sm space-y-1">
+                <div className="font-semibold">{aiResult.part_name || aiForm.part_name || "Estimate"}</div>
+                {aiResult.process_sequence?.length > 0 && <div className="text-xs text-slate-600">Process: {aiResult.process_sequence.join(" -> ")}</div>}
+                <div className="grid grid-cols-2 gap-x-4 text-xs text-slate-600 mt-1">
+                  <div>Machining: {aiResult.machining_minutes_per_pc} min/pc</div>
+                  <div>Material: Rs {aiResult.material_cost_per_pc}/pc</div>
+                  <div>Machining cost: Rs {aiResult.machining_cost_per_pc}/pc</div>
+                  <div className="font-semibold text-slate-800">Suggested: Rs {aiResult.suggested_unit_price}/pc</div>
+                </div>
+                {aiResult.assumptions && <div className="text-[11px] text-slate-400 mt-1">{aiResult.assumptions}</div>}
+              </div>
+            )}
+            {aiResult && (
+              <div className="border-t pt-3">
+                <Label className="text-xs uppercase tracking-wider text-slate-600">Concept photos for the Word doc (optional, images)</Label>
+                <input ref={aiPhotoRef} type="file" accept="image/*" multiple className="mt-1.5 text-xs block w-full" />
+                <div className="flex gap-2 mt-3">
+                  <Button onClick={() => downloadWord("general")} disabled={aiBusy} variant="outline" className="flex-1 rounded-sm"><FileDown className="h-4 w-4 mr-1" /> General Word</Button>
+                  <Button onClick={() => downloadWord("techno")} disabled={aiBusy} variant="outline" className="flex-1 rounded-sm"><FileDown className="h-4 w-4 mr-1" /> Techno-Commercial</Button>
+                </div>
+              </div>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" className="rounded-sm" onClick={() => setAiOpen(false)}>Cancel</Button>
+            <Button onClick={useEstimate} disabled={!aiResult} className="rounded-sm bg-red-600 hover:bg-red-700">Use in Quotation</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      )}
     </div>
   );
 }
