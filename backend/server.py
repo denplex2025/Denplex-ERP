@@ -2687,6 +2687,79 @@ async def scan_resolve(entity: str, eid: str, user=Depends(get_current_user)):
     return out
 
 
+# ---------------- Planning & Scheduling ----------------
+@api.get("/planning/overview")
+async def planning_overview(user=Depends(get_current_user)):
+    """Machine loading (from open operation minutes) + due-date schedule buckets."""
+    from datetime import date as _date, timedelta as _td
+    today = _date.today()
+
+    # Machine load: sum planned minutes of non-done operations, grouped by machine
+    pipeline = [
+        {"$match": {"status": {"$in": ["pending", "running", "hold"]}}},
+        {"$group": {
+            "_id": {"$ifNull": ["$machine", ""]},
+            "ops": {"$sum": 1},
+            "minutes": {"$sum": {"$ifNull": ["$planned_minutes", 0]}},
+            "running": {"$sum": {"$cond": [{"$eq": ["$status", "running"]}, 1, 0]}},
+        }},
+    ]
+    rows = await db.wo_operations.aggregate(pipeline).to_list(300)
+    machine_load = [{
+        "machine": (r["_id"] or "Unassigned"),
+        "ops": r["ops"],
+        "minutes": round(r.get("minutes", 0) or 0, 1),
+        "hours": round((r.get("minutes", 0) or 0) / 60.0, 1),
+        "running": r.get("running", 0),
+    } for r in rows]
+    machine_load.sort(key=lambda x: x["minutes"], reverse=True)
+
+    # Known machines with zero load still listed (so planners see idle capacity)
+    loaded_names = {m["machine"] for m in machine_load}
+    masters = await db.machines.find({"is_active": {"$ne": False}},
+                                     {"_id": 0, "name": 1, "group": 1, "status": 1}).to_list(500)
+    for m in masters:
+        nm = m.get("name") or ""
+        if nm and nm not in loaded_names:
+            machine_load.append({"machine": nm, "ops": 0, "minutes": 0, "hours": 0, "running": 0})
+
+    # Due-date buckets for active work orders
+    wos = await db.work_orders.find(
+        {"status": {"$nin": ["completed", "cancelled"]}},
+        {"_id": 0, "code": 1, "product": 1, "part_number": 1, "customer_name": 1,
+         "due_date": 1, "status": 1, "priority": 1, "id": 1, "qty": 1},
+    ).to_list(3000)
+
+    def which(d):
+        if not d:
+            return "no_date"
+        try:
+            dd = _date.fromisoformat(str(d)[:10])
+        except Exception:
+            return "no_date"
+        if dd < today:
+            return "overdue"
+        if dd == today:
+            return "today"
+        if dd <= today + _td(days=7):
+            return "this_week"
+        return "later"
+
+    buckets = {"overdue": [], "today": [], "this_week": [], "later": [], "no_date": []}
+    for w in wos:
+        buckets[which(w.get("due_date"))].append(w)
+    for k in buckets:
+        buckets[k].sort(key=lambda w: (str(w.get("due_date") or "9999"),
+                                       {"high": 0, "medium": 1, "low": 2}.get(w.get("priority"), 1)))
+
+    return {
+        "today": today.isoformat(),
+        "machine_load": machine_load,
+        "buckets": {k: {"count": len(v), "items": v[:60]} for k, v in buckets.items()},
+        "active_wo": len(wos),
+    }
+
+
 def _hsn_tax_summary(lines: List[Dict[str, Any]], is_interstate: bool) -> List[Dict[str, Any]]:
     """Aggregate per-HSN tax breakup for the Tax Summary block."""
     bucket: Dict[str, Dict[str, float]] = {}

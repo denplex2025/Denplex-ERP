@@ -6,7 +6,7 @@ import {
   LayoutDashboard, Boxes, Layers, ClipboardList, FileText,
   ShoppingCart, Receipt, Users, UserPlus, Truck, ShieldCheck,
   FileBox, Settings as SettingsIcon, LogOut, Menu, Calculator, UsersRound, Megaphone, Wrench, ScrollText,
-  ArrowDownToLine, ArrowUpFromLine, Banknote, Undo2, Cog
+  ArrowDownToLine, ArrowUpFromLine, Banknote, Undo2, Cog, CalendarRange
 } from "lucide-react";
 import { useState } from "react";
 import GlobalSpinner from "@/components/erp/GlobalSpinner";
@@ -50,6 +50,7 @@ const NAV_GROUPS = [
       { to: "/app/bom", label: "BOM", icon: Layers, testid: "nav-bom" },
       { to: "/app/work-orders", label: "Work Orders", icon: ClipboardList, testid: "nav-work-orders" },
       { to: "/app/machines", label: "Machines", icon: Cog, testid: "nav-machines" },
+      { to: "/app/planning", label: "Planning & Schedule", icon: CalendarRange, testid: "nav-planning" },
       { to: "/app/job-cards", label: "Job Cards", icon: FileText, testid: "nav-job-cards" },
       { to: "/app/docs/job-work-out", label: "Job Work Out", icon: Wrench, testid: "nav-job-work-out" },
       { to: "/app/inventory", label: "Inventory", icon: Boxes, testid: "nav-inventory" },
