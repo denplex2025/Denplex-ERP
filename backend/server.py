@@ -1683,9 +1683,90 @@ async def create_movement(m: StockMovement, user=Depends(get_current_user)):
 async def list_movements(user=Depends(get_current_user)):
     return await list_collection(db.movements)
 
+BILL_EXTRACT_PROMPT = (
+    "You are an accounts clerk for a precision-machining company. Read this purchase bill / "
+    "tax invoice and extract its data. Return ONLY a JSON object, no prose: "
+    "{\"supplier_name\":str, \"gstin\":str, \"bill_number\":str, \"bill_date\":str, "
+    "\"items\":[{\"description\":str, \"hsn\":str, \"qty\":number, \"uom\":str, "
+    "\"rate\":number, \"gst_rate\":number, \"amount\":number}], "
+    "\"sub_total\":number, \"tax\":number, \"total\":number}. "
+    "rate = price per unit before tax; gst_rate = the GST percent (e.g. 18); amount = line total. "
+    "Use empty string or 0 when a field is missing. Capture every line item."
+)
+
+def _parse_bill_json(text: str):
+    import json
+    t = (text or "").strip()
+    if "```" in t:
+        for part in t.split("```"):
+            part = part.strip()
+            if part.startswith("json"):
+                part = part[4:].strip()
+            if part.startswith("{") or part.startswith("["):
+                t = part; break
+    if not t.startswith("{") and "{" in t and "}" in t:
+        t = t[t.index("{"): t.rindex("}") + 1]
+    try:
+        raw = json.loads(t)
+    except Exception:
+        return {"supplier_name": "", "bill_number": "", "items": []}
+    items = []
+    for it in (raw.get("items") or []):
+        if not isinstance(it, dict):
+            continue
+        desc = str(it.get("description") or it.get("name") or "").strip()
+        if not desc:
+            continue
+        items.append({
+            "description": desc,
+            "hsn": str(it.get("hsn") or "").strip(),
+            "qty": it.get("qty") or it.get("quantity") or 0,
+            "uom": it.get("uom") or "pcs",
+            "rate": it.get("rate") or it.get("price") or 0,
+            "gst_rate": it.get("gst_rate") or it.get("gst") or 18,
+            "amount": it.get("amount") or 0,
+        })
+    return {
+        "supplier_name": str(raw.get("supplier_name") or "").strip(),
+        "gstin": str(raw.get("gstin") or "").strip(),
+        "bill_number": str(raw.get("bill_number") or raw.get("invoice_no") or "").strip(),
+        "bill_date": str(raw.get("bill_date") or "").strip(),
+        "items": items,
+        "sub_total": raw.get("sub_total") or 0,
+        "tax": raw.get("tax") or 0,
+        "total": raw.get("total") or 0,
+    }
+
 @api.post("/inventory/scan-bill")
 async def scan_bill(payload: BillScanIn, user=Depends(get_current_user)):
-    raise HTTPException(503, "AI bill scanning is temporarily disabled. Please enter bill details manually for now. This feature will be re-enabled soon.")
+    """AI bill OCR via Claude vision. Returns {extracted:{supplier_name, bill_number, items:[...]}}."""
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(503, "AI bill scanning is not configured. Set ANTHROPIC_API_KEY in the backend environment.")
+    raw = (payload.image_base64 or "").split(",")[-1].strip()
+    if not raw:
+        raise HTTPException(400, "Empty image")
+    mime = (payload.mime or "image/jpeg").lower()
+    if "pdf" in mime:
+        block = {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": raw}}
+    else:
+        media = mime if mime.startswith("image/") else "image/jpeg"
+        block = {"type": "image", "source": {"type": "base64", "media_type": media, "data": raw}}
+    body = {"model": QC_VISION_MODEL, "max_tokens": 3000,
+            "messages": [{"role": "user", "content": [block, {"type": "text", "text": BILL_EXTRACT_PROMPT}]}]}
+    headers = {"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=120) as cx:
+            r = await cx.post(f"{ANTHROPIC_BASE_URL}/v1/messages", json=body, headers=headers)
+    except Exception as e:
+        raise HTTPException(502, f"Could not reach the vision API: {e}")
+    if r.status_code >= 400:
+        raise HTTPException(502, f"Vision API error {r.status_code}: {r.text[:300]}")
+    try:
+        data = r.json()
+        text = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
+    except Exception as e:
+        raise HTTPException(502, f"Unexpected vision API response: {e}")
+    return {"extracted": _parse_bill_json(text)}
 
 # ---------------- BOM ----------------
 @api.post("/bom")
