@@ -4,7 +4,7 @@ import api from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Factory, AlertTriangle, ClipboardCheck, Truck, PackageX,
-  TrendingUp, TrendingDown, IndianRupee, ArrowRight,
+  TrendingUp, TrendingDown, IndianRupee, ArrowRight, Gauge,
 } from "lucide-react";
 import {
   AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
@@ -86,7 +86,7 @@ export default function Dashboard() {
             All work orders <ArrowRight className="w-3 h-3" />
           </Link>
         </div>
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
           <MetricTile icon={Factory} label="Active WO" value={activeWO}
             sublabel={`${stages.find((s) => s.key === "in_progress")?.count || 0} running`}
             color="blue" to="/app/work-orders" />
@@ -107,6 +107,11 @@ export default function Dashboard() {
             sublabel={asArr(m.material_shortage).length ? "Below reorder" : "Adequate"}
             color={asArr(m.material_shortage).length ? "red" : "slate"}
             to="/app/inventory?filter=shortage" />
+          <MetricTile icon={Gauge} label="Machine Util"
+            value={m.machine_utilization_pct == null ? "—" : `${m.machine_utilization_pct}%`}
+            sublabel={m.machines_total ? `${m.machines_running || 0}/${m.machines_total} running` : "Add machines"}
+            color={m.machine_utilization_pct == null ? "slate" : (m.machine_utilization_pct >= 70 ? "emerald" : (m.machine_utilization_pct >= 40 ? "amber" : "red"))}
+            to="/app/planning" />
         </div>
       </div>
 

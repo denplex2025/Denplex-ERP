@@ -5430,13 +5430,27 @@ async def dashboard_shopfloor(user=Depends(get_current_user)):
     except Exception:
         operation_stages = []
 
+    # Machine utilization — machines actively running an operation vs total active machines
+    try:
+        running_machines = await db.wo_operations.distinct("machine", {"status": "running", "machine": {"$nin": ["", None]}})
+        running_count = len([x for x in running_machines if x])
+        machines_total = await db.machines.count_documents({"is_active": {"$ne": False}})
+        if machines_total == 0:
+            allm = await db.wo_operations.distinct("machine", {"machine": {"$nin": ["", None]}})
+            machines_total = len([x for x in allm if x])
+        machine_util = round(running_count / machines_total * 100) if machines_total else None
+    except Exception:
+        running_count = 0; machines_total = 0; machine_util = None
+
     return {
         "active_wo": active_wo,
         "delayed_jobs": delayed_count,
         "qc_pending": qc_pending,
         "today_dispatches": dispatches_today,
         "material_shortage": len(low_stock),
-        "machine_utilization_pct": None,
+        "machine_utilization_pct": machine_util,
+        "machines_running": running_count,
+        "machines_total": machines_total,
         "operation_stages": operation_stages,
         "workflow_stages": workflow_stages,
         "delayed_list": delayed_list,
