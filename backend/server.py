@@ -1871,6 +1871,7 @@ class WOOperation(BaseModel):
     started_at: Optional[str] = ""
     finished_at: Optional[str] = ""
     notes: Optional[str] = ""
+    photos: List[str] = []                    # base64 inspection photos from shopfloor
     created_at: str = Field(default_factory=now_iso)
 
 def _op_minutes(start_iso: str, end_iso: str) -> float:
@@ -1952,6 +1953,39 @@ async def complete_wo_operation(wid: str, op_id: str, qty_done: Optional[float] 
         if wo and wo.get("status") in ("planned", "in_progress"):
             await db.work_orders.update_one({"id": wid}, {"$set": {"status": "qc"}})
     return {"ok": True, "finished_at": now, "actual_minutes": upd["actual_minutes"]}
+
+@api.post("/work-orders/{wid}/operations/{op_id}/hold")
+async def hold_wo_operation(wid: str, op_id: str, user=Depends(get_current_user)):
+    """Put an operation on hold (status only — preserves photos/timings)."""
+    res = await db.wo_operations.update_one(
+        {"id": op_id, "work_order_id": wid}, {"$set": {"status": "hold"}})
+    if res.matched_count == 0:
+        raise HTTPException(404, "Operation not found")
+    return {"ok": True}
+
+class OpPhotoIn(BaseModel):
+    photo: str  # base64 (data URL or raw)
+
+@api.post("/work-orders/{wid}/operations/{op_id}/photo")
+async def add_op_photo(wid: str, op_id: str, body: OpPhotoIn, user=Depends(get_current_user)):
+    """Shopfloor: attach an inspection photo to an operation (mobile)."""
+    photo = (body.photo or "").split(",")[-1].strip()  # strip data-URL prefix if present
+    if not photo:
+        raise HTTPException(400, "Empty photo")
+    op = await db.wo_operations.find_one({"id": op_id, "work_order_id": wid}, {"_id": 0, "photos": 1})
+    if op is None:
+        raise HTTPException(404, "Operation not found")
+    photos = (op.get("photos") or [])[:19]  # cap at 20 total
+    photos.append(photo)
+    await db.wo_operations.update_one({"id": op_id, "work_order_id": wid}, {"$set": {"photos": photos}})
+    return {"ok": True, "photo_count": len(photos)}
+
+@api.get("/work-orders/{wid}/operations/{op_id}/photos")
+async def get_op_photos(wid: str, op_id: str, user=Depends(get_current_user)):
+    op = await db.wo_operations.find_one({"id": op_id, "work_order_id": wid}, {"_id": 0, "photos": 1})
+    if op is None:
+        raise HTTPException(404, "Operation not found")
+    return {"photos": op.get("photos") or []}
 
 @api.post("/work-orders/{wid}/operations/seed-from-part")
 async def seed_operations_from_part(wid: str, user=Depends(get_current_user)):
@@ -2643,7 +2677,13 @@ async def scan_resolve(entity: str, eid: str, user=Depends(get_current_user)):
         ops = await db.wo_operations.find(
             {"work_order_id": eid}, {"_id": 0}).to_list(200)
         ops.sort(key=lambda o: (o.get("seq", 0), o.get("created_at", "")))
-        out["operations"] = ops
+        light = []
+        for o in ops:
+            pc = len(o.get("photos") or [])
+            o2 = {k: v for k, v in o.items() if k != "photos"}
+            o2["photo_count"] = pc
+            light.append(o2)
+        out["operations"] = light
     return out
 
 
