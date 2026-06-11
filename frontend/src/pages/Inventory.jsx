@@ -8,12 +8,14 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { PageHeader, Card, Th, Td, Empty, fmtDate } from "@/components/erp/Primitives";
-import { Plus, Edit, Trash2, ArrowDownToLine, ArrowUpFromLine, RefreshCw, Sparkles, Loader2 } from "lucide-react";
+import { Plus, Edit, Trash2, ArrowDownToLine, ArrowUpFromLine, RefreshCw, Sparkles, Loader2, QrCode } from "lucide-react";
+import QRView from "@/components/erp/QRView";
 import MaterialStates from "@/components/erp/MaterialStates";
 import { toast } from "sonner";
 
 export default function Inventory() {
   const [tab, setTab] = useState("items");
+  const [qrItem, setQrItem] = useState(null);
   const [items, setItems] = useState([]);
   const [moves, setMoves] = useState([]);
   const [open, setOpen] = useState(false);
@@ -145,6 +147,7 @@ export default function Inventory() {
                           <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => openMove(it, "in")} title="Stock In" data-testid={`stock-in-${it.id}`}><ArrowDownToLine className="h-4 w-4 text-emerald-700" /></Button>
                           <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => openMove(it, "out")} title="Stock Out" data-testid={`stock-out-${it.id}`}><ArrowUpFromLine className="h-4 w-4 text-red-700" /></Button>
                           <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => openMove(it, "adjust")} title="Adjust"><RefreshCw className="h-4 w-4 text-red-600" /></Button>
+                          <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => setQrItem({ entity: "inventory", id: it.id, code: it.sku, label: it.name })} title="QR code"><QrCode className="h-4 w-4 text-slate-600" /></Button>
                           <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => { setEditing(it); setForm(it); setOpen(true); }}><Edit className="h-4 w-4" /></Button>
                           <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => del(it)}><Trash2 className="h-4 w-4 text-red-600" /></Button>
                         </Td>
@@ -280,6 +283,8 @@ export default function Inventory() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <QRView item={qrItem} onClose={() => setQrItem(null)} />
     </div>
   );
 }

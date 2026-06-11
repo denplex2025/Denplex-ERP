@@ -2594,6 +2594,59 @@ def _upi_qr_png(upi_id: str, payee_name: str, amount: float = 0.0, note: str = "
     except Exception:
         return None
 
+
+# ---------------- QR codes (scan to open WO / Part / Inventory) ----------------
+QR_BASE_URL = os.environ.get("FRONTEND_URL", "https://erp.denplex.co").rstrip("/")
+# entity -> (collection name, code field, title field)
+_QR_ENTITIES = {
+    "work-order": ("work_orders", "code", "product"),
+    "part":       ("parts", "part_number", "name"),
+    "inventory":  ("items", "sku", "name"),
+}
+
+def _entity_qr_png(data: str) -> bytes:
+    import qrcode
+    qr = qrcode.QRCode(box_size=8, border=2,
+                       error_correction=qrcode.constants.ERROR_CORRECT_M)
+    qr.add_data(data); qr.make(fit=True)
+    img = qr.make_image(fill_color="#0A0A0A", back_color="#FFFFFF")
+    out = io.BytesIO(); img.save(out, format="PNG"); return out.getvalue()
+
+def _qr_spec(entity: str):
+    spec = _QR_ENTITIES.get(entity)
+    if not spec:
+        raise HTTPException(404, "Unknown QR entity")
+    return spec
+
+@api.get("/qr/{entity}/{eid}.png")
+async def entity_qr_png(entity: str, eid: str, user=Depends(get_current_user)):
+    _qr_spec(entity)
+    url = f"{QR_BASE_URL}/app/scan/{entity}/{eid}"
+    return Response(content=_entity_qr_png(url), media_type="image/png",
+                    headers={"Cache-Control": "public, max-age=86400"})
+
+@api.get("/scan/{entity}/{eid}")
+async def scan_resolve(entity: str, eid: str, user=Depends(get_current_user)):
+    cname, code_field, title_field = _qr_spec(entity)
+    coll = db[cname]
+    doc = await coll.find_one({"id": eid}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Record not found for this QR code")
+    out = {
+        "entity": entity,
+        "id": eid,
+        "code": doc.get(code_field) or doc.get("code") or eid,
+        "title": doc.get(title_field) or "",
+        "record": doc,
+    }
+    if entity == "work-order":
+        ops = await db.wo_operations.find(
+            {"work_order_id": eid}, {"_id": 0}).to_list(200)
+        ops.sort(key=lambda o: (o.get("seq", 0), o.get("created_at", "")))
+        out["operations"] = ops
+    return out
+
+
 def _hsn_tax_summary(lines: List[Dict[str, Any]], is_interstate: bool) -> List[Dict[str, Any]]:
     """Aggregate per-HSN tax breakup for the Tax Summary block."""
     bucket: Dict[str, Dict[str, float]] = {}

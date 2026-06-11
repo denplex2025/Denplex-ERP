@@ -8,9 +8,10 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
-import { Plus, Factory, Pencil, Trash2, Route } from "lucide-react";
+import { Plus, Factory, Pencil, Trash2, Route, QrCode } from "lucide-react";
 import StatusBadge from "@/components/erp/StatusBadge";
 import RoutingPanel from "@/components/erp/RoutingPanel";
+import QRView from "@/components/erp/QRView";
 
 const STATUSES   = ["planned", "in_progress", "qc", "completed", "on_hold", "cancelled"];
 const PRIORITIES = ["low", "medium", "high"];
@@ -37,6 +38,7 @@ export default function WorkOrders() {
   const [customers, setCustomers] = useState([]);
   const [parts, setParts]         = useState([]);
   const [routingWO, setRoutingWO] = useState(null);
+  const [qrItem, setQrItem] = useState(null);
 
   const refresh = async () => {
     setLoading(true);
@@ -189,6 +191,9 @@ export default function WorkOrders() {
                       <td className="px-4 py-2">{wo.due_date || "—"}</td>
                       <td className="px-4 py-2"><StatusBadge status={wo.status || "planned"} /></td>
                       <td className="px-4 py-2 text-right whitespace-nowrap">
+                        <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => setQrItem({ entity: "work-order", id: wo._id || wo.id, code: wo.wo_no || wo.code, label: wo.product || wo.part_name })} title="QR code">
+                          <QrCode className="h-4 w-4 text-slate-600" />
+                        </Button>
                         <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => setRoutingWO(wo)} title="Routing / Operations">
                           <Route className="h-4 w-4 text-red-600" />
                         </Button>
@@ -359,6 +364,7 @@ export default function WorkOrders() {
       </Dialog>
 
       <RoutingPanel wo={routingWO} onClose={() => setRoutingWO(null)} />
+      <QRView item={qrItem} onClose={() => setQrItem(null)} />
     </div>
   );
 }

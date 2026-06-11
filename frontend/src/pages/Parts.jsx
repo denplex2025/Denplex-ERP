@@ -10,7 +10,8 @@ import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { PageHeader, Card, Th, Td, Empty, fmtDate, inr } from "@/components/erp/Primitives";
 import ExportMenu from "@/components/erp/ExportMenu";
-import { Plus, FileText, Download, History, Search, Cog, Layers, Trash2, AlertTriangle } from "lucide-react";
+import QRView from "@/components/erp/QRView";
+import { Plus, FileText, Download, History, Search, Cog, Layers, Trash2, AlertTriangle, QrCode } from "lucide-react";
 import { toast } from "sonner";
 
 const PROCESS_OPTIONS = ["Turning", "Milling", "Grinding", "Drilling", "Tapping", "Boring", "Heat Treatment", "Plating", "Wire EDM", "Surface Treatment", "Assembly", "Welding", "Other"];
@@ -26,6 +27,7 @@ async function fileToBase64(file) {
 
 export default function Parts() {
   const [rows, setRows] = useState([]);
+  const [qrItem, setQrItem] = useState(null);
   const [customers, setCustomers] = useState([]);
   const [search, setSearch] = useState("");
   const [open, setOpen] = useState(false);
@@ -191,6 +193,7 @@ export default function Parts() {
                     <div className="flex gap-0.5">
                       {p.drawing_pdf_b64 && <Button size="icon" variant="ghost" className="h-7 w-7" title="Drawing PDF" onClick={() => dlDrawing(p.id, p.part_number)}><FileText className="h-3.5 w-3.5 text-red-600" /></Button>}
                       {p.step_file_b64 && <Button size="icon" variant="ghost" className="h-7 w-7" title="STEP / CAD" onClick={() => dlStep(p.id, p.part_number)}><Download className="h-3.5 w-3.5 text-blue-600" /></Button>}
+                      <Button size="icon" variant="ghost" className="h-7 w-7" title="QR code" onClick={() => setQrItem({ entity: "part", id: p.id, code: p.part_number, label: p.name })}><QrCode className="h-3.5 w-3.5 text-slate-600" /></Button>
                       <Button size="icon" variant="ghost" className="h-7 w-7" title="Revisions" onClick={() => openRevDialog(p)}><History className="h-3.5 w-3.5 text-slate-600" /></Button>
                       {p.is_active && <Button size="icon" variant="ghost" className="h-7 w-7" title="Deactivate" onClick={() => deletePart(p.id, p.part_number, false)}><Trash2 className="h-3.5 w-3.5 text-amber-600" /></Button>}
                       <Button size="icon" variant="ghost" className="h-7 w-7" title="Delete permanently" onClick={() => deletePart(p.id, p.part_number, true)}><AlertTriangle className="h-3.5 w-3.5 text-red-700" /></Button>
@@ -338,6 +341,8 @@ export default function Parts() {
           )}
         </DialogContent>
       </Dialog>
+
+      <QRView item={qrItem} onClose={() => setQrItem(null)} />
     </div>
   );
 }

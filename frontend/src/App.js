@@ -47,6 +47,7 @@ import SaleReturns from "./pages/SaleReturns";
 import PurchaseReturns from "./pages/PurchaseReturns";
 import Parts from "./pages/Parts";
 import Machines from "./pages/Machines";
+import Scan from "./pages/Scan";
 
 function App() {
   return (
@@ -89,6 +90,7 @@ function App() {
               <Route path="purchase-returns" element={<PurchaseReturns />} />
               <Route path="parts" element={<Parts />} />
               <Route path="machines" element={<Machines />} />
+              <Route path="scan/:entity/:id" element={<Scan />} />
             </Route>
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
