@@ -111,3 +111,20 @@ code {
   );
   height: 3px;
 }
+
+/* ===== ERP standard typography & controls (consistency pass) ===== */
+/* 1. Readable floor — no UI text below 12px; small text a touch larger.
+   Layout/spacing unchanged, so pages do NOT get wider. */
+.text-\[10px\], .text-\[11px\] { font-size: 12px !important; line-height: 1.2 !important; }
+.text-xs { font-size: 0.8125rem !important; }   /* 12px -> 13px */
+
+/* 2. Consistent table headers everywhere (raw tables + Primitives) */
+table thead th { font-weight: 600; color: #475569; }
+
+/* 3. Bigger, standard tap targets — scoped to buttons/inputs so other
+   elements with the same height class are unaffected. */
+button.h-6, button.h-7 { height: 2rem !important; }
+button.w-6, button.w-7 { width: 2rem !important; }
+button.h-8 { height: 2.25rem !important; }
+button.w-8 { width: 2.25rem !important; }
+input.h-7, input.h-8, select.h-7, select.h-8 { height: 2.25rem !important; }
