@@ -41,6 +41,7 @@ const NAV_GROUPS = [
       { to: "/app/docs/vendor-bills", label: "Purchase Bills", icon: Receipt, testid: "nav-vendor-bills" },
       { to: "/app/accounting", label: "Accounting", icon: Calculator, testid: "nav-accounting" },
       { to: "/app/statements", label: "Account Statements", icon: ScrollText, testid: "nav-statements" },
+      { to: "/app/costing", label: "Costing & Profitability", icon: Calculator, testid: "nav-costing" },
     ],
   },
   {

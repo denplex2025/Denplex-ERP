@@ -3138,6 +3138,114 @@ async def planning_overview(user=Depends(get_current_user)):
     }
 
 
+# ---------------- Costing & Profitability ----------------
+COSTING_DEFAULT_MACHINE_RATE = float(os.environ.get("COSTING_MACHINE_RATE", "400"))
+COSTING_DEFAULT_LABOUR_RATE = float(os.environ.get("COSTING_LABOUR_RATE", "120"))
+
+async def _costing_rates():
+    doc = await db.settings.find_one({"_id": "costing"}, {"_id": 0}) or {}
+    mr = float(doc.get("default_machine_rate") or 0) or COSTING_DEFAULT_MACHINE_RATE
+    lr = float(doc.get("default_labour_rate") or 0) or COSTING_DEFAULT_LABOUR_RATE
+    return mr, lr
+
+class CostingRatesIn(BaseModel):
+    default_machine_rate: float = 400
+    default_labour_rate: float = 120
+
+@api.put("/costing/rates")
+async def set_costing_rates(body: CostingRatesIn, user=Depends(get_current_user)):
+    await db.settings.replace_one({"_id": "costing"},
+        {"_id": "costing", "default_machine_rate": body.default_machine_rate,
+         "default_labour_rate": body.default_labour_rate}, upsert=True)
+    return {"ok": True}
+
+@api.get("/costing/overview")
+async def costing_overview(user=Depends(get_current_user)):
+    """Job costing per WO + machine/operator/customer profitability, from operation minutes x rates."""
+    mrate_default, lrate_default = await _costing_rates()
+
+    machines = await db.machines.find({}, {"_id": 0, "name": 1, "hourly_rate": 1}).to_list(500)
+    mrate = {m["name"]: (float(m.get("hourly_rate") or 0) or mrate_default) for m in machines if m.get("name")}
+    emps = await db.employees.find({}, {"_id": 0, "name": 1, "monthly_salary": 1}).to_list(2000)
+    erate = {}
+    for e in emps:
+        nm = (e.get("name") or "").strip().lower()
+        if nm:
+            erate[nm] = (float(e.get("monthly_salary") or 0) / 208.0) if e.get("monthly_salary") else lrate_default
+    items = await db.items.find({}, {"_id": 0, "name": 1, "unit_cost": 1}).to_list(8000)
+    icost = {(i.get("name") or "").strip().lower(): float(i.get("unit_cost") or 0) for i in items}
+
+    def op_minutes(o):
+        a = float(o.get("actual_minutes") or 0)
+        return a if a > 0 else float(o.get("planned_minutes") or 0)
+    def mrate_for(name):
+        return mrate.get(name, mrate_default) if name else mrate_default
+    def lrate_for(name):
+        return erate.get((name or "").strip().lower(), lrate_default) if name else lrate_default
+
+    ops = await db.wo_operations.find({}, {"_id": 0}).to_list(30000)
+    per_machine = {}; per_operator = {}; by_wo = {}
+    for o in ops:
+        mins = op_minutes(o)
+        mc = mins * mrate_for(o.get("machine")) / 60.0
+        lc = mins * lrate_for(o.get("operator")) / 60.0
+        mn = o.get("machine") or "Unassigned"
+        pm = per_machine.setdefault(mn, {"machine": mn, "minutes": 0, "cost": 0, "ops": 0})
+        pm["minutes"] += mins; pm["cost"] += mc; pm["ops"] += 1
+        on = o.get("operator") or "Unassigned"
+        po = per_operator.setdefault(on, {"operator": on, "minutes": 0, "ops": 0, "done": 0})
+        po["minutes"] += mins; po["ops"] += 1; po["done"] += 1 if o.get("status") == "done" else 0
+        w = by_wo.setdefault(o.get("work_order_id"), {"machining": 0, "labour": 0, "minutes": 0, "ops": 0})
+        w["machining"] += mc; w["labour"] += lc; w["minutes"] += mins; w["ops"] += 1
+
+    movs = await db.material_state_movements.find({"ref_type": "WO"}, {"_id": 0, "ref_id": 1, "item_name": 1, "qty": 1}).to_list(30000)
+    wo_material = {}
+    for mv in movs:
+        c = icost.get((mv.get("item_name") or "").strip().lower(), 0) * float(mv.get("qty") or 0)
+        rid = mv.get("ref_id")
+        wo_material[rid] = wo_material.get(rid, 0) + c
+
+    wos = await db.work_orders.find({}, {"_id": 0, "id": 1, "code": 1, "product": 1, "customer_name": 1, "qty": 1, "status": 1}).to_list(5000)
+    per_wo = []
+    for w in wos:
+        c = by_wo.get(w["id"], {"machining": 0, "labour": 0, "minutes": 0, "ops": 0})
+        mat = wo_material.get(w["id"], 0)
+        total = c["machining"] + c["labour"] + mat
+        qty = float(w.get("qty") or 0)
+        per_wo.append({"id": w["id"], "code": w.get("code"), "product": w.get("product"),
+            "customer": w.get("customer_name"), "qty": w.get("qty"), "status": w.get("status"),
+            "machining_cost": round(c["machining"], 1), "labour_cost": round(c["labour"], 1),
+            "material_cost": round(mat, 1), "total_cost": round(total, 1),
+            "cost_per_pc": round(total / qty, 2) if qty else 0, "ops": c["ops"]})
+    per_wo.sort(key=lambda x: x["total_cost"], reverse=True)
+
+    for d in per_machine.values():
+        d["hours"] = round(d["minutes"] / 60, 1); d["cost"] = round(d["cost"], 0)
+    for d in per_operator.values():
+        d["hours"] = round(d["minutes"] / 60, 1)
+    pm = sorted(per_machine.values(), key=lambda x: x["cost"], reverse=True)
+    po = sorted(per_operator.values(), key=lambda x: x["minutes"], reverse=True)
+
+    invs = await db.invoices.find({}, {"_id": 0, "customer_name": 1, "total": 1}).to_list(15000)
+    rev = {}
+    for iv in invs:
+        nm = iv.get("customer_name") or "—"; rev[nm] = rev.get(nm, 0) + float(iv.get("total") or 0)
+    wcost = {}
+    for w in per_wo:
+        nm = w.get("customer") or "—"; wcost[nm] = wcost.get(nm, 0) + w["total_cost"]
+    per_customer = []
+    for nm in set(list(rev.keys()) + list(wcost.keys())):
+        r = round(rev.get(nm, 0), 0); c = round(wcost.get(nm, 0), 0)
+        per_customer.append({"customer": nm, "revenue": r, "work_cost": c, "margin": round(r - c, 0)})
+    per_customer.sort(key=lambda x: x["revenue"], reverse=True)
+
+    return {
+        "rates": {"machine": mrate_default, "labour": lrate_default},
+        "totals": {"wip_cost": round(sum(w["total_cost"] for w in per_wo), 0), "wo_count": len(per_wo)},
+        "per_wo": per_wo[:100], "per_machine": pm, "per_operator": po, "per_customer": per_customer[:50],
+    }
+
+
 def _hsn_tax_summary(lines: List[Dict[str, Any]], is_interstate: bool) -> List[Dict[str, Any]]:
     """Aggregate per-HSN tax breakup for the Tax Summary block."""
     bucket: Dict[str, Dict[str, float]] = {}
