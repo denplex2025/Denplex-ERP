@@ -58,6 +58,11 @@ export default function Settings() {
     } catch (e) { toast.error(e?.response?.data?.detail || "Backup failed"); }
     setGdBusy("");
   };
+  const gdToggleAuto = async (v) => {
+    setGdrive((g) => ({ ...g, auto_backup: v }));
+    try { await api.put("/google/auto-backup", { enabled: v, interval_hours: 24 }); toast.success(v ? "Automatic daily backup on" : "Automatic backup off"); }
+    catch (e) { toast.error("Failed to update setting"); }
+  };
 
   const save = async () => {
     try { await api.put("/settings/integrations", s); toast.success("Saved"); load(); }
@@ -201,8 +206,11 @@ export default function Settings() {
                   <Button onClick={gdBackup} disabled={!!gdBusy} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="gd-backup">{gdBusy === "backup" ? "Backing up…" : "Back up ERP data now"}</Button>
                   <Button onClick={gdDisconnect} disabled={!!gdBusy} variant="outline" className="rounded-sm" data-testid="gd-disconnect">Disconnect</Button>
                 </div>
+                <label className="flex items-center gap-2 mt-4 text-sm text-slate-700 cursor-pointer w-fit">
+                  <Switch checked={gdrive.auto_backup !== false} onCheckedChange={gdToggleAuto} data-testid="gd-auto" /> Automatic daily backup
+                </label>
                 {gdrive.last_backup && <div className="text-xs text-slate-500 mt-3">Last backup: {new Date(gdrive.last_backup).toLocaleString()}</div>}
-                <div className="text-xs text-slate-400 mt-2">Backups are saved to “Denplex ERP / Backups”.</div>
+                <div className="text-xs text-slate-400 mt-2">Backups are saved to “Denplex ERP / Backups”. New part drawings &amp; STEP files are now stored on Drive automatically.</div>
               </>
             ) : (
               <Button onClick={gdConnect} disabled={!!gdBusy} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="gd-connect">{gdBusy === "connect" ? "Opening Google…" : "Connect Google Drive"}</Button>

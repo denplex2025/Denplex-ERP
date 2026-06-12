@@ -3318,7 +3318,7 @@ async def google_status(user=Depends(get_current_user)):
     cfg = await _gdrive_cfg()
     return {"connected": bool(cfg.get("refresh_token")), "email": cfg.get("email", ""),
             "configured": bool(GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET),
-            "last_backup": cfg.get("last_backup", "")}
+            "last_backup": cfg.get("last_backup", ""), "auto_backup": cfg.get("auto_backup", True)}
 
 @api.get("/google/oauth/start")
 async def google_oauth_start(user=Depends(get_current_user)):
@@ -3368,9 +3368,7 @@ async def google_disconnect(user=Depends(require_roles("admin"))):
         {"$unset": {"refresh_token": "", "email": "", "connected": ""}}, upsert=True)
     return {"ok": True}
 
-@api.post("/google/backup")
-async def google_backup(user=Depends(get_current_user)):
-    """Export ERP data to JSON and upload to Google Drive (Denplex ERP / Backups)."""
+async def _run_backup():
     import json as _json
     root = await _drive_ensure_folder("Denplex ERP")
     backups = await _drive_ensure_folder("Backups", root)
@@ -3394,6 +3392,87 @@ async def google_backup(user=Depends(get_current_user)):
     await db.settings.update_one({"_id": "google_drive"}, {"$set": {"last_backup": now_iso()}}, upsert=True)
     return {"ok": True, "file": res.get("name"), "link": res.get("webViewLink"),
             "size_kb": round(len(payload) / 1024, 1), "collections": len(dump)}
+
+@api.post("/google/backup")
+async def google_backup(user=Depends(get_current_user)):
+    """Export ERP data to JSON and upload to Google Drive (Denplex ERP / Backups)."""
+    return await _run_backup()
+
+class AutoBackupIn(BaseModel):
+    enabled: bool = True
+    interval_hours: int = 24
+
+@api.put("/google/auto-backup")
+async def google_auto_backup(body: AutoBackupIn, user=Depends(get_current_user)):
+    await db.settings.update_one({"_id": "google_drive"},
+        {"$set": {"auto_backup": bool(body.enabled),
+                  "auto_backup_interval_hours": max(1, int(body.interval_hours or 24))}}, upsert=True)
+    return {"ok": True}
+
+# ---- Drive file storage: transparent base64 <-> Drive offload ----
+async def _drive_offload(b64, filename, mime, category):
+    """If Drive is connected, upload a base64 blob to Drive and return 'gdrive:<id>'.
+    Returns the original value unchanged on any failure / if not connected / already offloaded."""
+    if not b64 or (isinstance(b64, str) and b64.startswith("gdrive:")):
+        return b64
+    try:
+        cfg = await _gdrive_cfg()
+        if not cfg.get("refresh_token"):
+            return b64
+        raw = b64.split(",", 1)[1] if isinstance(b64, str) and b64.startswith("data:") else b64
+        data = base64.b64decode(raw)
+        root = await _drive_ensure_folder("Denplex ERP")
+        folder = await _drive_ensure_folder(category, root)
+        res = await _drive_upload(filename or "file", mime, data, folder)
+        return "gdrive:" + res.get("id")
+    except Exception as e:
+        try: logger.warning("drive offload failed: %s", e)
+        except Exception: pass
+        return b64
+
+async def _resolve_b64_or_drive(value):
+    """Return raw bytes for a stored field that is either base64 or 'gdrive:<id>'."""
+    if isinstance(value, str) and value.startswith("gdrive:"):
+        token = await _gdrive_access_token()
+        async with httpx.AsyncClient(timeout=120) as cx:
+            r = await cx.get(f"https://www.googleapis.com/drive/v3/files/{value[len('gdrive:'):]}",
+                params={"alt": "media"}, headers={"Authorization": f"Bearer {token}"})
+        if r.status_code >= 400:
+            raise HTTPException(502, f"Drive download failed: {r.text[:120]}")
+        return r.content
+    raw = value.split(",", 1)[1] if isinstance(value, str) and value.startswith("data:") else value
+    return base64.b64decode(raw)
+
+# ---- Automatic backup background loop ----
+async def _backup_loop():
+    await asyncio.sleep(90)
+    while True:
+        try:
+            cfg = await _gdrive_cfg()
+            if cfg.get("refresh_token") and cfg.get("auto_backup", True):
+                last = cfg.get("last_backup")
+                interval = float(cfg.get("auto_backup_interval_hours", 24) or 24)
+                due = True
+                if last:
+                    try:
+                        lt = datetime.fromisoformat(str(last).replace("Z", "+00:00"))
+                        due = (datetime.now(timezone.utc) - lt).total_seconds() >= interval * 3600
+                    except Exception:
+                        due = True
+                if due:
+                    await _run_backup()
+                    logger.info("Auto Drive backup completed")
+        except Exception as e:
+            try: logger.warning("auto backup loop error: %s", e)
+            except Exception: pass
+        await asyncio.sleep(1800)
+
+@app.on_event("startup")
+async def _start_backup_loop():
+    try:
+        asyncio.create_task(_backup_loop())
+    except Exception:
+        pass
 
 
 def _hsn_tax_summary(lines: List[Dict[str, Any]], is_interstate: bool) -> List[Dict[str, Any]]:
@@ -6234,6 +6313,8 @@ async def bom_explode(bid: str, levels: int = 3, user=Depends(get_current_user))
 @api.post("/parts")
 async def create_part(p: PartMaster, user=Depends(get_current_user)):
     doc = p.model_dump()
+    doc["drawing_pdf_b64"] = await _drive_offload(doc.get("drawing_pdf_b64"), doc.get("drawing_filename") or f"{doc.get('part_number','part')}.pdf", "application/pdf", "Drawings")
+    doc["step_file_b64"] = await _drive_offload(doc.get("step_file_b64"), doc.get("step_filename") or f"{doc.get('part_number','part')}.step", "application/octet-stream", "STEP Files")
     # Auto-snapshot current files into a revision entry if revision is set
     if doc.get("current_revision") and not doc.get("revisions"):
         rev = {
@@ -6358,6 +6439,8 @@ async def get_part(pid: str, user=Depends(get_current_user)):
 @api.put("/parts/{pid}")
 async def update_part(pid: str, p: PartMaster, user=Depends(get_current_user)):
     data = p.model_dump(); data.pop("id", None); data.pop("created_at", None)
+    data["drawing_pdf_b64"] = await _drive_offload(data.get("drawing_pdf_b64"), data.get("drawing_filename") or f"{data.get('part_number','part')}.pdf", "application/pdf", "Drawings")
+    data["step_file_b64"] = await _drive_offload(data.get("step_file_b64"), data.get("step_filename") or f"{data.get('part_number','part')}.step", "application/octet-stream", "STEP Files")
     await db.parts.update_one({"id": pid}, {"$set": data})
     await write_audit(user.get("name", ""), "part_updated", "part", pid, {"part_number": data.get("part_number")})
     return {"ok": True}
@@ -6412,9 +6495,11 @@ async def download_part_drawing(pid: str, revision: Optional[str] = None, user=D
         filename = p.get("drawing_filename") or f"{p.get('part_number')}.pdf"
     if not b64: raise HTTPException(404, "No drawing on file for this revision")
     try:
-        data = base64.b64decode(b64.split(",", 1)[1] if b64.startswith("data:") else b64)
+        data = await _resolve_b64_or_drive(b64)
+    except HTTPException:
+        raise
     except Exception:
-        raise HTTPException(500, "Failed to decode drawing")
+        raise HTTPException(500, "Failed to read drawing")
     return Response(content=data, media_type="application/pdf",
                     headers={"Content-Disposition": f'inline; filename="{filename}"'})
 
@@ -6433,9 +6518,11 @@ async def download_part_step(pid: str, revision: Optional[str] = None, user=Depe
         filename = p.get("step_filename") or f"{p.get('part_number')}.step"
     if not b64: raise HTTPException(404, "No STEP/CAD file on file for this revision")
     try:
-        data = base64.b64decode(b64.split(",", 1)[1] if b64.startswith("data:") else b64)
+        data = await _resolve_b64_or_drive(b64)
+    except HTTPException:
+        raise
     except Exception:
-        raise HTTPException(500, "Failed to decode STEP file")
+        raise HTTPException(500, "Failed to read STEP file")
     return Response(content=data, media_type="application/step",
                     headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 # ==================== Material States (M.4a) ====================
