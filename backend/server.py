@@ -3628,6 +3628,167 @@ async def del_capa(cid: str, user=Depends(require_roles("admin", "manager", "qc"
     return {"ok": True}
 
 
+# ---------------- ISO: Calibration + Supplier Quality + ISO form PDFs ----------------
+class Instrument(BaseModel):                       # F/QCD/03 Calibration
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    instrument_name: str
+    make: Optional[str] = ""
+    range: Optional[str] = ""
+    identification_no: Optional[str] = ""
+    location: Optional[str] = ""                   # Vatva / Santej
+    calibration_date: Optional[str] = ""
+    due_date: Optional[str] = ""
+    calibrated_by: Optional[str] = ""
+    frequency_months: int = 12
+    remarks: Optional[str] = ""
+    created_at: str = Field(default_factory=now_iso)
+
+class ApprovedSupplier(BaseModel):                 # F/PUR/03
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    name: str
+    address: Optional[str] = ""
+    material_service: Optional[str] = ""
+    supplier_type: str = "trader"                  # manufacturer | trader | job_work | service
+    approval_criteria: List[str] = []              # A..G codes
+    approval_date: Optional[str] = ""
+    status: Literal["approved", "on_hold", "removed"] = "approved"
+    remarks: Optional[str] = ""
+    created_at: str = Field(default_factory=now_iso)
+
+class SupplierEvaluation(BaseModel):               # F/PUR/04
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    supplier_name: str
+    period: Optional[str] = ""
+    quality_score: float = 0
+    delivery_score: float = 0
+    cost_score: float = 0
+    responsiveness_score: float = 0
+    system_score: float = 0
+    total_pct: float = 0
+    rating: Optional[str] = ""                     # A | B | C
+    evaluated_by: Optional[str] = ""
+    date: str = Field(default_factory=now_iso)
+    remarks: Optional[str] = ""
+    created_at: str = Field(default_factory=now_iso)
+
+# --- Calibration / Instruments ---
+@api.post("/instruments")
+async def create_instrument(i: Instrument, user=Depends(get_current_user)):
+    doc = i.model_dump(); await db.instruments.insert_one(doc); return serialize(doc)
+@api.get("/instruments")
+async def list_instruments(user=Depends(get_current_user)):
+    return await list_collection(db.instruments, sort_key="due_date")
+@api.put("/instruments/{iid}")
+async def update_instrument(iid: str, i: Instrument, user=Depends(get_current_user)):
+    data = i.model_dump(); data.pop("id", None); data.pop("created_at", None)
+    await db.instruments.update_one({"id": iid}, {"$set": data}); return {"ok": True}
+@api.delete("/instruments/{iid}")
+async def del_instrument(iid: str, user=Depends(require_roles("admin","manager","qc"))):
+    await db.instruments.delete_one({"id": iid}); return {"ok": True}
+
+# --- Approved suppliers ---
+@api.post("/approved-suppliers")
+async def create_apsup(a: ApprovedSupplier, user=Depends(get_current_user)):
+    doc = a.model_dump(); await db.approved_suppliers.insert_one(doc); return serialize(doc)
+@api.get("/approved-suppliers")
+async def list_apsup(user=Depends(get_current_user)):
+    return await list_collection(db.approved_suppliers, sort_key="name")
+@api.put("/approved-suppliers/{sid}")
+async def update_apsup(sid: str, a: ApprovedSupplier, user=Depends(get_current_user)):
+    data = a.model_dump(); data.pop("id", None); data.pop("created_at", None)
+    await db.approved_suppliers.update_one({"id": sid}, {"$set": data}); return {"ok": True}
+@api.delete("/approved-suppliers/{sid}")
+async def del_apsup(sid: str, user=Depends(require_roles("admin","manager"))):
+    await db.approved_suppliers.delete_one({"id": sid}); return {"ok": True}
+
+# --- Supplier evaluations ---
+@api.post("/supplier-evaluations")
+async def create_supeval(e: SupplierEvaluation, user=Depends(get_current_user)):
+    doc = e.model_dump()
+    scores = [doc["quality_score"], doc["delivery_score"], doc["cost_score"], doc["responsiveness_score"], doc["system_score"]]
+    if not doc.get("total_pct"):
+        doc["total_pct"] = round(sum(float(x or 0) for x in scores) / (5 * 10) * 100, 1) if any(scores) else 0
+    if not doc.get("rating"):
+        t = doc["total_pct"]; doc["rating"] = "A" if t >= 85 else "B" if t >= 60 else "C"
+    if not doc.get("evaluated_by"): doc["evaluated_by"] = user.get("name", "")
+    await db.supplier_evaluations.insert_one(doc); return serialize(doc)
+@api.get("/supplier-evaluations")
+async def list_supeval(user=Depends(get_current_user)):
+    return await list_collection(db.supplier_evaluations)
+@api.put("/supplier-evaluations/{eid}")
+async def update_supeval(eid: str, e: SupplierEvaluation, user=Depends(get_current_user)):
+    data = e.model_dump(); data.pop("id", None); data.pop("created_at", None)
+    scores = [data["quality_score"], data["delivery_score"], data["cost_score"], data["responsiveness_score"], data["system_score"]]
+    data["total_pct"] = round(sum(float(x or 0) for x in scores) / (5 * 10) * 100, 1) if any(scores) else 0
+    data["rating"] = "A" if data["total_pct"] >= 85 else "B" if data["total_pct"] >= 60 else "C"
+    await db.supplier_evaluations.update_one({"id": eid}, {"$set": data}); return {"ok": True}
+@api.delete("/supplier-evaluations/{eid}")
+async def del_supeval(eid: str, user=Depends(require_roles("admin","manager"))):
+    await db.supplier_evaluations.delete_one({"id": eid}); return {"ok": True}
+
+# --- ISO record PDF (Denplex letterhead) for NCR / CAPA ---
+def _iso_record_pdf(title, code, doc_no, sections):
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    buf = BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=27*mm, bottomMargin=22*mm, leftMargin=14*mm, rightMargin=14*mm, title=title)
+    styles = getSampleStyleSheet()
+    BLACK = colors.HexColor("#1A1A1A"); RED = colors.HexColor("#CC0000")
+    story = []
+    story.append(Paragraph(title, ParagraphStyle("t", parent=styles["Title"], fontSize=14, fontName=_PDF_FONT_BOLD, textColor=BLACK, alignment=1)))
+    head = Table([[f"Doc No: {doc_no}", f"No: {code or '-'}"]], colWidths=[(doc.width)/2.0]*2)
+    head.setStyle(TableStyle([("FONT",(0,0),(-1,-1),_PDF_FONT_BOLD,9),("TEXTCOLOR",(0,0),(-1,-1),RED),("BOTTOMPADDING",(0,0),(-1,-1),4)]))
+    story.append(head); story.append(Spacer(1, 3*mm))
+    for heading, rows in sections:
+        if heading:
+            story.append(Paragraph(heading, ParagraphStyle("h", parent=styles["Normal"], fontSize=10, fontName=_PDF_FONT_BOLD, textColor=RED, spaceBefore=6, spaceAfter=2)))
+        data = [[Paragraph(f"<b>{k}</b>", ParagraphStyle("k", parent=styles["Normal"], fontSize=9, fontName=_PDF_FONT_REGULAR)),
+                 Paragraph(str(v or "-"), ParagraphStyle("v", parent=styles["Normal"], fontSize=9, fontName=_PDF_FONT_REGULAR))] for k, v in rows]
+        t = Table(data, colWidths=[55*mm, doc.width - 55*mm])
+        t.setStyle(TableStyle([("GRID",(0,0),(-1,-1),0.5,colors.HexColor("#CCCCCC")),
+            ("BACKGROUND",(0,0),(0,-1),colors.HexColor("#F5F5F5")),("VALIGN",(0,0),(-1,-1),"TOP"),
+            ("LEFTPADDING",(0,0),(-1,-1),4),("RIGHTPADDING",(0,0),(-1,-1),4),("TOPPADDING",(0,0),(-1,-1),3),("BOTTOMPADDING",(0,0),(-1,-1),3)]))
+        story.append(t)
+    story.append(Spacer(1, 8*mm))
+    story.append(Table([["Prepared By", "Approved By"]], colWidths=[doc.width/2.0]*2,
+        style=TableStyle([("FONT",(0,0),(-1,-1),_PDF_FONT_BOLD,9),("TOPPADDING",(0,0),(-1,-1),18),("ALIGN",(0,0),(-1,-1),"CENTER")])))
+    doc.build(story, onFirstPage=_qc_header_footer, onLaterPages=_qc_header_footer)
+    return buf.getvalue()
+
+@api.get("/ncrs/{nid}/pdf")
+async def ncr_pdf(nid: str, user=Depends(get_current_user)):
+    n = await db.ncrs.find_one({"id": nid}, {"_id": 0})
+    if not n: raise HTTPException(404, "NCR not found")
+    sections = [("", [("Date", (n.get("date") or "")[:10]), ("Source", (n.get("source") or "").replace("_", " ").title()),
+        ("Process", n.get("process_name")), ("Product / Part", f"{n.get('product','')}  {n.get('part_number','')}"),
+        ("Qty", n.get("qty")), ("Customer / Supplier", n.get("customer_name") or n.get("supplier_name"))]),
+        ("Non-Conformity", [("Description", n.get("description")), ("Root Cause", n.get("root_cause")),
+        ("Correction", n.get("correction")), ("Disposition", (n.get("disposition") or "").replace("_", " ").title()),
+        ("Linked CAPA", n.get("capa_code")), ("Status", (n.get("status") or "").title()), ("Remarks", n.get("remarks"))])]
+    pdf = _iso_record_pdf("Non-Conformance Report", n.get("code"), "F/PRD/03", sections)
+    return Response(content=pdf, media_type="application/pdf", headers={"Content-Disposition": f'attachment; filename="{n.get("code","NCR")}.pdf"'})
+
+@api.get("/capas/{cid}/pdf")
+async def capa_pdf(cid: str, user=Depends(get_current_user)):
+    c = await db.capas.find_one({"id": cid}, {"_id": 0})
+    if not c: raise HTTPException(404, "CAPA not found")
+    sections = [("", [("Date", (c.get("date") or "")[:10]), ("Source", (c.get("source") or "").replace("_", " ").title()),
+        ("Linked NCR", c.get("ncr_code")), ("ISO Clause", c.get("iso_clause"))]),
+        ("Analysis & Action", [("Non-Conformity", c.get("nonconformity")), ("Root Cause", c.get("root_cause")),
+        ("Corrective Action", c.get("corrective_action")), ("Preventive Action", c.get("preventive_action")),
+        ("Responsibility", c.get("responsibility")), ("Target Date", (c.get("target_date") or "")[:10]),
+        ("Risk Assessment", c.get("risk_assessment")), ("Effectiveness Verification", c.get("effectiveness")),
+        ("Status", (c.get("status") or "").replace("_", " ").title())])]
+    pdf = _iso_record_pdf("Corrective & Preventive Action", c.get("code"), "F/QMS/10", sections)
+    return Response(content=pdf, media_type="application/pdf", headers={"Content-Disposition": f'attachment; filename="{c.get("code","CAPA")}.pdf"'})
+
+
 def _hsn_tax_summary(lines: List[Dict[str, Any]], is_interstate: bool) -> List[Dict[str, Any]]:
     """Aggregate per-HSN tax breakup for the Tax Summary block."""
     bucket: Dict[str, Dict[str, float]] = {}

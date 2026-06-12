@@ -7,7 +7,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
-import { Plus, Pencil, Trash2, ShieldCheck, ClipboardList } from "lucide-react";
+import { Plus, Pencil, Trash2, ShieldCheck, ClipboardList, FileDown, Wrench, Truck, Gauge } from "lucide-react";
 import StatusBadge from "@/components/erp/StatusBadge";
 import { toast } from "sonner";
 
@@ -19,6 +19,21 @@ const Sel = ({ value, onChange, options }) => (
 const Field = ({ label, children, className = "" }) => (
   <div className={className}><Label className="text-xs uppercase tracking-wider text-slate-600">{label}</Label><div className="mt-1">{children}</div></div>
 );
+const dlPdf = async (path, name) => {
+  try { const r = await api.get(path, { responseType: "blob" }); const u = URL.createObjectURL(r.data); const a = document.createElement("a"); a.href = u; a.download = name; a.click(); URL.revokeObjectURL(u); }
+  catch (e) { toast.error("PDF download failed"); }
+};
+const Pill = ({ color, children }) => {
+  const m = { red:"bg-red-50 text-red-700 border-red-300", amber:"bg-amber-50 text-amber-700 border-amber-300", emerald:"bg-emerald-50 text-emerald-700 border-emerald-300", slate:"bg-slate-50 text-slate-600 border-slate-300" };
+  return <span className={`text-[10px] uppercase font-semibold tracking-wider border rounded-sm px-1.5 py-0.5 ${m[color]||m.slate}`}>{children}</span>;
+};
+const calStatus = (due) => {
+  if (!due) return { label: "no due date", color: "slate" };
+  const days = Math.ceil((new Date(due) - new Date()) / 86400000);
+  if (days < 0) return { label: `overdue ${-days}d`, color: "red" };
+  if (days <= 30) return { label: `due ${days}d`, color: "amber" };
+  return { label: "ok", color: "emerald" };
+};
 
 // ---------------- NCR register ----------------
 const NCR_SOURCES = [["production","Production"],["internal_audit","Internal Audit"],["customer_complaint","Customer Complaint"],["supplier","Supplier"],["other","Other"]].map(([value,label])=>({value,label}));
@@ -65,6 +80,7 @@ function NCRRegister() {
                 <td className="px-4 py-2 text-xs text-red-600">{n.capa_code||"—"}</td>
                 <td className="px-4 py-2"><StatusBadge status={n.status} /></td>
                 <td className="px-4 py-2 text-right whitespace-nowrap">
+                  <Button size="icon" variant="ghost" className="h-8 w-8" title="PDF" onClick={()=>dlPdf(`/ncrs/${n.id}/pdf`, `${n.code}.pdf`)}><FileDown className="h-4 w-4 text-slate-700" /></Button>
                   <Button size="icon" variant="ghost" className="h-8 w-8" onClick={()=>openEdit(n)}><Pencil className="h-4 w-4" /></Button>
                   <Button size="icon" variant="ghost" className="h-8 w-8" onClick={()=>del(n)}><Trash2 className="h-4 w-4 text-red-600" /></Button>
                 </td>
@@ -146,6 +162,7 @@ function CAPARegister() {
                 <td className="px-4 py-2">{(c.target_date||"").slice(0,10)||"—"}</td>
                 <td className="px-4 py-2"><StatusBadge status={c.status} /></td>
                 <td className="px-4 py-2 text-right whitespace-nowrap">
+                  <Button size="icon" variant="ghost" className="h-8 w-8" title="PDF" onClick={()=>dlPdf(`/capas/${c.id}/pdf`, `${c.code}.pdf`)}><FileDown className="h-4 w-4 text-slate-700" /></Button>
                   <Button size="icon" variant="ghost" className="h-8 w-8" onClick={()=>openEdit(c)}><Pencil className="h-4 w-4" /></Button>
                   <Button size="icon" variant="ghost" className="h-8 w-8" onClick={()=>del(c)}><Trash2 className="h-4 w-4 text-red-600" /></Button>
                 </td>
@@ -186,6 +203,163 @@ function CAPARegister() {
   );
 }
 
+
+// ---------------- Calibration register (F/QCD/03) ----------------
+const emptyInst = { instrument_name:"", make:"", range:"", identification_no:"", location:"", calibration_date:"", due_date:"", calibrated_by:"", frequency_months:12, remarks:"" };
+function CalibrationRegister() {
+  const [list,setList]=useState([]); const [open,setOpen]=useState(false);
+  const [editId,setEditId]=useState(null); const [form,setForm]=useState(emptyInst); const [saving,setSaving]=useState(false);
+  const refresh=()=>api.get("/instruments").then(r=>setList(Array.isArray(r.data)?r.data:[])).catch(()=>setList([]));
+  useEffect(()=>{refresh();},[]);
+  const set=(k,v)=>setForm(f=>({...f,[k]:v}));
+  const setCal=(v)=>{ const f={...form,calibration_date:v}; if(v && form.frequency_months){ const d=new Date(v); d.setMonth(d.getMonth()+Number(form.frequency_months)); d.setDate(d.getDate()-1); f.due_date=d.toISOString().slice(0,10);} setForm(f); };
+  const openNew=()=>{setEditId(null);setForm(emptyInst);setOpen(true);};
+  const openEdit=(i)=>{setEditId(i.id);setForm({...emptyInst,...i,calibration_date:(i.calibration_date||"").slice(0,10),due_date:(i.due_date||"").slice(0,10)});setOpen(true);};
+  const save=async()=>{ if(!form.instrument_name.trim()){toast.error("Instrument name required");return;} setSaving(true);
+    try{ editId?await api.put(`/instruments/${editId}`,form):await api.post("/instruments",form); toast.success("Saved"); setOpen(false); refresh(); }catch(e){toast.error("Failed");} setSaving(false); };
+  const del=async(i)=>{ if(!window.confirm(`Delete ${i.instrument_name}?`))return; await api.delete(`/instruments/${i.id}`); refresh(); };
+  const dueSoon=list.filter(i=>{const c=calStatus(i.due_date).color; return c==="red"||c==="amber";}).length;
+  return (
+    <div className="space-y-3">
+      <div className="flex justify-between items-center">
+        <p className="text-sm text-slate-500">Instruments & calibration status (F/QCD/03). {dueSoon>0 && <span className="text-red-600 font-medium">{dueSoon} due/overdue.</span>}</p>
+        <Button onClick={openNew} className="bg-red-600 hover:bg-red-700 text-white"><Plus className="w-4 h-4 mr-1" /> New Instrument</Button>
+      </div>
+      <Card><CardContent className="p-0 overflow-x-auto"><table className="w-full text-sm">
+        <thead className="bg-slate-50 border-b text-xs uppercase tracking-wider text-slate-500"><tr>
+          <th className="text-left px-4 py-2">Instrument</th><th className="text-left px-4 py-2">Make</th><th className="text-left px-4 py-2">Range</th>
+          <th className="text-left px-4 py-2">ID No.</th><th className="text-left px-4 py-2">Location</th><th className="text-left px-4 py-2">Cal. Date</th>
+          <th className="text-left px-4 py-2">Due Date</th><th className="text-left px-4 py-2">Status</th><th className="text-right px-4 py-2">Actions</th></tr></thead>
+        <tbody>{list.length===0?<tr><td colSpan={9} className="text-center py-10 text-slate-400">No instruments yet.</td></tr>:list.map(i=>{const st=calStatus(i.due_date);return(
+          <tr key={i.id} className="border-b hover:bg-slate-50">
+            <td className="px-4 py-2 font-medium">{i.instrument_name}</td><td className="px-4 py-2">{i.make||"—"}</td><td className="px-4 py-2">{i.range||"—"}</td>
+            <td className="px-4 py-2 font-mono-tech text-xs">{i.identification_no||"—"}</td><td className="px-4 py-2">{i.location||"—"}</td>
+            <td className="px-4 py-2">{(i.calibration_date||"").slice(0,10)||"—"}</td><td className="px-4 py-2">{(i.due_date||"").slice(0,10)||"—"}</td>
+            <td className="px-4 py-2"><Pill color={st.color}>{st.label}</Pill></td>
+            <td className="px-4 py-2 text-right whitespace-nowrap">
+              <Button size="icon" variant="ghost" className="h-8 w-8" onClick={()=>openEdit(i)}><Pencil className="h-4 w-4" /></Button>
+              <Button size="icon" variant="ghost" className="h-8 w-8" onClick={()=>del(i)}><Trash2 className="h-4 w-4 text-red-600" /></Button></td>
+          </tr>);})}</tbody></table></CardContent></Card>
+      <Dialog open={open} onOpenChange={setOpen}><DialogContent className="sm:max-w-xl">
+        <DialogHeader><DialogTitle>{editId?"Edit Instrument":"New Instrument"}</DialogTitle></DialogHeader>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Instrument name" className="col-span-2"><Input value={form.instrument_name} onChange={e=>set("instrument_name",e.target.value)} placeholder="Analog External Micrometer" /></Field>
+          <Field label="Make"><Input value={form.make} onChange={e=>set("make",e.target.value)} placeholder="YURI / Mitutoyo" /></Field>
+          <Field label="Range"><Input value={form.range} onChange={e=>set("range",e.target.value)} placeholder="0 to 25 mm" /></Field>
+          <Field label="Identification No."><Input value={form.identification_no} onChange={e=>set("identification_no",e.target.value)} /></Field>
+          <Field label="Location"><Input value={form.location} onChange={e=>set("location",e.target.value)} placeholder="Vatva / Santej" /></Field>
+          <Field label="Calibration date"><Input type="date" value={form.calibration_date} onChange={e=>setCal(e.target.value)} /></Field>
+          <Field label="Frequency (months)"><Input type="number" value={form.frequency_months} onChange={e=>set("frequency_months",e.target.value)} /></Field>
+          <Field label="Due date"><Input type="date" value={form.due_date} onChange={e=>set("due_date",e.target.value)} /></Field>
+          <Field label="Calibrated by"><Input value={form.calibrated_by} onChange={e=>set("calibrated_by",e.target.value)} placeholder="Prism Calibration" /></Field>
+          <Field label="Remarks" className="col-span-2"><Textarea rows={2} value={form.remarks} onChange={e=>set("remarks",e.target.value)} /></Field>
+        </div>
+        <DialogFooter><Button variant="outline" onClick={()=>setOpen(false)} disabled={saving}>Cancel</Button>
+          <Button onClick={save} disabled={saving} className="bg-red-600 hover:bg-red-700 text-white">{saving?"Saving…":(editId?"Update":"Create")}</Button></DialogFooter>
+      </DialogContent></Dialog>
+    </div>);
+}
+
+// ---------------- Supplier Quality (F/PUR/03 + F/PUR/04) ----------------
+const SUP_TYPES=[["manufacturer","Manufacturer"],["trader","Trader"],["job_work","Job Work"],["service","Service"]].map(([value,label])=>({value,label}));
+const CRITERIA=[["A","Past Experience"],["B","Supplier Registration"],["C","Sample Request"],["D","Trial Order"],["E","Market Reputation"],["F","Equipment Manufacturer"],["G","Monopoly / Customer Approved"]];
+const emptyAp={ name:"", address:"", material_service:"", supplier_type:"trader", approval_criteria:[], approval_date:new Date().toISOString().slice(0,10), status:"approved", remarks:"" };
+const emptyEval={ supplier_name:"", period:"", quality_score:0, delivery_score:0, cost_score:0, responsiveness_score:0, system_score:0, evaluated_by:"", date:new Date().toISOString().slice(0,10), remarks:"" };
+
+function SupplierQuality() {
+  const [view,setView]=useState("approved");
+  const [aps,setAps]=useState([]); const [evals,setEvals]=useState([]);
+  const [apOpen,setApOpen]=useState(false); const [apId,setApId]=useState(null); const [ap,setAp]=useState(emptyAp); const [apSaving,setApSaving]=useState(false);
+  const [evOpen,setEvOpen]=useState(false); const [evId,setEvId]=useState(null); const [ev,setEv]=useState(emptyEval); const [evSaving,setEvSaving]=useState(false);
+  const loadAp=()=>api.get("/approved-suppliers").then(r=>setAps(Array.isArray(r.data)?r.data:[])).catch(()=>setAps([]));
+  const loadEv=()=>api.get("/supplier-evaluations").then(r=>setEvals(Array.isArray(r.data)?r.data:[])).catch(()=>setEvals([]));
+  useEffect(()=>{loadAp();loadEv();},[]);
+  const toggleCrit=(c)=>setAp(p=>({...p,approval_criteria:p.approval_criteria.includes(c)?p.approval_criteria.filter(x=>x!==c):[...p.approval_criteria,c]}));
+  const saveAp=async()=>{ if(!ap.name.trim()){toast.error("Supplier name required");return;} setApSaving(true);
+    try{ apId?await api.put(`/approved-suppliers/${apId}`,ap):await api.post("/approved-suppliers",ap); toast.success("Saved"); setApOpen(false); loadAp(); }catch(e){toast.error("Failed");} setApSaving(false); };
+  const saveEv=async()=>{ if(!ev.supplier_name.trim()){toast.error("Supplier required");return;} setEvSaving(true);
+    try{ evId?await api.put(`/supplier-evaluations/${evId}`,ev):await api.post("/supplier-evaluations",ev); toast.success("Saved"); setEvOpen(false); loadEv(); }catch(e){toast.error("Failed");} setEvSaving(false); };
+  const ratingColor=(r)=>r==="A"?"emerald":r==="B"?"amber":"red";
+  return (
+    <div className="space-y-3">
+      <div className="flex gap-2">
+        <Button size="sm" variant={view==="approved"?"default":"outline"} className={view==="approved"?"bg-red-600 hover:bg-red-700":""} onClick={()=>setView("approved")}>Approved Suppliers</Button>
+        <Button size="sm" variant={view==="eval"?"default":"outline"} className={view==="eval"?"bg-red-600 hover:bg-red-700":""} onClick={()=>setView("eval")}>Performance Evaluation</Button>
+      </div>
+      {view==="approved"?(<>
+        <div className="flex justify-between items-center"><p className="text-sm text-slate-500">Approved supplier / external-provider list (F/PUR/03).</p>
+          <Button onClick={()=>{setApId(null);setAp(emptyAp);setApOpen(true);}} className="bg-red-600 hover:bg-red-700 text-white"><Plus className="w-4 h-4 mr-1" /> New Supplier</Button></div>
+        <Card><CardContent className="p-0 overflow-x-auto"><table className="w-full text-sm">
+          <thead className="bg-slate-50 border-b text-xs uppercase tracking-wider text-slate-500"><tr>
+            <th className="text-left px-4 py-2">Supplier</th><th className="text-left px-4 py-2">Material / Service</th><th className="text-left px-4 py-2">Type</th>
+            <th className="text-left px-4 py-2">Criteria</th><th className="text-left px-4 py-2">Approved</th><th className="text-left px-4 py-2">Status</th><th className="text-right px-4 py-2">Actions</th></tr></thead>
+          <tbody>{aps.length===0?<tr><td colSpan={7} className="text-center py-10 text-slate-400">No approved suppliers yet.</td></tr>:aps.map(a=>(
+            <tr key={a.id} className="border-b hover:bg-slate-50">
+              <td className="px-4 py-2"><div className="font-medium">{a.name}</div><div className="text-xs text-slate-400">{a.address}</div></td>
+              <td className="px-4 py-2">{a.material_service||"—"}</td><td className="px-4 py-2 capitalize">{(a.supplier_type||"").replace(/_/g," ")}</td>
+              <td className="px-4 py-2 font-mono-tech text-xs">{(a.approval_criteria||[]).join(", ")||"—"}</td><td className="px-4 py-2">{(a.approval_date||"").slice(0,10)}</td>
+              <td className="px-4 py-2"><StatusBadge status={a.status} /></td>
+              <td className="px-4 py-2 text-right whitespace-nowrap">
+                <Button size="icon" variant="ghost" className="h-8 w-8" onClick={()=>{setApId(a.id);setAp({...emptyAp,...a,approval_date:(a.approval_date||"").slice(0,10)});setApOpen(true);}}><Pencil className="h-4 w-4" /></Button>
+                <Button size="icon" variant="ghost" className="h-8 w-8" onClick={async()=>{if(window.confirm(`Delete ${a.name}?`)){await api.delete(`/approved-suppliers/${a.id}`);loadAp();}}}><Trash2 className="h-4 w-4 text-red-600" /></Button></td>
+            </tr>))}</tbody></table></CardContent></Card>
+      </>):(<>
+        <div className="flex justify-between items-center"><p className="text-sm text-slate-500">Supplier performance evaluation (F/PUR/04) — score 0–10 each; rating auto: A≥85%, B≥60%, C below.</p>
+          <Button onClick={()=>{setEvId(null);setEv(emptyEval);setEvOpen(true);}} className="bg-red-600 hover:bg-red-700 text-white"><Plus className="w-4 h-4 mr-1" /> New Evaluation</Button></div>
+        <Card><CardContent className="p-0 overflow-x-auto"><table className="w-full text-sm">
+          <thead className="bg-slate-50 border-b text-xs uppercase tracking-wider text-slate-500"><tr>
+            <th className="text-left px-4 py-2">Supplier</th><th className="text-left px-4 py-2">Period</th><th className="text-center px-2 py-2">Qual</th><th className="text-center px-2 py-2">Del</th>
+            <th className="text-center px-2 py-2">Cost</th><th className="text-center px-2 py-2">Resp</th><th className="text-center px-2 py-2">Sys</th>
+            <th className="text-right px-4 py-2">Total %</th><th className="text-center px-4 py-2">Rating</th><th className="text-right px-4 py-2">Actions</th></tr></thead>
+          <tbody>{evals.length===0?<tr><td colSpan={10} className="text-center py-10 text-slate-400">No evaluations yet.</td></tr>:evals.map(e=>(
+            <tr key={e.id} className="border-b hover:bg-slate-50">
+              <td className="px-4 py-2 font-medium">{e.supplier_name}</td><td className="px-4 py-2">{e.period||"—"}</td>
+              <td className="px-2 py-2 text-center">{e.quality_score}</td><td className="px-2 py-2 text-center">{e.delivery_score}</td><td className="px-2 py-2 text-center">{e.cost_score}</td>
+              <td className="px-2 py-2 text-center">{e.responsiveness_score}</td><td className="px-2 py-2 text-center">{e.system_score}</td>
+              <td className="px-4 py-2 text-right font-semibold">{e.total_pct}%</td><td className="px-4 py-2 text-center"><Pill color={ratingColor(e.rating)}>{e.rating||"—"}</Pill></td>
+              <td className="px-4 py-2 text-right whitespace-nowrap">
+                <Button size="icon" variant="ghost" className="h-8 w-8" onClick={()=>{setEvId(e.id);setEv({...emptyEval,...e,date:(e.date||"").slice(0,10)});setEvOpen(true);}}><Pencil className="h-4 w-4" /></Button>
+                <Button size="icon" variant="ghost" className="h-8 w-8" onClick={async()=>{if(window.confirm("Delete?")){await api.delete(`/supplier-evaluations/${e.id}`);loadEv();}}}><Trash2 className="h-4 w-4 text-red-600" /></Button></td>
+            </tr>))}</tbody></table></CardContent></Card>
+      </>)}
+
+      <Dialog open={apOpen} onOpenChange={setApOpen}><DialogContent className="sm:max-w-xl">
+        <DialogHeader><DialogTitle>{apId?"Edit Supplier":"New Approved Supplier"}</DialogTitle></DialogHeader>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Supplier name" className="col-span-2"><Input value={ap.name} onChange={e=>setAp(p=>({...p,name:e.target.value}))} /></Field>
+          <Field label="Address" className="col-span-2"><Input value={ap.address} onChange={e=>setAp(p=>({...p,address:e.target.value}))} /></Field>
+          <Field label="Material / Service"><Input value={ap.material_service} onChange={e=>setAp(p=>({...p,material_service:e.target.value}))} placeholder="S.S. / VMC Machining" /></Field>
+          <Field label="Type"><Sel value={ap.supplier_type} onChange={v=>setAp(p=>({...p,supplier_type:v}))} options={SUP_TYPES} /></Field>
+          <Field label="Approval criteria" className="col-span-2"><div className="flex flex-wrap gap-1">
+            {CRITERIA.map(([c,lbl])=><button type="button" key={c} onClick={()=>toggleCrit(c)} title={lbl} className={`text-xs border rounded-sm px-2 py-1 ${ap.approval_criteria.includes(c)?"bg-red-600 text-white border-red-600":"bg-white border-slate-300 text-slate-600"}`}>{c}</button>)}
+          </div><div className="text-[10px] text-slate-400 mt-1">{CRITERIA.map(([c,l])=>`${c}=${l}`).join(" · ")}</div></Field>
+          <Field label="Approval date"><Input type="date" value={ap.approval_date} onChange={e=>setAp(p=>({...p,approval_date:e.target.value}))} /></Field>
+          <Field label="Status"><Sel value={ap.status} onChange={v=>setAp(p=>({...p,status:v}))} options={[{value:"approved",label:"Approved"},{value:"on_hold",label:"On Hold"},{value:"removed",label:"Removed"}]} /></Field>
+          <Field label="Remarks" className="col-span-2"><Textarea rows={2} value={ap.remarks} onChange={e=>setAp(p=>({...p,remarks:e.target.value}))} /></Field>
+        </div>
+        <DialogFooter><Button variant="outline" onClick={()=>setApOpen(false)} disabled={apSaving}>Cancel</Button>
+          <Button onClick={saveAp} disabled={apSaving} className="bg-red-600 hover:bg-red-700 text-white">{apSaving?"Saving…":(apId?"Update":"Create")}</Button></DialogFooter>
+      </DialogContent></Dialog>
+
+      <Dialog open={evOpen} onOpenChange={setEvOpen}><DialogContent className="sm:max-w-lg">
+        <DialogHeader><DialogTitle>{evId?"Edit Evaluation":"New Supplier Evaluation"}</DialogTitle></DialogHeader>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Supplier"><Input value={ev.supplier_name} onChange={e=>setEv(p=>({...p,supplier_name:e.target.value}))} /></Field>
+          <Field label="Period"><Input value={ev.period} onChange={e=>setEv(p=>({...p,period:e.target.value}))} placeholder="2025-26 / Q1" /></Field>
+          <Field label="Quality (0–10)"><Input type="number" min="0" max="10" value={ev.quality_score} onChange={e=>setEv(p=>({...p,quality_score:e.target.value}))} /></Field>
+          <Field label="Delivery (0–10)"><Input type="number" min="0" max="10" value={ev.delivery_score} onChange={e=>setEv(p=>({...p,delivery_score:e.target.value}))} /></Field>
+          <Field label="Cost (0–10)"><Input type="number" min="0" max="10" value={ev.cost_score} onChange={e=>setEv(p=>({...p,cost_score:e.target.value}))} /></Field>
+          <Field label="Responsiveness (0–10)"><Input type="number" min="0" max="10" value={ev.responsiveness_score} onChange={e=>setEv(p=>({...p,responsiveness_score:e.target.value}))} /></Field>
+          <Field label="System / QMS (0–10)"><Input type="number" min="0" max="10" value={ev.system_score} onChange={e=>setEv(p=>({...p,system_score:e.target.value}))} /></Field>
+          <Field label="Date"><Input type="date" value={ev.date} onChange={e=>setEv(p=>({...p,date:e.target.value}))} /></Field>
+          <Field label="Remarks" className="col-span-2"><Textarea rows={2} value={ev.remarks} onChange={e=>setEv(p=>({...p,remarks:e.target.value}))} /></Field>
+        </div>
+        <DialogFooter><Button variant="outline" onClick={()=>setEvOpen(false)} disabled={evSaving}>Cancel</Button>
+          <Button onClick={saveEv} disabled={evSaving} className="bg-red-600 hover:bg-red-700 text-white">{evSaving?"Saving…":(evId?"Update":"Create")}</Button></DialogFooter>
+      </DialogContent></Dialog>
+    </div>);
+}
+
 export default function ISO() {
   const [tab, setTab] = useState("ncr");
   return (
@@ -199,9 +373,13 @@ export default function ISO() {
         <TabsList className="rounded-sm bg-slate-100 flex-wrap h-auto">
           <TabsTrigger value="ncr" className="rounded-sm"><ClipboardList className="w-4 h-4 mr-1" /> NCR</TabsTrigger>
           <TabsTrigger value="capa" className="rounded-sm"><ShieldCheck className="w-4 h-4 mr-1" /> CAPA</TabsTrigger>
+          <TabsTrigger value="calibration" className="rounded-sm"><Gauge className="w-4 h-4 mr-1" /> Calibration</TabsTrigger>
+          <TabsTrigger value="suppliers" className="rounded-sm"><Truck className="w-4 h-4 mr-1" /> Supplier Quality</TabsTrigger>
         </TabsList>
         <TabsContent value="ncr"><NCRRegister /></TabsContent>
         <TabsContent value="capa"><CAPARegister /></TabsContent>
+        <TabsContent value="calibration"><CalibrationRegister /></TabsContent>
+        <TabsContent value="suppliers"><SupplierQuality /></TabsContent>
       </Tabs>
     </div>
   );
