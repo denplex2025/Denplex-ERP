@@ -3519,6 +3519,115 @@ async def _start_backup_loop():
         pass
 
 
+# ---------------- ISO QMS: NCR + CAPA registers ----------------
+class NCR(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    code: Optional[str] = None
+    date: str = Field(default_factory=now_iso)
+    source: str = "production"      # production | internal_audit | customer_complaint | supplier | other
+    work_order_id: Optional[str] = ""
+    work_order_code: Optional[str] = ""
+    process_name: Optional[str] = ""
+    product: Optional[str] = ""
+    part_number: Optional[str] = ""
+    customer_name: Optional[str] = ""
+    supplier_name: Optional[str] = ""
+    qty: float = 0
+    description: str = ""           # non-conformity description (F/PRD/03)
+    root_cause: Optional[str] = ""
+    correction: Optional[str] = ""  # immediate correction
+    disposition: str = "rework"     # rework | repair | regrade | scrap | use_as_is | return_to_supplier
+    capa_id: Optional[str] = ""
+    capa_code: Optional[str] = ""
+    status: Literal["open", "closed"] = "open"
+    raised_by: Optional[str] = ""
+    closed_by: Optional[str] = ""
+    closed_date: Optional[str] = ""
+    remarks: Optional[str] = ""
+    created_at: str = Field(default_factory=now_iso)
+
+class CAPA(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    code: Optional[str] = None
+    date: str = Field(default_factory=now_iso)
+    source: str = "ncr"            # ncr | internal_audit | customer_complaint | management_review | other
+    ncr_id: Optional[str] = ""
+    ncr_code: Optional[str] = ""
+    nonconformity: str = ""
+    root_cause: Optional[str] = ""
+    corrective_action: Optional[str] = ""
+    preventive_action: Optional[str] = ""
+    responsibility: Optional[str] = ""
+    target_date: Optional[str] = ""
+    risk_assessment: Optional[str] = ""
+    effectiveness: Optional[str] = ""   # verification of effectiveness
+    verified_by: Optional[str] = ""
+    verified_date: Optional[str] = ""
+    iso_clause: Optional[str] = "8.7, 10.2"
+    status: Literal["open", "in_progress", "verified", "closed"] = "open"
+    raised_by: Optional[str] = ""
+    remarks: Optional[str] = ""
+    created_at: str = Field(default_factory=now_iso)
+
+@api.post("/ncrs")
+async def create_ncr(n: NCR, user=Depends(get_current_user)):
+    doc = n.model_dump(); doc["code"] = await gen_code("NCR", "ncr")
+    if not doc.get("raised_by"): doc["raised_by"] = user.get("name", "")
+    if doc.get("work_order_id"):
+        wo = await db.work_orders.find_one({"id": doc["work_order_id"]}, {"_id": 0})
+        if wo: doc["work_order_code"] = wo.get("code", "")
+    await db.ncrs.insert_one(doc)
+    return serialize(doc)
+
+@api.get("/ncrs")
+async def list_ncrs(user=Depends(get_current_user)):
+    return await list_collection(db.ncrs)
+
+@api.put("/ncrs/{nid}")
+async def update_ncr(nid: str, n: NCR, user=Depends(get_current_user)):
+    data = n.model_dump(); data.pop("id", None); data.pop("created_at", None)
+    if data.get("status") == "closed" and not data.get("closed_date"):
+        data["closed_date"] = now_iso(); data["closed_by"] = user.get("name", "")
+    await db.ncrs.update_one({"id": nid}, {"$set": data})
+    return {"ok": True}
+
+@api.delete("/ncrs/{nid}")
+async def del_ncr(nid: str, user=Depends(require_roles("admin", "manager", "qc"))):
+    await db.ncrs.delete_one({"id": nid})
+    return {"ok": True}
+
+@api.post("/capas")
+async def create_capa(c: CAPA, user=Depends(get_current_user)):
+    doc = c.model_dump(); doc["code"] = await gen_code("CAPA", "capa")
+    if not doc.get("raised_by"): doc["raised_by"] = user.get("name", "")
+    if doc.get("ncr_id"):
+        ncr = await db.ncrs.find_one({"id": doc["ncr_id"]}, {"_id": 0})
+        if ncr:
+            doc["ncr_code"] = ncr.get("code", "")
+            await db.ncrs.update_one({"id": doc["ncr_id"]}, {"$set": {"capa_id": doc["id"], "capa_code": doc["code"]}})
+    await db.capas.insert_one(doc)
+    return serialize(doc)
+
+@api.get("/capas")
+async def list_capas(user=Depends(get_current_user)):
+    return await list_collection(db.capas)
+
+@api.put("/capas/{cid}")
+async def update_capa(cid: str, c: CAPA, user=Depends(get_current_user)):
+    data = c.model_dump(); data.pop("id", None); data.pop("created_at", None)
+    if data.get("status") in ("verified", "closed") and not data.get("verified_date"):
+        data["verified_date"] = now_iso(); data["verified_by"] = user.get("name", "")
+    await db.capas.update_one({"id": cid}, {"$set": data})
+    return {"ok": True}
+
+@api.delete("/capas/{cid}")
+async def del_capa(cid: str, user=Depends(require_roles("admin", "manager", "qc"))):
+    await db.capas.delete_one({"id": cid})
+    return {"ok": True}
+
+
 def _hsn_tax_summary(lines: List[Dict[str, Any]], is_interstate: bool) -> List[Dict[str, Any]]:
     """Aggregate per-HSN tax breakup for the Tax Summary block."""
     bucket: Dict[str, Dict[str, float]] = {}

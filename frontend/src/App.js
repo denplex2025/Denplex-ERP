@@ -50,6 +50,7 @@ import Machines from "./pages/Machines";
 import Scan from "./pages/Scan";
 import Planning from "./pages/Planning";
 import Costing from "./pages/Costing";
+import ISO from "./pages/ISO";
 
 function App() {
   return (
@@ -94,6 +95,7 @@ function App() {
               <Route path="machines" element={<Machines />} />
               <Route path="planning" element={<Planning />} />
               <Route path="costing" element={<Costing />} />
+              <Route path="iso" element={<ISO />} />
               <Route path="scan/:entity/:id" element={<Scan />} />
             </Route>
             <Route path="*" element={<Navigate to="/" replace />} />

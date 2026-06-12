@@ -72,6 +72,7 @@ const NAV_GROUPS = [
     items: [
       { to: "/app/qc", label: "QC Reports", icon: ShieldCheck, testid: "nav-qc" },
       { to: "/app/documents", label: "Documents (ISO)", icon: FileBox, testid: "nav-documents" },
+      { to: "/app/iso", label: "ISO QMS", icon: ShieldCheck, testid: "nav-iso" },
     ],
   },
   {
