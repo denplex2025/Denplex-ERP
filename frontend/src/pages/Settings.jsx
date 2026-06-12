@@ -18,6 +18,8 @@ export default function Settings() {
   const [setupOpen, setSetupOpen] = useState(false);
   const [setup, setSetup] = useState(null);
   const [code, setCode] = useState("");
+  const [gdrive, setGdrive] = useState({ connected: false, configured: false, email: "", last_backup: "" });
+  const [gdBusy, setGdBusy] = useState("");
 
   const load = async () => {
     try {
@@ -26,6 +28,36 @@ export default function Settings() {
     } catch (e) { toast.error("Admin only"); }
   };
   useEffect(() => { load(); }, []);
+
+  useEffect(() => {
+    const refreshGd = () => api.get("/google/status", { silent: true }).then((r) => setGdrive(r.data)).catch(() => {});
+    refreshGd();
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("gdrive") === "connected") { toast.success("Google Drive connected"); refreshGd(); window.history.replaceState({}, "", "/app/settings"); setTab("gdrive"); }
+    else if (params.get("gdrive") === "error") { toast.error("Google Drive connection failed — please try again"); window.history.replaceState({}, "", "/app/settings"); setTab("gdrive"); }
+  }, []);
+
+  const gdConnect = async () => {
+    setGdBusy("connect");
+    try { const r = await api.get("/google/oauth/start"); window.location.href = r.data.auth_url; }
+    catch (e) { toast.error(e?.response?.data?.detail || "Could not start Google connect"); setGdBusy(""); }
+  };
+  const gdDisconnect = async () => {
+    if (!window.confirm("Disconnect Google Drive?")) return;
+    setGdBusy("disc");
+    try { await api.post("/google/disconnect"); setGdrive((g) => ({ ...g, connected: false, email: "" })); toast.success("Disconnected"); }
+    catch (e) { toast.error("Failed to disconnect"); }
+    setGdBusy("");
+  };
+  const gdBackup = async () => {
+    setGdBusy("backup");
+    try {
+      const r = await api.post("/google/backup");
+      toast.success(`Backup uploaded: ${r.data.file} (${r.data.size_kb} KB)`);
+      api.get("/google/status", { silent: true }).then((x) => setGdrive(x.data)).catch(() => {});
+    } catch (e) { toast.error(e?.response?.data?.detail || "Backup failed"); }
+    setGdBusy("");
+  };
 
   const save = async () => {
     try { await api.put("/settings/integrations", s); toast.success("Saved"); load(); }
@@ -56,6 +88,7 @@ export default function Settings() {
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList className="rounded-sm bg-slate-100 mb-4 flex-wrap h-auto">
           <TabsTrigger value="company" className="rounded-sm" data-testid="tab-company">Company</TabsTrigger>
+          <TabsTrigger value="gdrive" className="rounded-sm" data-testid="tab-gdrive">Google Drive</TabsTrigger>
           <TabsTrigger value="template" className="rounded-sm" data-testid="tab-template">Invoice Template</TabsTrigger>
           <TabsTrigger value="email" className="rounded-sm" data-testid="tab-email">Email Accounts</TabsTrigger>
           <TabsTrigger value="vyapar" className="rounded-sm" data-testid="tab-vyapar">Vyapar Import</TabsTrigger>
@@ -152,6 +185,28 @@ export default function Settings() {
               </div>
               <p className="text-xs text-slate-500 mt-2">Accepts JSON: {`{ name, company, phone, email, product, message, city, state, external_id }`}</p>
             </div>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="gdrive">
+          <Card className="p-6">
+            <h3 className="font-display text-lg font-semibold mb-1">Google Drive</h3>
+            <p className="text-sm text-slate-600 mb-4">Connect your company Google Drive to store ERP files and back up your data. Files go to a “Denplex ERP” folder in your Drive.</p>
+            {!gdrive.configured ? (
+              <div className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded p-3">Google sign-in isn’t configured on the server yet (GOOGLE_OAUTH_CLIENT_ID / SECRET).</div>
+            ) : gdrive.connected ? (
+              <>
+                <div className="flex items-center gap-2 text-sm text-emerald-700 mb-4"><span className="h-2 w-2 rounded-full bg-emerald-500" /> Connected{gdrive.email ? ` as ${gdrive.email}` : ""}</div>
+                <div className="flex flex-wrap gap-2">
+                  <Button onClick={gdBackup} disabled={!!gdBusy} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="gd-backup">{gdBusy === "backup" ? "Backing up…" : "Back up ERP data now"}</Button>
+                  <Button onClick={gdDisconnect} disabled={!!gdBusy} variant="outline" className="rounded-sm" data-testid="gd-disconnect">Disconnect</Button>
+                </div>
+                {gdrive.last_backup && <div className="text-xs text-slate-500 mt-3">Last backup: {new Date(gdrive.last_backup).toLocaleString()}</div>}
+                <div className="text-xs text-slate-400 mt-2">Backups are saved to “Denplex ERP / Backups”.</div>
+              </>
+            ) : (
+              <Button onClick={gdConnect} disabled={!!gdBusy} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="gd-connect">{gdBusy === "connect" ? "Opening Google…" : "Connect Google Drive"}</Button>
+            )}
           </Card>
         </TabsContent>
 

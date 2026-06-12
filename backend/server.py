@@ -3246,6 +3246,156 @@ async def costing_overview(user=Depends(get_current_user)):
     }
 
 
+# ---------------- Google Drive (OAuth: file store + data backup) ----------------
+GOOGLE_OAUTH_CLIENT_ID = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "")
+GOOGLE_OAUTH_CLIENT_SECRET = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "")
+GOOGLE_OAUTH_REDIRECT_URI = os.environ.get(
+    "GOOGLE_OAUTH_REDIRECT_URI",
+    "https://denplex-erp-production.up.railway.app/api/google/oauth/callback")
+GOOGLE_DRIVE_SCOPE = ("https://www.googleapis.com/auth/drive.file "
+                      "https://www.googleapis.com/auth/userinfo.email")
+_GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+
+async def _gdrive_cfg():
+    return await db.settings.find_one({"_id": "google_drive"}, {"_id": 0}) or {}
+
+async def _gdrive_access_token():
+    cfg = await _gdrive_cfg()
+    rt = cfg.get("refresh_token")
+    if not rt:
+        raise HTTPException(400, "Google Drive is not connected.")
+    if not (GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET):
+        raise HTTPException(503, "Google OAuth not configured (missing client id/secret).")
+    async with httpx.AsyncClient(timeout=30) as cx:
+        r = await cx.post(_GOOGLE_TOKEN_URL, data={
+            "client_id": GOOGLE_OAUTH_CLIENT_ID, "client_secret": GOOGLE_OAUTH_CLIENT_SECRET,
+            "refresh_token": rt, "grant_type": "refresh_token"})
+    if r.status_code >= 400:
+        raise HTTPException(502, f"Google token refresh failed: {r.text[:200]}")
+    return r.json().get("access_token")
+
+async def _drive_ensure_folder(name, parent=None):
+    token = await _gdrive_access_token()
+    q = f"name='{name}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
+    if parent:
+        q += f" and '{parent}' in parents"
+    async with httpx.AsyncClient(timeout=30) as cx:
+        r = await cx.get("https://www.googleapis.com/drive/v3/files",
+            params={"q": q, "fields": "files(id,name)", "spaces": "drive"},
+            headers={"Authorization": f"Bearer {token}"})
+        files = r.json().get("files", []) if r.status_code < 400 else []
+        if files:
+            return files[0]["id"]
+        meta = {"name": name, "mimeType": "application/vnd.google-apps.folder"}
+        if parent:
+            meta["parents"] = [parent]
+        c = await cx.post("https://www.googleapis.com/drive/v3/files",
+            json=meta, headers={"Authorization": f"Bearer {token}"})
+        if c.status_code >= 400:
+            raise HTTPException(502, f"Drive folder create failed: {c.text[:200]}")
+        return c.json()["id"]
+
+async def _drive_upload(name, mime, data: bytes, parent=None):
+    import json as _json
+    token = await _gdrive_access_token()
+    meta = {"name": name}
+    if parent:
+        meta["parents"] = [parent]
+    boundary = "denplexerpboundary"
+    body = (f"--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n"
+            f"{_json.dumps(meta)}\r\n--{boundary}\r\nContent-Type: {mime}\r\n\r\n").encode() + data + f"\r\n--{boundary}--".encode()
+    async with httpx.AsyncClient(timeout=180) as cx:
+        r = await cx.post("https://www.googleapis.com/upload/drive/v3/files",
+            params={"uploadType": "multipart", "fields": "id,name,webViewLink"},
+            content=body, headers={"Authorization": f"Bearer {token}",
+                "Content-Type": f"multipart/related; boundary={boundary}"})
+    if r.status_code >= 400:
+        raise HTTPException(502, f"Drive upload failed: {r.text[:200]}")
+    return r.json()
+
+@api.get("/google/status")
+async def google_status(user=Depends(get_current_user)):
+    cfg = await _gdrive_cfg()
+    return {"connected": bool(cfg.get("refresh_token")), "email": cfg.get("email", ""),
+            "configured": bool(GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET),
+            "last_backup": cfg.get("last_backup", "")}
+
+@api.get("/google/oauth/start")
+async def google_oauth_start(user=Depends(get_current_user)):
+    if not GOOGLE_OAUTH_CLIENT_ID:
+        raise HTTPException(503, "Google OAuth not configured. Set GOOGLE_OAUTH_CLIENT_ID / SECRET in the backend.")
+    from urllib.parse import urlencode
+    state = secrets.token_urlsafe(16)
+    await db.settings.update_one({"_id": "google_drive"}, {"$set": {"oauth_state": state}}, upsert=True)
+    params = {"client_id": GOOGLE_OAUTH_CLIENT_ID, "redirect_uri": GOOGLE_OAUTH_REDIRECT_URI,
+              "response_type": "code", "scope": GOOGLE_DRIVE_SCOPE,
+              "access_type": "offline", "prompt": "consent", "state": state}
+    return {"auth_url": "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode(params)}
+
+@api.get("/google/oauth/callback")
+async def google_oauth_callback(code: str = "", state: str = "", error: str = ""):
+    from fastapi.responses import RedirectResponse
+    front = QR_BASE_URL
+    if error or not code:
+        return RedirectResponse(f"{front}/app/settings?gdrive=error")
+    cfg = await _gdrive_cfg()
+    if state and cfg.get("oauth_state") and state != cfg.get("oauth_state"):
+        return RedirectResponse(f"{front}/app/settings?gdrive=error")
+    async with httpx.AsyncClient(timeout=30) as cx:
+        r = await cx.post(_GOOGLE_TOKEN_URL, data={
+            "client_id": GOOGLE_OAUTH_CLIENT_ID, "client_secret": GOOGLE_OAUTH_CLIENT_SECRET,
+            "code": code, "redirect_uri": GOOGLE_OAUTH_REDIRECT_URI, "grant_type": "authorization_code"})
+    if r.status_code >= 400:
+        return RedirectResponse(f"{front}/app/settings?gdrive=error")
+    tok = r.json(); rt = tok.get("refresh_token"); email = ""
+    try:
+        async with httpx.AsyncClient(timeout=20) as cx:
+            ui = await cx.get("https://www.googleapis.com/oauth2/v2/userinfo",
+                headers={"Authorization": f"Bearer {tok.get('access_token')}"})
+            if ui.status_code < 400:
+                email = ui.json().get("email", "")
+    except Exception:
+        pass
+    upd = {"connected": True, "email": email}
+    if rt:
+        upd["refresh_token"] = rt
+    await db.settings.update_one({"_id": "google_drive"}, {"$set": upd, "$unset": {"oauth_state": ""}}, upsert=True)
+    return RedirectResponse(f"{front}/app/settings?gdrive=connected")
+
+@api.post("/google/disconnect")
+async def google_disconnect(user=Depends(require_roles("admin"))):
+    await db.settings.update_one({"_id": "google_drive"},
+        {"$unset": {"refresh_token": "", "email": "", "connected": ""}}, upsert=True)
+    return {"ok": True}
+
+@api.post("/google/backup")
+async def google_backup(user=Depends(get_current_user)):
+    """Export ERP data to JSON and upload to Google Drive (Denplex ERP / Backups)."""
+    import json as _json
+    root = await _drive_ensure_folder("Denplex ERP")
+    backups = await _drive_ensure_folder("Backups", root)
+    cols = ["work_orders", "wo_operations", "machines", "parts", "boms", "items",
+            "material_state_movements", "customers", "suppliers", "leads", "quotations",
+            "invoices", "purchase_orders", "qc_inspections", "qc_reports", "employees",
+            "expenses", "payments_in", "payments_out", "documents", "campaigns"]
+    dump = {}
+    for c in cols:
+        try:
+            dump[c] = await db[c].find({}, {"_id": 0}).to_list(100000)
+        except Exception:
+            dump[c] = []
+    try:
+        dump["users"] = await db.users.find({}, {"_id": 0, "password": 0, "totp_secret": 0}).to_list(5000)
+    except Exception:
+        dump["users"] = []
+    payload = _json.dumps(dump, default=str).encode("utf-8")
+    fname = f"denplex-erp-backup-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.json"
+    res = await _drive_upload(fname, "application/json", payload, backups)
+    await db.settings.update_one({"_id": "google_drive"}, {"$set": {"last_backup": now_iso()}}, upsert=True)
+    return {"ok": True, "file": res.get("name"), "link": res.get("webViewLink"),
+            "size_kb": round(len(payload) / 1024, 1), "collections": len(dump)}
+
+
 def _hsn_tax_summary(lines: List[Dict[str, Any]], is_interstate: bool) -> List[Dict[str, Any]]:
     """Aggregate per-HSN tax breakup for the Tax Summary block."""
     bucket: Dict[str, Dict[str, float]] = {}
