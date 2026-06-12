@@ -2131,9 +2131,10 @@ QUOTE_ESTIMATE_PROMPT = (
     "what is checked. scope_of_buyer: what the customer must provide. Be realistic for an Indian SME shop."
 )
 
-def _parse_quote_json(text: str):
-    import json
-    t = (text or "").strip()
+def _loads_tolerant(t):
+    """Parse JSON, salvaging truncated output by closing open strings/arrays/objects."""
+    import json, re
+    t = (t or "").strip()
     if "```" in t:
         for part in t.split("```"):
             part = part.strip()
@@ -2141,11 +2142,33 @@ def _parse_quote_json(text: str):
                 part = part[4:].strip()
             if part.startswith("{"):
                 t = part; break
-    if not t.startswith("{") and "{" in t and "}" in t:
-        t = t[t.index("{"): t.rindex("}") + 1]
+    if not t.startswith("{") and "{" in t:
+        t = t[t.index("{"):]
     try:
-        raw = json.loads(t)
+        return json.loads(t)
     except Exception:
+        pass
+    instr = False; esc = False; depth_obj = 0; depth_arr = 0
+    for ch in t:
+        if esc: esc = False; continue
+        if ch == "\\": esc = True; continue
+        if ch == '"': instr = not instr; continue
+        if instr: continue
+        if ch == '{': depth_obj += 1
+        elif ch == '}': depth_obj -= 1
+        elif ch == '[': depth_arr += 1
+        elif ch == ']': depth_arr -= 1
+    s2 = t + ('"' if instr else "")
+    s2 = re.sub(r',\s*$', '', s2.rstrip())
+    s2 = s2 + ("]" * max(0, depth_arr)) + ("}" * max(0, depth_obj))
+    try:
+        return json.loads(s2)
+    except Exception:
+        return {}
+
+def _parse_quote_json(text: str):
+    raw = _loads_tolerant(text)
+    if not isinstance(raw, dict) or not raw:
         return {}
     return {
         "part_name": str(raw.get("part_name") or "").strip(),
@@ -2177,7 +2200,7 @@ async def ai_quote_estimate(body: QuoteEstimateIn, user=Depends(get_current_user
         media = mime if mime.startswith("image/") else "image/png"
         block = {"type": "image", "source": {"type": "base64", "media_type": media, "data": raw}}
     ctx = f"Material: {body.material or 'unspecified'}. Quantity: {body.qty or 1} pcs. Part name: {body.part_name or '(read from drawing)'}.\n"
-    payload = {"model": QC_VISION_MODEL, "max_tokens": 1500,
+    payload = {"model": QC_VISION_MODEL, "max_tokens": 4000,
                "messages": [{"role": "user", "content": [block, {"type": "text", "text": ctx + QUOTE_ESTIMATE_PROMPT}]}]}
     headers = {"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"}
     try:
