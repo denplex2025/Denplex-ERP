@@ -2057,7 +2057,7 @@ async def add_op_photo(wid: str, op_id: str, body: OpPhotoIn, user=Depends(get_c
     if op is None:
         raise HTTPException(404, "Operation not found")
     photos = (op.get("photos") or [])[:19]  # cap at 20 total
-    photos.append(photo)
+    photos.append(await _drive_offload(photo, f"shopfloor-{wid}-{op_id}-{len(photos)}.jpg", "image/jpeg", "Shopfloor Photos"))
     await db.wo_operations.update_one({"id": op_id, "work_order_id": wid}, {"$set": {"photos": photos}})
     return {"ok": True, "photo_count": len(photos)}
 
@@ -2066,7 +2066,19 @@ async def get_op_photos(wid: str, op_id: str, user=Depends(get_current_user)):
     op = await db.wo_operations.find_one({"id": op_id, "work_order_id": wid}, {"_id": 0, "photos": 1})
     if op is None:
         raise HTTPException(404, "Operation not found")
-    return {"photos": op.get("photos") or []}
+    out = []
+    for ph in (op.get("photos") or []):
+        if isinstance(ph, str) and ph.startswith("gdrive:"):
+            try:
+                data = await _resolve_b64_or_drive(ph)
+                out.append("data:image/jpeg;base64," + base64.b64encode(data).decode())
+            except Exception:
+                out.append("")
+        elif isinstance(ph, str) and ph.startswith("data:"):
+            out.append(ph)
+        else:
+            out.append("data:image/jpeg;base64," + str(ph))
+    return {"photos": out}
 
 @api.post("/work-orders/{wid}/operations/seed-from-part")
 async def seed_operations_from_part(wid: str, user=Depends(get_current_user)):
@@ -2504,6 +2516,8 @@ async def create_qc(q: QCReport, user=Depends(get_current_user)):
             doc["work_order_code"] = wo.get("code", "")
             doc["customer_id"] = doc.get("customer_id") or wo.get("customer_id", "")
             doc["customer_name"] = doc.get("customer_name") or wo.get("customer_name", "")
+    if doc.get("photos"):
+        doc["photos"] = [await _drive_offload(ph, f"qc-{doc.get('code','')}-{i}.jpg", "image/jpeg", "QC Photos") for i, ph in enumerate(doc["photos"])]
     await db.qc_reports.insert_one(doc)
     return serialize(doc)
 
@@ -2517,17 +2531,46 @@ async def del_qc(qid: str, user=Depends(require_roles("admin", "manager", "qc"))
     return {"ok": True}
 
 # ---------------- Documents ----------------
+def _doc_mime(name):
+    import mimetypes
+    return mimetypes.guess_type(name or "")[0] or "application/octet-stream"
+
 @api.post("/documents")
 async def upload_doc(d: DocumentMeta, user=Depends(get_current_user)):
     doc = d.model_dump()
     doc["uploaded_by"] = user["name"]
+    doc["file_base64"] = await _drive_offload(doc.get("file_base64"), doc.get("name") or "document", _doc_mime(doc.get("name")), "Documents")
     await db.documents.insert_one(doc)
     return serialize(doc)
 
 @api.get("/documents")
 async def list_docs(linked_to: Optional[str] = None, user=Depends(get_current_user)):
     q = {"linked_to": linked_to} if linked_to else {}
-    return await db.documents.find(q, {"_id": 0}).sort("created_at", -1).to_list(500)
+    docs = await db.documents.find(q, {"_id": 0, "file_base64": 0}).sort("created_at", -1).to_list(500)
+    for d in docs:
+        d["has_file"] = True
+    return docs
+
+@api.get("/documents/{did}/download")
+async def download_doc(did: str, user=Depends(get_current_user)):
+    doc = await db.documents.find_one({"id": did}, {"_id": 0})
+    if not doc or not doc.get("file_base64"):
+        raise HTTPException(404, "No file on this document")
+    data = await _resolve_b64_or_drive(doc["file_base64"])
+    return Response(content=data, media_type=_doc_mime(doc.get("name")),
+        headers={"Content-Disposition": f'attachment; filename="{doc.get("name","document")}"'})
+
+@api.get("/documents/{did}/revisions/{rev_no}/download")
+async def download_doc_rev(did: str, rev_no: int, user=Depends(get_current_user)):
+    doc = await db.documents.find_one({"id": did}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Document not found")
+    rev = next((r for r in doc.get("revisions", []) if int(r.get("rev_no", -1)) == rev_no), None)
+    if not rev or not rev.get("file_base64"):
+        raise HTTPException(404, "No file for this revision")
+    data = await _resolve_b64_or_drive(rev["file_base64"])
+    return Response(content=data, media_type=_doc_mime(doc.get("name")),
+        headers={"Content-Disposition": f'attachment; filename="{doc.get("name","document")}-rev{rev_no}"'})
 
 @api.delete("/documents/{did}")
 async def del_doc(did: str, user=Depends(get_current_user)):
@@ -2710,16 +2753,17 @@ async def add_revision(did: str, payload: DocRevIn, user=Depends(get_current_use
             "created_at": doc.get("created_at", now_iso()),
         })
     new_rev_no = max([r.get("rev_no", 0) for r in revs]) + 1
+    new_file = await _drive_offload(payload.file_base64, f"{doc.get('name','document')}-rev{new_rev_no}", _doc_mime(doc.get("name")), "Documents")
     revs.append({
         "rev_no": new_rev_no,
-        "file_base64": payload.file_base64,
+        "file_base64": new_file,
         "notes": payload.notes or "",
         "by": user["name"],
         "created_at": now_iso(),
     })
     await db.documents.update_one(
         {"id": did},
-        {"$set": {"revisions": revs, "file_base64": payload.file_base64, "current_revision": new_rev_no}},
+        {"$set": {"revisions": revs, "file_base64": new_file, "current_revision": new_rev_no}},
     )
     return {"ok": True, "current_revision": new_rev_no}
 

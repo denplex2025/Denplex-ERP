@@ -20,6 +20,7 @@ export default function Documents() {
   const [revNotes, setRevNotes] = useState("");
   const [historyOpen, setHistoryOpen] = useState(false);
   const [history, setHistory] = useState([]);
+  const [historyDoc, setHistoryDoc] = useState(null);
 
   const load = async () => { const r = await api.get("/documents"); setDocs(r.data); };
   useEffect(() => { load(); }, []);
@@ -56,8 +57,23 @@ export default function Documents() {
     reader.readAsDataURL(revFile);
   };
 
+  const dlDoc = async (id, name) => {
+    try {
+      const r = await api.get(`/documents/${id}/download`, { responseType: "blob" });
+      const url = URL.createObjectURL(r.data); const a = document.createElement("a");
+      a.href = url; a.download = name || "document"; a.click(); URL.revokeObjectURL(url);
+    } catch (e) { toast.error("Download failed"); }
+  };
+  const dlRev = async (id, revNo) => {
+    try {
+      const r = await api.get(`/documents/${id}/revisions/${revNo}/download`, { responseType: "blob" });
+      const url = URL.createObjectURL(r.data); const a = document.createElement("a");
+      a.href = url; a.download = `rev-${revNo}`; a.click(); URL.revokeObjectURL(url);
+    } catch (e) { toast.error("Download failed"); }
+  };
   const openHistory = async (d) => {
     try {
+      setHistoryDoc(d);
       const r = await api.get(`/documents/${d.id}/revisions`);
       setHistory(r.data.revisions || []);
       setHistoryOpen(true);
@@ -105,7 +121,7 @@ export default function Documents() {
                   <Td className="text-right whitespace-nowrap">
                     <Button size="icon" variant="ghost" className="h-8 w-8" onClick={()=>openRev(d)} title="Add revision" data-testid={`doc-revise-${d.id}`}><GitBranch className="h-4 w-4 text-red-600" /></Button>
                     <Button size="icon" variant="ghost" className="h-8 w-8" onClick={()=>openHistory(d)} title="Revision history"><History className="h-4 w-4" /></Button>
-                    <a href={d.file_base64} download={d.name}><Button size="icon" variant="ghost" className="h-8 w-8"><Download className="h-4 w-4" /></Button></a>
+                    <Button size="icon" variant="ghost" className="h-8 w-8" onClick={()=>dlDoc(d.id, d.name)} title="Download"><Download className="h-4 w-4" /></Button>
                     <Button size="icon" variant="ghost" className="h-8 w-8" onClick={()=>del(d)}><Trash2 className="h-4 w-4 text-red-600" /></Button>
                   </Td>
                 </tr>
@@ -145,7 +161,7 @@ export default function Documents() {
                     <Td>{h.by}</Td>
                     <Td>{fmtDate(h.created_at)}</Td>
                     <Td className="text-slate-600">{h.notes}</Td>
-                    <Td><a href={h.file_base64} download={`rev-${h.rev_no}`}><Button size="sm" variant="outline" className="rounded-sm h-7">Download</Button></a></Td>
+                    <Td><Button size="sm" variant="outline" className="rounded-sm h-7" onClick={()=>dlRev(historyDoc?.id, h.rev_no)}>Download</Button></Td>
                   </tr>
                 ))}
               </tbody>
