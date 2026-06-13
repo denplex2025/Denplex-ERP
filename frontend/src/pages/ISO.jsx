@@ -7,7 +7,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
-import { Plus, Pencil, Trash2, ShieldCheck, ClipboardList, FileDown, Wrench, Truck, Gauge } from "lucide-react";
+import { Plus, Pencil, Trash2, ShieldCheck, ClipboardList, FileDown, Wrench, Truck, Gauge, FileText, FolderOpen, Save, FilePlus, ExternalLink, Search, Bold, Italic, Underline, List, ListOrdered, Heading2, Heading3, FileType2 } from "lucide-react";
 import StatusBadge from "@/components/erp/StatusBadge";
 import { toast } from "sonner";
 
@@ -360,6 +360,163 @@ function SupplierQuality() {
     </div>);
 }
 
+// ---------------- ISO Documents library (Master + FY 26-27) ----------------
+const ISO_CATEGORIES = ["Manual", "QMS Procedure", "Department Procedure", "Work Instruction", "Policy", "Quality Objective", "Master List", "Annexure", "Register", "EHS", "Inspection", "General"];
+const catRank = (c) => { const i = ISO_CATEGORIES.indexOf(c); return i < 0 ? 99 : i; };
+
+function RichEditor({ value, onInput }) {
+  const ref = useState(() => ({ current: null }))[0];
+  useEffect(() => { if (ref.current && ref.current.innerHTML !== (value || "")) ref.current.innerHTML = value || ""; }, []); // eslint-disable-line
+  const cmd = (c, v = null) => { document.execCommand(c, false, v); ref.current && ref.current.focus(); onInput && onInput(ref.current.innerHTML); };
+  const Btn = ({ icon: Icon, c, v, title }) => (
+    <button type="button" title={title} onMouseDown={(e) => { e.preventDefault(); cmd(c, v); }}
+      className="h-8 w-8 inline-flex items-center justify-center rounded-sm hover:bg-slate-200 text-slate-700"><Icon className="w-4 h-4" /></button>
+  );
+  return (
+    <div className="border border-slate-300 rounded-md overflow-hidden">
+      <div className="flex items-center gap-0.5 border-b border-slate-200 bg-slate-50 px-1.5 py-1 flex-wrap">
+        <Btn icon={Bold} c="bold" title="Bold" /><Btn icon={Italic} c="italic" title="Italic" /><Btn icon={Underline} c="underline" title="Underline" />
+        <span className="w-px h-5 bg-slate-300 mx-1" />
+        <Btn icon={Heading2} c="formatBlock" v="<h2>" title="Heading" /><Btn icon={Heading3} c="formatBlock" v="<h3>" title="Sub-heading" />
+        <Btn icon={FileType2} c="formatBlock" v="<p>" title="Normal text" />
+        <span className="w-px h-5 bg-slate-300 mx-1" />
+        <Btn icon={List} c="insertUnorderedList" title="Bullet list" /><Btn icon={ListOrdered} c="insertOrderedList" title="Numbered list" />
+      </div>
+      <div ref={(el) => (ref.current = el)} contentEditable suppressContentEditableWarning
+        onInput={(e) => onInput && onInput(e.currentTarget.innerHTML)}
+        className="prose prose-sm max-w-none p-4 min-h-[420px] max-h-[60vh] overflow-y-auto focus:outline-none text-sm leading-relaxed bg-white" />
+    </div>
+  );
+}
+
+function DocumentsLibrary() {
+  const [scope, setScope] = useState("master");
+  const [list, setList] = useState([]);
+  const [q, setQ] = useState("");
+  const [sel, setSel] = useState(null);        // full selected doc
+  const [draft, setDraft] = useState("");       // editor html
+  const [meta, setMeta] = useState({ title: "", code: "", category: "General" });
+  const [saving, setSaving] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [newOpen, setNewOpen] = useState(false);
+  const [nf, setNf] = useState({ title: "", code: "", category: "General" });
+
+  const load = async () => { setLoading(true); try { const r = await api.get(`/iso-documents?scope=${scope}`); setList(r.data || []); } catch (e) {} setLoading(false); };
+  useEffect(() => { load(); setSel(null); }, [scope]); // eslint-disable-line
+
+  const open = async (id) => {
+    try { const r = await api.get(`/iso-documents/${id}`); setSel(r.data); setDraft(r.data.html_content || ""); setMeta({ title: r.data.title || "", code: r.data.code || "", category: r.data.category || "General" }); }
+    catch (e) { toast.error("Could not open document"); }
+  };
+  const save = async () => {
+    if (!sel) return; setSaving(true);
+    try { await api.put(`/iso-documents/${sel.id}`, { ...meta, html_content: draft }); toast.success("Saved"); await load(); setSel({ ...sel, ...meta, revision: (sel.revision || 0) + 1 }); }
+    catch (e) { toast.error("Save failed"); } setSaving(false);
+  };
+  const del = async () => {
+    if (!sel || !window.confirm("Delete this document?")) return;
+    try { await api.delete(`/iso-documents/${sel.id}`); setSel(null); await load(); } catch (e) { toast.error("Delete failed"); }
+  };
+  const createDoc = async () => {
+    if (!nf.title.trim()) { toast.error("Title required"); return; }
+    try { const r = await api.post(`/iso-documents`, { ...nf, scope, doc_type: "text", html_content: "" }); setNewOpen(false); setNf({ title: "", code: "", category: "General" }); await load(); open(r.data.id); }
+    catch (e) { toast.error("Create failed"); }
+  };
+
+  const filtered = list.filter((d) => !q || `${d.title} ${d.code} ${d.category}`.toLowerCase().includes(q.toLowerCase()));
+  const grouped = {};
+  filtered.forEach((d) => { (grouped[d.category] = grouped[d.category] || []).push(d); });
+  const cats = Object.keys(grouped).sort((a, b) => catRank(a) - catRank(b) || a.localeCompare(b));
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="inline-flex rounded-sm bg-slate-100 p-0.5">
+          <button onClick={() => setScope("master")} className={`px-3 py-1.5 text-sm rounded-sm font-medium ${scope === "master" ? "bg-white shadow-sm text-slate-900" : "text-slate-500"}`}>Master (yearly policy)</button>
+          <button onClick={() => setScope("fy26-27")} className={`px-3 py-1.5 text-sm rounded-sm font-medium ${scope === "fy26-27" ? "bg-white shadow-sm text-slate-900" : "text-slate-500"}`}>FY 26-27</button>
+        </div>
+        <Button size="sm" variant="outline" onClick={() => setNewOpen(true)}><FilePlus className="w-4 h-4 mr-1" /> New document</Button>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-[320px_1fr] gap-3">
+        {/* List */}
+        <Card><CardContent className="p-2">
+          <div className="relative mb-2"><Search className="w-4 h-4 absolute left-2 top-2.5 text-slate-400" /><Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search documents…" className="pl-8 h-9" /></div>
+          <div className="max-h-[62vh] overflow-y-auto pr-1">
+            {loading && <div className="text-sm text-slate-400 p-3">Loading…</div>}
+            {!loading && filtered.length === 0 && <div className="text-sm text-slate-400 p-3">No documents yet in this section.</div>}
+            {cats.map((cat) => (
+              <div key={cat} className="mb-2">
+                <div className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold px-1 py-1 flex items-center gap-1"><FolderOpen className="w-3 h-3" /> {cat} <span className="text-slate-300">· {grouped[cat].length}</span></div>
+                {grouped[cat].map((d) => (
+                  <button key={d.id} onClick={() => open(d.id)} className={`w-full text-left px-2 py-1.5 rounded-sm text-sm flex items-center gap-2 ${sel && sel.id === d.id ? "bg-red-50 text-red-800" : "hover:bg-slate-100 text-slate-700"}`}>
+                    {d.doc_type === "file" ? <FileDown className="w-3.5 h-3.5 shrink-0 text-slate-400" /> : <FileText className="w-3.5 h-3.5 shrink-0 text-slate-400" />}
+                    <span className="truncate flex-1">{d.title}</span>
+                    {d.code ? <span className="text-[10px] text-slate-400 shrink-0">{d.code}</span> : null}
+                  </button>
+                ))}
+              </div>
+            ))}
+          </div>
+        </CardContent></Card>
+
+        {/* Editor / viewer */}
+        <Card><CardContent className="p-3">
+          {!sel && <div className="h-[60vh] flex flex-col items-center justify-center text-center text-slate-400 gap-2"><FileText className="w-10 h-10" /><div className="text-sm">Select a document to view, edit and download.</div></div>}
+          {sel && sel.doc_type === "file" && (
+            <div className="space-y-4">
+              <div><div className="text-xs uppercase tracking-wider text-red-600 font-semibold">{sel.category}{sel.code ? ` · ${sel.code}` : ""}</div><h2 className="text-lg font-bold">{sel.title}</h2></div>
+              <div className="rounded-md border border-slate-200 bg-slate-50 p-6 text-sm text-slate-600 flex flex-col items-center gap-3">
+                <FileDown className="w-8 h-8 text-slate-400" />
+                <div>This is a {sel.file_name?.split(".").pop()?.toUpperCase() || "binary"} file (register / form / PDF). Open or download it from Google Drive.</div>
+                <div className="flex gap-2">
+                  {sel.source_url
+                    ? <a href={sel.source_url} target="_blank" rel="noreferrer"><Button size="sm"><ExternalLink className="w-4 h-4 mr-1" /> Open / download in Drive</Button></a>
+                    : <Button size="sm" onClick={() => dlPdf(`/iso-documents/${sel.id}/file`, sel.file_name || sel.title)}><FileDown className="w-4 h-4 mr-1" /> Download original</Button>}
+                </div>
+              </div>
+              <div className="flex justify-end"><Button size="sm" variant="ghost" className="text-red-600" onClick={del}><Trash2 className="w-4 h-4 mr-1" /> Remove</Button></div>
+            </div>
+          )}
+          {sel && sel.doc_type !== "file" && (
+            <div className="space-y-3">
+              <div className="grid grid-cols-1 md:grid-cols-[1fr_160px_180px] gap-2">
+                <Field label="Title"><Input value={meta.title} onChange={(e) => setMeta({ ...meta, title: e.target.value })} className="h-9" /></Field>
+                <Field label="Doc No"><Input value={meta.code} onChange={(e) => setMeta({ ...meta, code: e.target.value })} className="h-9" /></Field>
+                <Field label="Category"><Sel value={meta.category} onChange={(v) => setMeta({ ...meta, category: v })} options={ISO_CATEGORIES.map((c) => ({ value: c, label: c }))} /></Field>
+              </div>
+              <RichEditor key={sel.id} value={draft} onInput={setDraft} />
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <div className="text-xs text-slate-400">Rev {sel.revision || 0}{sel.source_url ? " · imported from Drive" : ""}</div>
+                <div className="flex gap-2">
+                  <Button size="sm" variant="ghost" className="text-red-600" onClick={del}><Trash2 className="w-4 h-4 mr-1" /> Delete</Button>
+                  <Button size="sm" variant="outline" onClick={() => dlPdf(`/iso-documents/${sel.id}/docx`, `${(meta.code || meta.title).replace(/\//g, "-")}.docx`)}><FileDown className="w-4 h-4 mr-1" /> Word</Button>
+                  <Button size="sm" variant="outline" onClick={() => dlPdf(`/iso-documents/${sel.id}/pdf`, `${(meta.code || meta.title).replace(/\//g, "-")}.pdf`)}><FileDown className="w-4 h-4 mr-1" /> PDF</Button>
+                  <Button size="sm" onClick={save} disabled={saving}><Save className="w-4 h-4 mr-1" /> {saving ? "Saving…" : "Save"}</Button>
+                </div>
+              </div>
+            </div>
+          )}
+        </CardContent></Card>
+      </div>
+
+      <Dialog open={newOpen} onOpenChange={setNewOpen}>
+        <DialogContent><DialogHeader><DialogTitle>New document</DialogTitle></DialogHeader>
+          <div className="space-y-3">
+            <Field label="Title"><Input value={nf.title} onChange={(e) => setNf({ ...nf, title: e.target.value })} /></Field>
+            <div className="grid grid-cols-2 gap-2">
+              <Field label="Doc No"><Input value={nf.code} onChange={(e) => setNf({ ...nf, code: e.target.value })} placeholder="F/QMS/05" /></Field>
+              <Field label="Category"><Sel value={nf.category} onChange={(v) => setNf({ ...nf, category: v })} options={ISO_CATEGORIES.map((c) => ({ value: c, label: c }))} /></Field>
+            </div>
+            <div className="text-xs text-slate-400">Added under <b>{scope === "master" ? "Master" : "FY 26-27"}</b>.</div>
+          </div>
+          <DialogFooter><Button variant="outline" onClick={() => setNewOpen(false)}>Cancel</Button><Button onClick={createDoc}>Create</Button></DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
 export default function ISO() {
   const [tab, setTab] = useState("ncr");
   return (
@@ -375,11 +532,13 @@ export default function ISO() {
           <TabsTrigger value="capa" className="rounded-sm"><ShieldCheck className="w-4 h-4 mr-1" /> CAPA</TabsTrigger>
           <TabsTrigger value="calibration" className="rounded-sm"><Gauge className="w-4 h-4 mr-1" /> Calibration</TabsTrigger>
           <TabsTrigger value="suppliers" className="rounded-sm"><Truck className="w-4 h-4 mr-1" /> Supplier Quality</TabsTrigger>
+          <TabsTrigger value="documents" className="rounded-sm"><FileText className="w-4 h-4 mr-1" /> Documents</TabsTrigger>
         </TabsList>
         <TabsContent value="ncr"><NCRRegister /></TabsContent>
         <TabsContent value="capa"><CAPARegister /></TabsContent>
         <TabsContent value="calibration"><CalibrationRegister /></TabsContent>
         <TabsContent value="suppliers"><SupplierQuality /></TabsContent>
+        <TabsContent value="documents"><DocumentsLibrary /></TabsContent>
       </Tabs>
     </div>
   );
