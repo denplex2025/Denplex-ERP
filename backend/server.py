@@ -3789,6 +3789,347 @@ async def capa_pdf(cid: str, user=Depends(get_current_user)):
     return Response(content=pdf, media_type="application/pdf", headers={"Content-Disposition": f'attachment; filename="{c.get("code","CAPA")}.pdf"'})
 
 
+# ==================== ISO Documents Library (F/QMS docs, procedures, policies) ====================
+# Stores QMS documents imported from the company's ISO Google-Drive folder so they can be
+# browsed, edited in-app (rich text) and downloaded as Denplex-letterhead DOCX / PDF.
+# - doc_type "text"  -> editable html_content, exports to docx/pdf
+# - doc_type "file"  -> binary original (register/annexure/EHS pdf) streamed from Drive by source_drive_id
+class ISODocument(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    code: Optional[str] = ""            # e.g. PR/QAC/01, F/QMS/05
+    title: str
+    category: str = "General"           # Manual, QMS Procedure, Department Procedure, Work Instruction, Policy, Quality Objective, Master List, Annexure, Register, EHS, Inspection
+    scope: Literal["master", "fy26-27"] = "master"
+    doc_type: Literal["text", "file"] = "text"
+    html_content: Optional[str] = ""
+    source_drive_id: Optional[str] = ""
+    source_url: Optional[str] = ""
+    file_name: Optional[str] = ""
+    mime: Optional[str] = ""
+    revision: int = 0
+    updated_at: str = Field(default_factory=now_iso)
+    created_at: str = Field(default_factory=now_iso)
+
+class ISODocBulkIn(BaseModel):
+    documents: List[ISODocument] = []
+    replace_all: bool = False           # if true, wipe the collection first (clean re-seed)
+
+import html as _htmlmod
+from html.parser import HTMLParser as _HTMLParser
+
+_ISO_INLINE = {"b": "b", "strong": "b", "i": "i", "em": "i", "u": "u"}
+_ISO_BLOCK = {"p", "div", "h1", "h2", "h3", "h4", "h5", "li", "tr", "br"}
+
+class _ISOBlockParser(_HTMLParser):
+    """Convert a subset of HTML into an ordered list of blocks:
+       ('h', level, inline_html) | ('p', inline_html) | ('li', ordered_bool, inline_html) | ('table', [[cell_html,...],...])"""
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.blocks = []
+        self.buf = ""
+        self.pending = None          # ('h', level) or ('li', ordered)
+        self.list_stack = []         # 'ul' | 'ol'
+        self.in_table = False
+        self.table_rows = []
+        self.cur_row = None
+        self.cur_cell = None
+    def _flush(self):
+        txt = self.buf.strip()
+        if txt:
+            if self.pending and self.pending[0] == "h":
+                self.blocks.append(("h", self.pending[1], txt))
+            elif self.pending and self.pending[0] == "li":
+                self.blocks.append(("li", self.pending[1], txt))
+            else:
+                self.blocks.append(("p", txt))
+        self.buf = ""
+        self.pending = None
+    def handle_starttag(self, tag, attrs):
+        tag = tag.lower()
+        if tag == "table":
+            self._flush(); self.in_table = True; self.table_rows = []; return
+        if self.in_table:
+            if tag == "tr": self.cur_row = []
+            elif tag in ("td", "th"): self.cur_cell = ""
+            elif tag in _ISO_INLINE and self.cur_cell is not None: self.cur_cell += f"<{_ISO_INLINE[tag]}>"
+            return
+        if tag in ("ul", "ol"): self._flush(); self.list_stack.append(tag)
+        elif tag == "li": self._flush(); self.pending = ("li", (self.list_stack[-1] == "ol") if self.list_stack else False)
+        elif tag in ("h1", "h2", "h3", "h4", "h5"): self._flush(); self.pending = ("h", min(int(tag[1]), 3))
+        elif tag in ("p", "div"): self._flush()
+        elif tag == "br": self.buf += "\n"
+        elif tag in _ISO_INLINE: self.buf += f"<{_ISO_INLINE[tag]}>"
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+        if tag == "table":
+            if self.cur_row: self.table_rows.append(self.cur_row)
+            if self.table_rows: self.blocks.append(("table", self.table_rows))
+            self.in_table = False; self.table_rows = []; self.cur_row = None; self.cur_cell = None; return
+        if self.in_table:
+            if tag == "tr":
+                if self.cur_row is not None: self.table_rows.append(self.cur_row); self.cur_row = None
+            elif tag in ("td", "th"):
+                if self.cur_row is not None: self.cur_row.append((self.cur_cell or "").strip()); self.cur_cell = None
+            elif tag in _ISO_INLINE and self.cur_cell is not None: self.cur_cell += f"</{_ISO_INLINE[tag]}>"
+            return
+        if tag in ("ul", "ol"):
+            self._flush()
+            if self.list_stack: self.list_stack.pop()
+        elif tag in ("li", "p", "div", "h1", "h2", "h3", "h4", "h5"): self._flush()
+        elif tag in _ISO_INLINE: self.buf += f"</{_ISO_INLINE[tag]}>"
+    def handle_data(self, data):
+        if self.in_table:
+            if self.cur_cell is not None: self.cur_cell += _htmlmod.escape(data)
+        else:
+            self.buf += _htmlmod.escape(data)
+    def close(self):
+        super().close(); self._flush()
+        return self.blocks
+
+def _iso_blocks(html_content: str):
+    p = _ISOBlockParser()
+    try:
+        p.feed(html_content or "")
+        return p.close()
+    except Exception:
+        # fall back to plain text paragraphs
+        txt = re.sub("<[^>]+>", "", html_content or "")
+        return [("p", _htmlmod.escape(line)) for line in txt.splitlines() if line.strip()]
+
+_ISO_INLINE_RE = re.compile(r"(</?[biu]>)")
+def _iso_inline_runs(inline_html: str):
+    """Yield (text, bold, italic, underline) runs from inline html with <b>/<i>/<u>."""
+    bold = ital = und = 0
+    for tok in _ISO_INLINE_RE.split(inline_html or ""):
+        if not tok: continue
+        if tok == "<b>": bold += 1
+        elif tok == "</b>": bold = max(0, bold - 1)
+        elif tok == "<i>": ital += 1
+        elif tok == "</i>": ital = max(0, ital - 1)
+        elif tok == "<u>": und += 1
+        elif tok == "</u>": und = max(0, und - 1)
+        else:
+            yield (_htmlmod.unescape(tok), bold > 0, ital > 0, und > 0)
+
+def _iso_inline_to_rl(inline_html: str) -> str:
+    """Sanitize inline html for a reportlab Paragraph (keeps b/i/u, escapes the rest, \\n -> <br/>)."""
+    out = []
+    for text, b, i, u in _iso_inline_runs(inline_html):
+        t = _htmlmod.escape(text).replace("\n", "<br/>")
+        if u: t = f"<u>{t}</u>"
+        if i: t = f"<i>{t}</i>"
+        if b: t = f"<b>{t}</b>"
+        out.append(t)
+    return "".join(out) or "&nbsp;"
+
+def build_iso_doc_docx(d: Dict[str, Any]) -> bytes:
+    """Render an ISO text document as an editable Denplex-letterhead .docx."""
+    import io as _io
+    from docx import Document
+    from docx.shared import Pt, RGBColor, Mm
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+    RED = RGBColor(0xCC, 0x00, 0x00); BLACK = RGBColor(0x1A, 0x1A, 0x1A)
+    LETTERHEAD = str(ROOT_DIR / "letterhead.docx")
+    try: doc = Document(LETTERHEAD)
+    except Exception: doc = Document()
+    doc._body.clear_content()
+    try:
+        nrm = doc.styles["Normal"].font; nrm.name = "Arial"; nrm.size = Pt(10)
+    except Exception: pass
+
+    def shade(cell, hexc):
+        tcPr = cell._tc.get_or_add_tcPr(); sh = OxmlElement('w:shd')
+        sh.set(qn('w:val'), 'clear'); sh.set(qn('w:fill'), hexc); tcPr.append(sh)
+    def borders(table, color="999999"):
+        tblPr = table._tbl.tblPr; b = OxmlElement('w:tblBorders')
+        for edge in ('top','left','bottom','right','insideH','insideV'):
+            e = OxmlElement('w:'+edge); e.set(qn('w:val'),'single'); e.set(qn('w:sz'),'4')
+            e.set(qn('w:space'),'0'); e.set(qn('w:color'),color); b.append(e)
+        tblPr.append(b)
+    def add_inline(par, inline_html, size=10, base_bold=False, color=BLACK):
+        any_run = False
+        for text, b, i, u in _iso_inline_runs(inline_html):
+            for j, seg in enumerate(text.split("\n")):
+                if j > 0: par.add_run().add_break()
+                if not seg: continue
+                r = par.add_run(seg); r.font.size = Pt(size); r.font.name = "Arial"
+                r.font.bold = bool(b or base_bold); r.font.italic = bool(i); r.font.underline = bool(u)
+                r.font.color.rgb = color; any_run = True
+        return any_run
+
+    # Title header block
+    head = doc.add_table(rows=1, cols=2); borders(head, "CC0000")
+    c0 = head.cell(0, 0).paragraphs[0]; r = c0.add_run(d.get("title", "Document")); r.font.bold = True; r.font.size = Pt(13); r.font.color.rgb = BLACK; r.font.name = "Arial"
+    c1 = head.cell(0, 1).paragraphs[0]; c1.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    meta = []
+    if d.get("code"): meta.append(f"Doc No: {d['code']}")
+    if d.get("category"): meta.append(d["category"])
+    meta.append(f"Rev: {d.get('revision', 0)}")
+    rr = c1.add_run("\n".join(meta)); rr.font.size = Pt(8); rr.font.color.rgb = RED; rr.font.bold = True; rr.font.name = "Arial"
+    doc.add_paragraph()
+
+    for blk in _iso_blocks(d.get("html_content", "")):
+        if blk[0] == "h":
+            par = doc.add_paragraph(); par.paragraph_format.space_before = Pt(6); par.paragraph_format.space_after = Pt(2)
+            sizes = {1: 13, 2: 11.5, 3: 10.5}
+            add_inline(par, blk[2], size=sizes.get(blk[1], 11), base_bold=True, color=RED)
+        elif blk[0] == "p":
+            par = doc.add_paragraph(); par.paragraph_format.space_after = Pt(3); add_inline(par, blk[1], 10)
+        elif blk[0] == "li":
+            par = doc.add_paragraph(style=None); par.paragraph_format.left_indent = Mm(6); par.paragraph_format.space_after = Pt(2)
+            par.add_run("•  ").font.name = "Arial"; add_inline(par, blk[2], 10)
+        elif blk[0] == "table":
+            rows = blk[1]; cols = max((len(r) for r in rows), default=1)
+            if cols and rows:
+                tb = doc.add_table(rows=0, cols=cols); borders(tb)
+                for ri, row in enumerate(rows):
+                    cells = tb.add_row().cells
+                    for ci in range(cols):
+                        cell_html = row[ci] if ci < len(row) else ""
+                        add_inline(cells[ci].paragraphs[0], cell_html, 9, base_bold=(ri == 0))
+                        if ri == 0: shade(cells[ci], "F0F0F0")
+            doc.add_paragraph()
+    out = _io.BytesIO(); doc.save(out); return out.getvalue()
+
+def build_iso_doc_pdf(d: Dict[str, Any]) -> bytes:
+    """Render an ISO text document as a Denplex-letterhead PDF."""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    buf = BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=27*mm, bottomMargin=22*mm, leftMargin=14*mm, rightMargin=14*mm, title=d.get("title", "Document"))
+    styles = getSampleStyleSheet()
+    BLACK = colors.HexColor("#1A1A1A"); RED = colors.HexColor("#CC0000")
+    body = ParagraphStyle("b", parent=styles["Normal"], fontName=_PDF_FONT_REGULAR, fontSize=9.5, leading=13, textColor=BLACK, spaceAfter=3)
+    h_styles = {1: ParagraphStyle("h1", parent=body, fontName=_PDF_FONT_BOLD, fontSize=12, textColor=RED, spaceBefore=8, spaceAfter=3),
+                2: ParagraphStyle("h2", parent=body, fontName=_PDF_FONT_BOLD, fontSize=10.5, textColor=RED, spaceBefore=6, spaceAfter=2),
+                3: ParagraphStyle("h3", parent=body, fontName=_PDF_FONT_BOLD, fontSize=10, textColor=BLACK, spaceBefore=5, spaceAfter=2)}
+    bullet = ParagraphStyle("bul", parent=body, leftIndent=10, bulletIndent=0)
+    story = []
+    story.append(Paragraph(d.get("title", "Document"), ParagraphStyle("t", parent=styles["Title"], fontSize=14, fontName=_PDF_FONT_BOLD, textColor=BLACK, alignment=1)))
+    meta = " · ".join([x for x in [f"Doc No: {d.get('code')}" if d.get('code') else "", d.get("category", ""), f"Rev: {d.get('revision', 0)}"] if x])
+    head = Table([[meta]], colWidths=[doc.width])
+    head.setStyle(TableStyle([("FONT", (0,0), (-1,-1), _PDF_FONT_BOLD, 8), ("TEXTCOLOR", (0,0), (-1,-1), RED), ("BOTTOMPADDING", (0,0), (-1,-1), 6)]))
+    story.append(head)
+    for blk in _iso_blocks(d.get("html_content", "")):
+        try:
+            if blk[0] == "h":
+                story.append(Paragraph(_iso_inline_to_rl(blk[2]), h_styles.get(blk[1], h_styles[2])))
+            elif blk[0] == "p":
+                story.append(Paragraph(_iso_inline_to_rl(blk[1]), body))
+            elif blk[0] == "li":
+                story.append(Paragraph("•&nbsp;&nbsp;" + _iso_inline_to_rl(blk[2]), bullet))
+            elif blk[0] == "table":
+                rows = blk[1]; cols = max((len(r) for r in rows), default=1)
+                data = [[Paragraph(_iso_inline_to_rl(c), body) for c in (r + [""] * (cols - len(r)))] for r in rows]
+                t = Table(data, colWidths=[doc.width / cols] * cols)
+                t.setStyle(TableStyle([("GRID", (0,0), (-1,-1), 0.5, colors.HexColor("#CCCCCC")),
+                    ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#F0F0F0")), ("VALIGN", (0,0), (-1,-1), "TOP"),
+                    ("LEFTPADDING", (0,0), (-1,-1), 4), ("RIGHTPADDING", (0,0), (-1,-1), 4), ("TOPPADDING", (0,0), (-1,-1), 3), ("BOTTOMPADDING", (0,0), (-1,-1), 3)]))
+                story.append(Spacer(1, 2*mm)); story.append(t); story.append(Spacer(1, 2*mm))
+        except Exception:
+            continue
+    doc.build(story, onFirstPage=_qc_header_footer, onLaterPages=_qc_header_footer)
+    return buf.getvalue()
+
+@api.post("/iso-documents")
+async def create_iso_document(d: ISODocument, user=Depends(get_current_user)):
+    doc = d.model_dump(); doc["updated_at"] = now_iso()
+    await db.iso_documents.insert_one(doc)
+    return serialize(doc)
+
+@api.post("/iso-documents/bulk")
+async def bulk_iso_documents(body: ISODocBulkIn, user=Depends(get_current_user)):
+    if user.get("role") not in ("admin", "manager"):
+        raise HTTPException(403, "Only admin/manager can bulk import")
+    if body.replace_all:
+        await db.iso_documents.delete_many({})
+    n = 0
+    for d in body.documents:
+        doc = d.model_dump(); doc["updated_at"] = now_iso()
+        # upsert by (code, scope, title) so re-seeding is idempotent
+        key = {"scope": doc["scope"], "title": doc["title"]}
+        if doc.get("code"): key = {"scope": doc["scope"], "code": doc["code"], "title": doc["title"]}
+        existing = await db.iso_documents.find_one(key)
+        if existing:
+            doc["id"] = existing["id"]; doc["created_at"] = existing.get("created_at", doc["created_at"])
+            await db.iso_documents.replace_one({"id": existing["id"]}, doc)
+        else:
+            await db.iso_documents.insert_one(doc)
+        n += 1
+    return {"imported": n}
+
+@api.get("/iso-documents")
+async def list_iso_documents(scope: Optional[str] = None, category: Optional[str] = None, user=Depends(get_current_user)):
+    q = {}
+    if scope: q["scope"] = scope
+    if category: q["category"] = category
+    cursor = db.iso_documents.find(q, {"_id": 0, "html_content": 0}).sort([("category", 1), ("code", 1), ("title", 1)])
+    return await cursor.to_list(5000)
+
+@api.get("/iso-documents/{did}")
+async def get_iso_document(did: str, user=Depends(get_current_user)):
+    d = await db.iso_documents.find_one({"id": did}, {"_id": 0})
+    if not d: raise HTTPException(404, "Document not found")
+    return d
+
+@api.put("/iso-documents/{did}")
+async def update_iso_document(did: str, payload: Dict[str, Any], user=Depends(get_current_user)):
+    d = await db.iso_documents.find_one({"id": did})
+    if not d: raise HTTPException(404, "Document not found")
+    allowed = {k: payload[k] for k in ("title", "code", "category", "scope", "html_content") if k in payload}
+    allowed["updated_at"] = now_iso()
+    allowed["revision"] = int(d.get("revision", 0)) + (1 if "html_content" in payload else 0)
+    await db.iso_documents.update_one({"id": did}, {"$set": allowed})
+    nd = await db.iso_documents.find_one({"id": did}, {"_id": 0})
+    return nd
+
+@api.delete("/iso-documents/{did}")
+async def delete_iso_document(did: str, user=Depends(get_current_user)):
+    await db.iso_documents.delete_one({"id": did})
+    return {"ok": True}
+
+@api.get("/iso-documents/{did}/docx")
+async def iso_document_docx(did: str, user=Depends(get_current_user)):
+    d = await db.iso_documents.find_one({"id": did}, {"_id": 0})
+    if not d: raise HTTPException(404, "Document not found")
+    data = build_iso_doc_docx(d)
+    fn = (d.get("code") or d.get("title") or "document").replace("/", "-")
+    return Response(content=data, media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="{fn}.docx"'})
+
+@api.get("/iso-documents/{did}/pdf")
+async def iso_document_pdf(did: str, user=Depends(get_current_user)):
+    d = await db.iso_documents.find_one({"id": did}, {"_id": 0})
+    if not d: raise HTTPException(404, "Document not found")
+    data = build_iso_doc_pdf(d)
+    fn = (d.get("code") or d.get("title") or "document").replace("/", "-")
+    return Response(content=data, media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{fn}.pdf"'})
+
+@api.get("/iso-documents/{did}/file")
+async def iso_document_file(did: str, user=Depends(get_current_user)):
+    """Stream the original binary (register/annexure/EHS pdf) from Google Drive by source_drive_id."""
+    d = await db.iso_documents.find_one({"id": did}, {"_id": 0})
+    if not d: raise HTTPException(404, "Document not found")
+    fid = d.get("source_drive_id")
+    if not fid: raise HTTPException(404, "No original file linked")
+    token = await _gdrive_access_token()
+    async with httpx.AsyncClient(timeout=120) as cx:
+        r = await cx.get(f"https://www.googleapis.com/drive/v3/files/{fid}",
+            params={"alt": "media"}, headers={"Authorization": f"Bearer {token}"})
+    if r.status_code >= 400:
+        raise HTTPException(502, f"Drive download failed: {r.text[:120]}")
+    fn = d.get("file_name") or (d.get("title") or "file")
+    return Response(content=r.content, media_type=d.get("mime") or "application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{fn}"'})
+
+
 def _hsn_tax_summary(lines: List[Dict[str, Any]], is_interstate: bool) -> List[Dict[str, Any]]:
     """Aggregate per-HSN tax breakup for the Tax Summary block."""
     bucket: Dict[str, Dict[str, float]] = {}
