@@ -4203,7 +4203,7 @@ class RegisterTemplate(BaseModel):
 class RegisterEntry(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: str = Field(default_factory=new_id)
-    template_id: str
+    template_id: Optional[str] = ""      # taken from the URL path, not required in the body
     date: str = Field(default_factory=lambda: now_iso()[:10])
     data: Dict[str, Any] = {}
     created_by: Optional[str] = ""
