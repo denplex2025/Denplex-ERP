@@ -4214,6 +4214,10 @@ class RegisterBulkIn(BaseModel):
     templates: List[RegisterTemplate] = []
     replace_all: bool = False
 
+class RegisterEntryBulkIn(BaseModel):
+    entries: List[RegisterEntry] = []
+    replace_all: bool = False           # wipe this register's existing entries first
+
 @api.post("/registers")
 async def create_register(t: RegisterTemplate, user=Depends(require_roles("admin", "manager"))):
     doc = t.model_dump(); await db.register_templates.insert_one(doc); return serialize(doc)
@@ -4271,6 +4275,22 @@ async def create_register_entry(tid: str, e: RegisterEntry, user=Depends(get_cur
     doc = e.model_dump(); doc["template_id"] = tid
     doc["created_by"] = user.get("name") or user.get("email", "")
     await db.register_entries.insert_one(doc); return serialize(doc)
+
+@api.post("/registers/{tid}/entries/bulk")
+async def bulk_register_entries(tid: str, body: RegisterEntryBulkIn, user=Depends(get_current_user)):
+    """Insert many entries in one request (used for historical data import)."""
+    t = await db.register_templates.find_one({"id": tid})
+    if not t: raise HTTPException(404, "Register not found")
+    if body.replace_all:
+        await db.register_entries.delete_many({"template_id": tid})
+    by = user.get("name") or user.get("email", "")
+    docs = []
+    for e in body.entries:
+        d = e.model_dump(); d["template_id"] = tid; d["created_by"] = by
+        docs.append(d)
+    if docs:
+        await db.register_entries.insert_many(docs)
+    return {"imported": len(docs)}
 
 @api.put("/registers/{tid}/entries/{eid}")
 async def update_register_entry(tid: str, eid: str, payload: Dict[str, Any], user=Depends(get_current_user)):
