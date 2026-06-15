@@ -3808,6 +3808,14 @@ class ISODocument(BaseModel):
     file_name: Optional[str] = ""
     mime: Optional[str] = ""
     revision: int = 0
+    department: Optional[str] = ""       # Production, QC, Design, Purchase, Store, HR, Marketing, Maintenance, Management
+    status: Literal["approved", "pending_approval"] = "approved"
+    pending_html: Optional[str] = None   # proposed edit awaiting approval
+    submitted_by: Optional[str] = ""
+    submitted_at: Optional[str] = ""
+    approved_by: Optional[str] = ""
+    approved_at: Optional[str] = ""
+    history: List[Dict[str, Any]] = []   # [{revision, html_content, updated_by, updated_at}]
     updated_at: str = Field(default_factory=now_iso)
     created_at: str = Field(default_factory=now_iso)
 
@@ -4065,11 +4073,15 @@ async def bulk_iso_documents(body: ISODocBulkIn, user=Depends(get_current_user))
     return {"imported": n}
 
 @api.get("/iso-documents")
-async def list_iso_documents(scope: Optional[str] = None, category: Optional[str] = None, user=Depends(get_current_user)):
+async def list_iso_documents(scope: Optional[str] = None, category: Optional[str] = None,
+                             department: Optional[str] = None, status: Optional[str] = None,
+                             user=Depends(get_current_user)):
     q = {}
     if scope: q["scope"] = scope
     if category: q["category"] = category
-    cursor = db.iso_documents.find(q, {"_id": 0, "html_content": 0}).sort([("category", 1), ("code", 1), ("title", 1)])
+    if department: q["department"] = department
+    if status: q["status"] = status
+    cursor = db.iso_documents.find(q, {"_id": 0, "html_content": 0, "pending_html": 0, "history": 0}).sort([("category", 1), ("code", 1), ("title", 1)])
     return await cursor.to_list(5000)
 
 @api.get("/iso-documents/{did}")
@@ -4078,16 +4090,52 @@ async def get_iso_document(did: str, user=Depends(get_current_user)):
     if not d: raise HTTPException(404, "Document not found")
     return d
 
+_ISO_APPROVERS = ("admin", "manager")
+
 @api.put("/iso-documents/{did}")
 async def update_iso_document(did: str, payload: Dict[str, Any], user=Depends(get_current_user)):
+    """Metadata edits apply immediately. Content (html_content) edits by admin/manager apply immediately
+    and bump the revision; content edits by other roles are queued as pending_approval."""
     d = await db.iso_documents.find_one({"id": did})
     if not d: raise HTTPException(404, "Document not found")
-    allowed = {k: payload[k] for k in ("title", "code", "category", "scope", "html_content") if k in payload}
-    allowed["updated_at"] = now_iso()
-    allowed["revision"] = int(d.get("revision", 0)) + (1 if "html_content" in payload else 0)
-    await db.iso_documents.update_one({"id": did}, {"$set": allowed})
-    nd = await db.iso_documents.find_one({"id": did}, {"_id": 0})
-    return nd
+    set_fields = {k: payload[k] for k in ("title", "code", "category", "scope", "department") if k in payload}
+    set_fields["updated_at"] = now_iso()
+    is_approver = user.get("role") in _ISO_APPROVERS
+    if "html_content" in payload and payload["html_content"] != d.get("html_content"):
+        if is_approver:
+            hist = d.get("history", [])
+            hist.append({"revision": d.get("revision", 0), "html_content": d.get("html_content", ""),
+                         "updated_by": d.get("approved_by") or d.get("submitted_by") or "", "updated_at": d.get("updated_at", "")})
+            set_fields.update({"html_content": payload["html_content"], "revision": int(d.get("revision", 0)) + 1,
+                               "status": "approved", "approved_by": user.get("name") or user.get("email", ""),
+                               "approved_at": now_iso(), "pending_html": None, "history": hist[-30:]})
+        else:
+            set_fields.update({"pending_html": payload["html_content"], "status": "pending_approval",
+                               "submitted_by": user.get("name") or user.get("email", ""), "submitted_at": now_iso()})
+    await db.iso_documents.update_one({"id": did}, {"$set": set_fields})
+    return await db.iso_documents.find_one({"id": did}, {"_id": 0})
+
+@api.post("/iso-documents/{did}/approve")
+async def approve_iso_document(did: str, user=Depends(require_roles("admin", "manager"))):
+    d = await db.iso_documents.find_one({"id": did})
+    if not d: raise HTTPException(404, "Document not found")
+    if not d.get("pending_html"): raise HTTPException(400, "No pending change to approve")
+    hist = d.get("history", [])
+    hist.append({"revision": d.get("revision", 0), "html_content": d.get("html_content", ""),
+                 "updated_by": d.get("approved_by") or "", "updated_at": d.get("updated_at", "")})
+    await db.iso_documents.update_one({"id": did}, {"$set": {
+        "html_content": d["pending_html"], "revision": int(d.get("revision", 0)) + 1, "status": "approved",
+        "pending_html": None, "approved_by": user.get("name") or user.get("email", ""),
+        "approved_at": now_iso(), "updated_at": now_iso(), "history": hist[-30:]}})
+    return await db.iso_documents.find_one({"id": did}, {"_id": 0})
+
+@api.post("/iso-documents/{did}/reject")
+async def reject_iso_document(did: str, user=Depends(require_roles("admin", "manager"))):
+    d = await db.iso_documents.find_one({"id": did})
+    if not d: raise HTTPException(404, "Document not found")
+    await db.iso_documents.update_one({"id": did}, {"$set": {
+        "pending_html": None, "status": "approved", "updated_at": now_iso()}})
+    return {"ok": True}
 
 @api.delete("/iso-documents/{did}")
 async def delete_iso_document(did: str, user=Depends(get_current_user)):
@@ -4128,6 +4176,189 @@ async def iso_document_file(did: str, user=Depends(get_current_user)):
     fn = d.get("file_name") or (d.get("title") or "file")
     return Response(content=r.content, media_type=d.get("mime") or "application/octet-stream",
         headers={"Content-Disposition": f'attachment; filename="{fn}"'})
+
+
+# ==================== Registers (periodic data-entry forms: daily/weekly/monthly) ====================
+# A generic, configurable register engine. Each RegisterTemplate defines columns; users add dated
+# RegisterEntry rows (free data entry), exportable to Excel and Denplex-letterhead PDF.
+class RegisterColumn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    key: str
+    label: str
+    type: Literal["text", "number", "date", "select", "textarea"] = "text"
+    options: List[str] = []
+
+class RegisterTemplate(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    code: Optional[str] = ""             # e.g. F/PRD/02
+    name: str
+    department: str = "General"
+    frequency: Literal["daily", "weekly", "monthly", "quarterly", "yearly", "as_required"] = "as_required"
+    description: Optional[str] = ""
+    columns: List[RegisterColumn] = []
+    active: bool = True
+    created_at: str = Field(default_factory=now_iso)
+
+class RegisterEntry(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    template_id: str
+    date: str = Field(default_factory=lambda: now_iso()[:10])
+    data: Dict[str, Any] = {}
+    created_by: Optional[str] = ""
+    created_at: str = Field(default_factory=now_iso)
+    updated_at: str = Field(default_factory=now_iso)
+
+class RegisterBulkIn(BaseModel):
+    templates: List[RegisterTemplate] = []
+    replace_all: bool = False
+
+@api.post("/registers")
+async def create_register(t: RegisterTemplate, user=Depends(require_roles("admin", "manager"))):
+    doc = t.model_dump(); await db.register_templates.insert_one(doc); return serialize(doc)
+
+@api.post("/registers/bulk")
+async def bulk_registers(body: RegisterBulkIn, user=Depends(require_roles("admin", "manager"))):
+    if body.replace_all:
+        await db.register_templates.delete_many({})
+    n = 0
+    for t in body.templates:
+        doc = t.model_dump()
+        existing = await db.register_templates.find_one({"name": doc["name"], "department": doc["department"]})
+        if existing:
+            doc["id"] = existing["id"]; doc["created_at"] = existing.get("created_at", doc["created_at"])
+            await db.register_templates.replace_one({"id": existing["id"]}, doc)
+        else:
+            await db.register_templates.insert_one(doc)
+        n += 1
+    return {"imported": n}
+
+@api.get("/registers")
+async def list_registers(department: Optional[str] = None, user=Depends(get_current_user)):
+    q = {}
+    if department: q["department"] = department
+    cur = db.register_templates.find(q, {"_id": 0}).sort([("department", 1), ("name", 1)])
+    return await cur.to_list(2000)
+
+@api.get("/registers/{tid}")
+async def get_register(tid: str, user=Depends(get_current_user)):
+    t = await db.register_templates.find_one({"id": tid}, {"_id": 0})
+    if not t: raise HTTPException(404, "Register not found")
+    return t
+
+@api.put("/registers/{tid}")
+async def update_register(tid: str, payload: Dict[str, Any], user=Depends(require_roles("admin", "manager"))):
+    payload.pop("id", None); payload.pop("_id", None)
+    await db.register_templates.update_one({"id": tid}, {"$set": payload})
+    return await db.register_templates.find_one({"id": tid}, {"_id": 0})
+
+@api.delete("/registers/{tid}")
+async def delete_register(tid: str, user=Depends(require_roles("admin", "manager"))):
+    await db.register_templates.delete_one({"id": tid})
+    await db.register_entries.delete_many({"template_id": tid})
+    return {"ok": True}
+
+@api.get("/registers/{tid}/entries")
+async def list_register_entries(tid: str, user=Depends(get_current_user)):
+    cur = db.register_entries.find({"template_id": tid}, {"_id": 0}).sort([("date", -1), ("created_at", -1)])
+    return await cur.to_list(20000)
+
+@api.post("/registers/{tid}/entries")
+async def create_register_entry(tid: str, e: RegisterEntry, user=Depends(get_current_user)):
+    t = await db.register_templates.find_one({"id": tid})
+    if not t: raise HTTPException(404, "Register not found")
+    doc = e.model_dump(); doc["template_id"] = tid
+    doc["created_by"] = user.get("name") or user.get("email", "")
+    await db.register_entries.insert_one(doc); return serialize(doc)
+
+@api.put("/registers/{tid}/entries/{eid}")
+async def update_register_entry(tid: str, eid: str, payload: Dict[str, Any], user=Depends(get_current_user)):
+    upd = {k: payload[k] for k in ("date", "data") if k in payload}
+    upd["updated_at"] = now_iso()
+    await db.register_entries.update_one({"id": eid, "template_id": tid}, {"$set": upd})
+    return await db.register_entries.find_one({"id": eid}, {"_id": 0})
+
+@api.delete("/registers/{tid}/entries/{eid}")
+async def delete_register_entry(tid: str, eid: str, user=Depends(get_current_user)):
+    await db.register_entries.delete_one({"id": eid, "template_id": tid})
+    return {"ok": True}
+
+async def _register_rows(tid: str):
+    t = await db.register_templates.find_one({"id": tid}, {"_id": 0})
+    if not t: raise HTTPException(404, "Register not found")
+    entries = await db.register_entries.find({"template_id": tid}, {"_id": 0}).sort([("date", 1), ("created_at", 1)]).to_list(20000)
+    cols = t.get("columns", [])
+    return t, cols, entries
+
+@api.get("/registers/{tid}/export/xlsx")
+async def register_export_xlsx(tid: str, user=Depends(get_current_user)):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    t, cols, entries = await _register_rows(tid)
+    wb = Workbook(); ws = wb.active
+    ws.title = re.sub(r"[\\/*?:\[\]]", "-", (t.get("code") or t.get("name") or "Register"))[:31]
+    RED = "CC0000"; thin = Side(style="thin", color="CCCCCC"); border = Border(thin, thin, thin, thin)
+    ncol = max(1, len(cols) + 1)
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=ncol)
+    c = ws.cell(1, 1, "DENPLEX ENGINEERING COMPANY"); c.font = Font(bold=True, size=14, color=RED); c.alignment = Alignment(horizontal="center")
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=ncol)
+    c = ws.cell(2, 1, f"{t.get('name','')}" + (f"   ·   Doc No: {t.get('code')}" if t.get("code") else "") + f"   ·   Frequency: {t.get('frequency','')}")
+    c.font = Font(bold=True, size=10); c.alignment = Alignment(horizontal="center")
+    hdr_row = 4
+    headers = ["Date"] + [col.get("label", col.get("key", "")) for col in cols]
+    for j, h in enumerate(headers, 1):
+        cell = ws.cell(hdr_row, j, h); cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="1A1A1A"); cell.alignment = Alignment(horizontal="center", wrap_text=True); cell.border = border
+    r = hdr_row + 1
+    for e in entries:
+        ws.cell(r, 1, (e.get("date") or "")[:10]).border = border
+        for j, col in enumerate(cols, 2):
+            ws.cell(r, j, e.get("data", {}).get(col.get("key"), "")).border = border
+        r += 1
+    for j in range(1, len(headers) + 1):
+        ws.column_dimensions[ws.cell(hdr_row, j).column_letter].width = 20
+    buf = BytesIO(); wb.save(buf)
+    fn = (t.get("code") or t.get("name") or "register").replace("/", "-")
+    return Response(content=buf.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{fn}.xlsx"'})
+
+@api.get("/registers/{tid}/export/pdf")
+async def register_export_pdf(tid: str, user=Depends(get_current_user)):
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib.units import mm
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    t, cols, entries = await _register_rows(tid)
+    buf = BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=landscape(A4), topMargin=27*mm, bottomMargin=18*mm, leftMargin=10*mm, rightMargin=10*mm, title=t.get("name", "Register"))
+    styles = getSampleStyleSheet()
+    BLACK = colors.HexColor("#1A1A1A"); RED = colors.HexColor("#CC0000")
+    cell = ParagraphStyle("c", parent=styles["Normal"], fontName=_PDF_FONT_REGULAR, fontSize=7.5, leading=9)
+    hcell = ParagraphStyle("hc", parent=cell, fontName=_PDF_FONT_BOLD, textColor=colors.white)
+    story = [Paragraph(t.get("name", "Register"), ParagraphStyle("t", parent=styles["Title"], fontSize=13, fontName=_PDF_FONT_BOLD, textColor=BLACK, alignment=1))]
+    meta = " · ".join([x for x in [f"Doc No: {t.get('code')}" if t.get("code") else "", f"Dept: {t.get('department','')}", f"Frequency: {t.get('frequency','')}"] if x])
+    story.append(Paragraph(meta, ParagraphStyle("m", parent=cell, fontName=_PDF_FONT_BOLD, textColor=RED, alignment=1, spaceAfter=4)))
+    headers = ["Date"] + [c.get("label", c.get("key", "")) for c in cols]
+    data = [[Paragraph(h, hcell) for h in headers]]
+    for e in entries:
+        row = [Paragraph((e.get("date") or "")[:10], cell)]
+        for col in cols:
+            row.append(Paragraph(str(e.get("data", {}).get(col.get("key"), "") or ""), cell))
+        data.append(row)
+    if len(data) == 1:
+        data.append([Paragraph("No entries yet", cell)] + [Paragraph("", cell) for _ in cols])
+    tbl = Table(data, colWidths=[doc.width / len(headers)] * len(headers), repeatRows=1)
+    tbl.setStyle(TableStyle([("GRID", (0,0), (-1,-1), 0.4, colors.HexColor("#CCCCCC")),
+        ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#1A1A1A")), ("VALIGN", (0,0), (-1,-1), "TOP"),
+        ("LEFTPADDING", (0,0), (-1,-1), 3), ("RIGHTPADDING", (0,0), (-1,-1), 3), ("TOPPADDING", (0,0), (-1,-1), 2), ("BOTTOMPADDING", (0,0), (-1,-1), 2),
+        ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#F7F7F7")])]))
+    story.append(tbl)
+    doc.build(story, onFirstPage=_qc_header_footer, onLaterPages=_qc_header_footer)
+    fn = (t.get("code") or t.get("name") or "register").replace("/", "-")
+    return Response(content=buf.getvalue(), media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{fn}.pdf"'})
 
 
 def _hsn_tax_summary(lines: List[Dict[str, Any]], is_interstate: bool) -> List[Dict[str, Any]]:
