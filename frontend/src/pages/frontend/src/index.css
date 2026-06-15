@@ -1,0 +1,130 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap');
+@import url('https://api.fontshare.com/v2/css?f[]=cabinet-grotesk@400,500,700,800,900&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #FFFFFF;
+  --surface: #FAFAFA;
+  --surface-alt: #F4F4F5;
+  --border: #E5E5E5;
+  --text-primary: #0A0A0A;
+  --text-secondary: #525252;
+  --primary: #DC2626;
+  --primary-hover: #B91C1C;
+  --danger: #DC2626;
+  --warning: #D97706;
+  --success: #059669;
+  --ink: #0A0A0A;
+}
+
+body {
+  margin: 0;
+  font-family: 'IBM Plex Sans', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-color: var(--bg);
+  color: var(--text-primary);
+}
+
+.font-display { font-family: 'Cabinet Grotesk', 'IBM Plex Sans', sans-serif; letter-spacing: -0.01em; }
+.font-mono-tech { font-family: 'JetBrains Mono', monospace; }
+
+code {
+  font-family: 'IBM Plex Mono', source-code-pro, Menlo, Monaco, monospace;
+}
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 0 0% 4%;
+    --card: 0 0% 100%;
+    --card-foreground: 0 0% 4%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 0 0% 4%;
+    --primary: 0 72% 51%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 0 0% 96%;
+    --secondary-foreground: 0 0% 4%;
+    --muted: 0 0% 96%;
+    --muted-foreground: 0 0% 32%;
+    --accent: 0 0% 96%;
+    --accent-foreground: 0 0% 4%;
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 0 0% 90%;
+    --input: 0 0% 90%;
+    --ring: 0 72% 51%;
+    --radius: 0.25rem;
+    --chart-1: 0 72% 51%;
+    --chart-2: 0 0% 12%;
+    --chart-3: 0 0% 45%;
+    --chart-4: 43 74% 56%;
+    --chart-5: 173 58% 39%;
+  }
+}
+
+@layer base {
+  * { @apply border-border; }
+  body { @apply bg-background text-foreground; }
+}
+
+/* Subtle grid pattern */
+.bg-grid {
+  background-image:
+    linear-gradient(rgba(10, 10, 10, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(10, 10, 10, 0.05) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+
+.bg-grid-red {
+  background-image:
+    linear-gradient(rgba(220, 38, 38, 0.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(220, 38, 38, 0.06) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #d4d4d4; border-radius: 0; }
+::-webkit-scrollbar-thumb:hover { background: #a3a3a3; }
+
+::selection { background: #DC2626; color: #fff; }
+
+/* Animations */
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.fade-up { animation: fadeUp 0.4s ease-out both; }
+
+.brand-stripe {
+  background-image: repeating-linear-gradient(
+    135deg,
+    #DC2626 0px,
+    #DC2626 6px,
+    #0A0A0A 6px,
+    #0A0A0A 12px
+  );
+  height: 3px;
+}
+
+/* ===== ERP standard typography & controls (consistency pass) ===== */
+/* 1. Readable floor — no UI text below 12px; small text a touch larger.
+   Layout/spacing unchanged, so pages do NOT get wider. */
+.text-\[10px\], .text-\[11px\] { font-size: 12px !important; line-height: 1.2 !important; }
+.text-xs { font-size: 0.8125rem !important; }   /* 12px -> 13px */
+
+/* 2. Consistent table headers everywhere (raw tables + Primitives) */
+table thead th { font-weight: 600; color: #475569; }
+
+/* 3. Bigger, standard tap targets — scoped to buttons/inputs so other
+   elements with the same height class are unaffected. */
+button.h-6, button.h-7 { height: 2rem !important; }
+button.w-6, button.w-7 { width: 2rem !important; }
+button.h-8 { height: 2.25rem !important; }
+button.w-8 { width: 2.25rem !important; }
+input.h-7, input.h-8, select.h-7, select.h-8 { height: 2.25rem !important; }
