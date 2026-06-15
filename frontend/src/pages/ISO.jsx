@@ -7,8 +7,9 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
-import { Plus, Pencil, Trash2, ShieldCheck, ClipboardList, FileDown, Wrench, Truck, Gauge, FileText, FolderOpen, Save, FilePlus, ExternalLink, Search, Bold, Italic, Underline, List, ListOrdered, Heading2, Heading3, FileType2 } from "lucide-react";
+import { Plus, Pencil, Trash2, ShieldCheck, ClipboardList, FileDown, Wrench, Truck, Gauge, FileText, FolderOpen, Save, FilePlus, ExternalLink, Search, Bold, Italic, Underline, List, ListOrdered, Heading2, Heading3, FileType2, FileSpreadsheet, ClipboardCheck, CheckCircle2, XCircle, Clock, X, Table2 } from "lucide-react";
 import StatusBadge from "@/components/erp/StatusBadge";
+import { useAuth } from "@/lib/auth";
 import { toast } from "sonner";
 
 const Sel = ({ value, onChange, options }) => (
@@ -389,110 +390,242 @@ function RichEditor({ value, onInput }) {
   );
 }
 
-function DocumentsLibrary() {
-  const [scope, setScope] = useState("master");
-  const [list, setList] = useState([]);
-  const [q, setQ] = useState("");
-  const [sel, setSel] = useState(null);        // full selected doc
-  const [draft, setDraft] = useState("");       // editor html
-  const [meta, setMeta] = useState({ title: "", code: "", category: "General" });
+const DEPARTMENTS = ["Production", "QC", "Design", "Purchase", "Store", "HR", "Marketing", "Maintenance", "Management"];
+const FREQUENCIES = ["daily", "weekly", "monthly", "quarterly", "yearly", "as_required"];
+const COL_TYPES = ["text", "number", "date", "select", "textarea"];
+
+// ---- Register: add/edit a single entry (row), fields driven by the template columns ----
+function RegisterEntryDialog({ open, onClose, template, entry, onSave }) {
+  const cols = template?.columns || [];
+  const [date, setDate] = useState("");
+  const [data, setData] = useState({});
   const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    if (open) { setDate(entry?.date ? entry.date.slice(0, 10) : new Date().toISOString().slice(0, 10)); setData(entry?.data ? { ...entry.data } : {}); }
+  }, [open, entry]);
+  const set = (k, v) => setData((d) => ({ ...d, [k]: v }));
+  const submit = async () => { setSaving(true); await onSave({ date, data }); setSaving(false); };
+  return (
+    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-2xl"><DialogHeader><DialogTitle>{entry ? "Edit entry" : "New entry"} · {template?.name}</DialogTitle></DialogHeader>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-h-[60vh] overflow-y-auto pr-1">
+          <Field label="Date"><Input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="h-9" /></Field>
+          {cols.map((c) => (
+            <Field key={c.key} label={c.label} className={c.type === "textarea" ? "md:col-span-2" : ""}>
+              {c.type === "textarea" ? <Textarea value={data[c.key] || ""} onChange={(e) => set(c.key, e.target.value)} rows={2} />
+                : c.type === "select" ? <Sel value={data[c.key] || ""} onChange={(v) => set(c.key, v)} options={[{ value: "", label: "—" }, ...(c.options || []).map((o) => ({ value: o, label: o }))]} />
+                : <Input type={c.type === "number" ? "number" : c.type === "date" ? "date" : "text"} value={data[c.key] || ""} onChange={(e) => set(c.key, e.target.value)} className="h-9" />}
+            </Field>
+          ))}
+        </div>
+        <DialogFooter><Button variant="outline" onClick={onClose}>Cancel</Button><Button onClick={submit} disabled={saving}>{saving ? "Saving…" : "Save entry"}</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ---- Register: the live data table (free data entry) + Excel/PDF export ----
+function RegisterView({ template, onDeleted, canManage }) {
+  const [entries, setEntries] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [open, setOpen] = useState(false);
+  const [edit, setEdit] = useState(null);
+  const cols = template.columns || [];
+  const load = async () => { setLoading(true); try { const r = await api.get(`/registers/${template.id}/entries`); setEntries(r.data || []); } catch (e) {} setLoading(false); };
+  useEffect(() => { load(); setEdit(null); }, [template.id]); // eslint-disable-line
+  const saveEntry = async ({ date, data }) => {
+    try {
+      if (edit) await api.put(`/registers/${template.id}/entries/${edit.id}`, { date, data });
+      else await api.post(`/registers/${template.id}/entries`, { date, data });
+      setOpen(false); setEdit(null); await load(); toast.success("Entry saved");
+    } catch (e) { toast.error("Could not save entry"); }
+  };
+  const delEntry = async (id) => { if (!window.confirm("Delete this entry?")) return; try { await api.delete(`/registers/${template.id}/entries/${id}`); await load(); } catch (e) { toast.error("Delete failed"); } };
+  return (
+    <div className="space-y-3">
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div>
+          <div className="text-xs uppercase tracking-wider text-red-600 font-semibold flex items-center gap-2">{template.department} · Register{template.code ? ` · ${template.code}` : ""}<Pill color="slate">{template.frequency}</Pill></div>
+          <h2 className="text-lg font-bold">{template.name}</h2>
+          {template.description ? <p className="text-xs text-slate-500">{template.description}</p> : null}
+        </div>
+        <div className="flex gap-2 flex-wrap">
+          <Button size="sm" onClick={() => { setEdit(null); setOpen(true); }}><Plus className="w-4 h-4 mr-1" /> Add entry</Button>
+          <Button size="sm" variant="outline" onClick={() => dlPdf(`/registers/${template.id}/export/xlsx`, `${(template.code || template.name).replace(/\//g, "-")}.xlsx`)}><FileSpreadsheet className="w-4 h-4 mr-1" /> Excel</Button>
+          <Button size="sm" variant="outline" onClick={() => dlPdf(`/registers/${template.id}/export/pdf`, `${(template.code || template.name).replace(/\//g, "-")}.pdf`)}><FileDown className="w-4 h-4 mr-1" /> PDF</Button>
+          {canManage && <Button size="sm" variant="ghost" className="text-red-600" onClick={() => onDeleted(template)}><Trash2 className="w-4 h-4" /></Button>}
+        </div>
+      </div>
+      <Card><CardContent className="p-0 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead><tr className="border-b bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
+            <th className="p-2">Date</th>{cols.map((c) => <th key={c.key} className="p-2">{c.label}</th>)}<th className="p-2 w-16"></th>
+          </tr></thead>
+          <tbody>
+            {loading && <tr><td colSpan={cols.length + 2} className="p-4 text-slate-400">Loading…</td></tr>}
+            {!loading && entries.length === 0 && <tr><td colSpan={cols.length + 2} className="p-4 text-slate-400">No entries yet. Click “Add entry”.</td></tr>}
+            {entries.map((e) => (
+              <tr key={e.id} className="border-b hover:bg-slate-50">
+                <td className="p-2 whitespace-nowrap">{(e.date || "").slice(0, 10)}</td>
+                {cols.map((c) => <td key={c.key} className="p-2">{String(e.data?.[c.key] ?? "")}</td>)}
+                <td className="p-2 text-right whitespace-nowrap">
+                  <button className="text-slate-400 hover:text-slate-700 mr-2" onClick={() => { setEdit(e); setOpen(true); }}><Pencil className="w-3.5 h-3.5 inline" /></button>
+                  <button className="text-slate-400 hover:text-red-600" onClick={() => delEntry(e.id)}><Trash2 className="w-3.5 h-3.5 inline" /></button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </CardContent></Card>
+      <RegisterEntryDialog open={open} onClose={() => { setOpen(false); setEdit(null); }} template={template} entry={edit} onSave={saveEntry} />
+    </div>
+  );
+}
+
+function DocumentsLibrary() {
+  const { user } = useAuth();
+  const isApprover = ["admin", "manager"].includes(user?.role);
+  const [dept, setDept] = useState("Production");
+  const [docs, setDocs] = useState([]);
+  const [registers, setRegisters] = useState([]);
+  const [q, setQ] = useState("");
+  const [sel, setSel] = useState(null);              // { kind: 'doc'|'register', id }
+  const [selDoc, setSelDoc] = useState(null);
+  const [draft, setDraft] = useState("");
+  const [meta, setMeta] = useState({ title: "", code: "", category: "General", department: "" });
+  const [saving, setSaving] = useState(false);
   const [newOpen, setNewOpen] = useState(false);
   const [nf, setNf] = useState({ title: "", code: "", category: "General" });
+  const [regOpen, setRegOpen] = useState(false);
+  const [rf, setRf] = useState({ name: "", code: "", frequency: "daily", columns: [{ label: "", type: "text" }] });
+  const [pendOpen, setPendOpen] = useState(false);
+  const [pending, setPending] = useState([]);
 
-  const load = async () => { setLoading(true); try { const r = await api.get(`/iso-documents?scope=${scope}`); setList(r.data || []); } catch (e) {} setLoading(false); };
-  useEffect(() => { load(); setSel(null); }, [scope]); // eslint-disable-line
+  const loadAll = async () => {
+    try { const [d, r] = await Promise.all([api.get(`/iso-documents`), api.get(`/registers`)]); setDocs(d.data || []); setRegisters(r.data || []); } catch (e) {}
+  };
+  const loadPending = async () => { try { const r = await api.get(`/iso-documents?status=pending_approval`); setPending(r.data || []); } catch (e) {} };
+  useEffect(() => { loadAll(); loadPending(); }, []); // eslint-disable-line
+  useEffect(() => { setSel(null); setSelDoc(null); }, [dept]);
 
-  const open = async (id) => {
-    try { const r = await api.get(`/iso-documents/${id}`); setSel(r.data); setDraft(r.data.html_content || ""); setMeta({ title: r.data.title || "", code: r.data.code || "", category: r.data.category || "General" }); }
+  const selReg = sel?.kind === "register" ? registers.find((r) => r.id === sel.id) : null;
+
+  const openDoc = async (id) => {
+    try { const r = await api.get(`/iso-documents/${id}`); setSelDoc(r.data); setDraft(r.data.html_content || ""); setMeta({ title: r.data.title || "", code: r.data.code || "", category: r.data.category || "General", department: r.data.department || dept }); setSel({ kind: "doc", id }); }
     catch (e) { toast.error("Could not open document"); }
   };
-  const save = async () => {
-    if (!sel) return; setSaving(true);
-    try { await api.put(`/iso-documents/${sel.id}`, { ...meta, html_content: draft }); toast.success("Saved"); await load(); setSel({ ...sel, ...meta, revision: (sel.revision || 0) + 1 }); }
-    catch (e) { toast.error("Save failed"); } setSaving(false);
+  const saveDoc = async () => {
+    if (!selDoc) return; setSaving(true);
+    try {
+      const r = await api.put(`/iso-documents/${selDoc.id}`, { ...meta, html_content: draft });
+      if (r.data?.status === "pending_approval") toast.success("Saved & sent for admin approval");
+      else toast.success("Saved as new revision");
+      setSelDoc(r.data); await loadAll(); await loadPending();
+    } catch (e) { toast.error("Save failed"); } setSaving(false);
   };
-  const del = async () => {
-    if (!sel || !window.confirm("Delete this document?")) return;
-    try { await api.delete(`/iso-documents/${sel.id}`); setSel(null); await load(); } catch (e) { toast.error("Delete failed"); }
-  };
+  const approveDoc = async (id) => { try { await api.post(`/iso-documents/${id}/approve`); toast.success("Approved — new revision published"); await loadAll(); await loadPending(); if (selDoc?.id === id) openDoc(id); } catch (e) { toast.error(e?.response?.data?.detail || "Approve failed"); } };
+  const rejectDoc = async (id) => { try { await api.post(`/iso-documents/${id}/reject`); toast.success("Change rejected"); await loadAll(); await loadPending(); if (selDoc?.id === id) openDoc(id); } catch (e) { toast.error("Reject failed"); } };
+  const delDoc = async () => { if (!selDoc || !window.confirm("Delete this document?")) return; try { await api.delete(`/iso-documents/${selDoc.id}`); setSel(null); setSelDoc(null); await loadAll(); } catch (e) { toast.error("Delete failed"); } };
+
   const createDoc = async () => {
     if (!nf.title.trim()) { toast.error("Title required"); return; }
-    try { const r = await api.post(`/iso-documents`, { ...nf, scope, doc_type: "text", html_content: "" }); setNewOpen(false); setNf({ title: "", code: "", category: "General" }); await load(); open(r.data.id); }
+    try { const r = await api.post(`/iso-documents`, { ...nf, department: dept, doc_type: "text", html_content: "" }); setNewOpen(false); setNf({ title: "", code: "", category: "General" }); await loadAll(); openDoc(r.data.id); }
     catch (e) { toast.error("Create failed"); }
   };
+  const createRegister = async () => {
+    if (!rf.name.trim()) { toast.error("Register name required"); return; }
+    const columns = rf.columns.filter((c) => c.label.trim()).map((c) => ({ key: c.label.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, ""), label: c.label.trim(), type: c.type, options: (c.options || "").split(",").map((s) => s.trim()).filter(Boolean) }));
+    if (!columns.length) { toast.error("Add at least one column"); return; }
+    try { await api.post(`/registers`, { name: rf.name, code: rf.code, department: dept, frequency: rf.frequency, columns }); setRegOpen(false); setRf({ name: "", code: "", frequency: "daily", columns: [{ label: "", type: "text" }] }); await loadAll(); toast.success("Register created"); }
+    catch (e) { toast.error("Create failed"); }
+  };
+  const deleteRegister = async (t) => { if (!window.confirm(`Delete register “${t.name}” and all its entries?`)) return; try { await api.delete(`/registers/${t.id}`); setSel(null); await loadAll(); } catch (e) { toast.error("Delete failed"); } };
 
-  const filtered = list.filter((d) => !q || `${d.title} ${d.code} ${d.category}`.toLowerCase().includes(q.toLowerCase()));
+  const deptDocs = docs.filter((d) => (d.department || "Management") === dept && (!q || `${d.title} ${d.code} ${d.category}`.toLowerCase().includes(q.toLowerCase())));
+  const deptRegs = registers.filter((r) => r.department === dept && (!q || `${r.name} ${r.code}`.toLowerCase().includes(q.toLowerCase())));
   const grouped = {};
-  filtered.forEach((d) => { (grouped[d.category] = grouped[d.category] || []).push(d); });
+  deptDocs.forEach((d) => { (grouped[d.category] = grouped[d.category] || []).push(d); });
   const cats = Object.keys(grouped).sort((a, b) => catRank(a) - catRank(b) || a.localeCompare(b));
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between gap-3 flex-wrap">
-        <div className="inline-flex rounded-sm bg-slate-100 p-0.5">
-          <button onClick={() => setScope("master")} className={`px-3 py-1.5 text-sm rounded-sm font-medium ${scope === "master" ? "bg-white shadow-sm text-slate-900" : "text-slate-500"}`}>Master (yearly policy)</button>
-          <button onClick={() => setScope("fy26-27")} className={`px-3 py-1.5 text-sm rounded-sm font-medium ${scope === "fy26-27" ? "bg-white shadow-sm text-slate-900" : "text-slate-500"}`}>FY 26-27</button>
-        </div>
-        <Button size="sm" variant="outline" onClick={() => setNewOpen(true)}><FilePlus className="w-4 h-4 mr-1" /> New document</Button>
+      <div className="flex items-center gap-1.5 flex-wrap">
+        {DEPARTMENTS.map((d) => (
+          <button key={d} onClick={() => setDept(d)} className={`px-2.5 py-1 text-xs rounded-sm font-medium border ${dept === d ? "bg-red-600 text-white border-red-600" : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50"}`}>{d}</button>
+        ))}
+        {isApprover && <button onClick={() => { loadPending(); setPendOpen(true); }} className="ml-auto px-2.5 py-1 text-xs rounded-sm font-medium border bg-amber-50 text-amber-700 border-amber-300 inline-flex items-center gap-1"><ClipboardCheck className="w-3.5 h-3.5" /> Approvals{pending.length ? ` (${pending.length})` : ""}</button>}
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-[320px_1fr] gap-3">
-        {/* List */}
+      <div className="grid grid-cols-1 md:grid-cols-[330px_1fr] gap-3">
         <Card><CardContent className="p-2">
-          <div className="relative mb-2"><Search className="w-4 h-4 absolute left-2 top-2.5 text-slate-400" /><Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search documents…" className="pl-8 h-9" /></div>
-          <div className="max-h-[62vh] overflow-y-auto pr-1">
-            {loading && <div className="text-sm text-slate-400 p-3">Loading…</div>}
-            {!loading && filtered.length === 0 && <div className="text-sm text-slate-400 p-3">No documents yet in this section.</div>}
+          <div className="relative mb-2"><Search className="w-4 h-4 absolute left-2 top-2.5 text-slate-400" /><Input value={q} onChange={(e) => setQ(e.target.value)} placeholder={`Search ${dept}…`} className="pl-8 h-9" /></div>
+          <div className="flex gap-1.5 mb-2">
+            <Button size="sm" variant="outline" className="flex-1 h-8 text-xs" onClick={() => setNewOpen(true)}><FilePlus className="w-3.5 h-3.5 mr-1" /> Document</Button>
+            {isApprover && <Button size="sm" variant="outline" className="flex-1 h-8 text-xs" onClick={() => setRegOpen(true)}><Table2 className="w-3.5 h-3.5 mr-1" /> Register</Button>}
+          </div>
+          <div className="max-h-[60vh] overflow-y-auto pr-1">
+            {deptRegs.length > 0 && <div className="text-[10px] uppercase tracking-wider text-emerald-700 font-semibold px-1 py-1 flex items-center gap-1"><Table2 className="w-3 h-3" /> Registers (live data)</div>}
+            {deptRegs.map((r) => (
+              <button key={r.id} onClick={() => setSel({ kind: "register", id: r.id })} className={`w-full text-left px-2 py-1.5 rounded-sm text-sm flex items-center gap-2 ${sel?.kind === "register" && sel.id === r.id ? "bg-emerald-50 text-emerald-800" : "hover:bg-slate-100 text-slate-700"}`}>
+                <FileSpreadsheet className="w-3.5 h-3.5 shrink-0 text-emerald-500" /><span className="truncate flex-1">{r.name}</span>{r.code ? <span className="text-[10px] text-slate-400 shrink-0">{r.code}</span> : null}
+              </button>
+            ))}
             {cats.map((cat) => (
-              <div key={cat} className="mb-2">
+              <div key={cat} className="mb-1 mt-1">
                 <div className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold px-1 py-1 flex items-center gap-1"><FolderOpen className="w-3 h-3" /> {cat} <span className="text-slate-300">· {grouped[cat].length}</span></div>
                 {grouped[cat].map((d) => (
-                  <button key={d.id} onClick={() => open(d.id)} className={`w-full text-left px-2 py-1.5 rounded-sm text-sm flex items-center gap-2 ${sel && sel.id === d.id ? "bg-red-50 text-red-800" : "hover:bg-slate-100 text-slate-700"}`}>
+                  <button key={d.id} onClick={() => openDoc(d.id)} className={`w-full text-left px-2 py-1.5 rounded-sm text-sm flex items-center gap-2 ${sel?.kind === "doc" && sel.id === d.id ? "bg-red-50 text-red-800" : "hover:bg-slate-100 text-slate-700"}`}>
                     {d.doc_type === "file" ? <FileDown className="w-3.5 h-3.5 shrink-0 text-slate-400" /> : <FileText className="w-3.5 h-3.5 shrink-0 text-slate-400" />}
                     <span className="truncate flex-1">{d.title}</span>
+                    {d.status === "pending_approval" ? <Clock className="w-3 h-3 text-amber-500 shrink-0" /> : null}
                     {d.code ? <span className="text-[10px] text-slate-400 shrink-0">{d.code}</span> : null}
                   </button>
                 ))}
               </div>
             ))}
+            {deptRegs.length === 0 && cats.length === 0 && <div className="text-sm text-slate-400 p-3">Nothing in {dept} yet.</div>}
           </div>
         </CardContent></Card>
 
-        {/* Editor / viewer */}
         <Card><CardContent className="p-3">
-          {!sel && <div className="h-[60vh] flex flex-col items-center justify-center text-center text-slate-400 gap-2"><FileText className="w-10 h-10" /><div className="text-sm">Select a document to view, edit and download.</div></div>}
-          {sel && sel.doc_type === "file" && (
+          {!sel && <div className="h-[60vh] flex flex-col items-center justify-center text-center text-slate-400 gap-2"><FileText className="w-10 h-10" /><div className="text-sm">Select a register to enter data, or a document to view/edit.</div></div>}
+          {selReg && <RegisterView template={selReg} onDeleted={deleteRegister} canManage={isApprover} />}
+          {sel?.kind === "doc" && selDoc && selDoc.doc_type === "file" && (
             <div className="space-y-4">
-              <div><div className="text-xs uppercase tracking-wider text-red-600 font-semibold">{sel.category}{sel.code ? ` · ${sel.code}` : ""}</div><h2 className="text-lg font-bold">{sel.title}</h2></div>
+              <div><div className="text-xs uppercase tracking-wider text-red-600 font-semibold">{selDoc.category}{selDoc.code ? ` · ${selDoc.code}` : ""}</div><h2 className="text-lg font-bold">{selDoc.title}</h2></div>
               <div className="rounded-md border border-slate-200 bg-slate-50 p-6 text-sm text-slate-600 flex flex-col items-center gap-3">
                 <FileDown className="w-8 h-8 text-slate-400" />
-                <div>This is a {sel.file_name?.split(".").pop()?.toUpperCase() || "binary"} file (register / form / PDF). Open or download it from Google Drive.</div>
-                <div className="flex gap-2">
-                  {sel.source_url
-                    ? <a href={sel.source_url} target="_blank" rel="noreferrer"><Button size="sm"><ExternalLink className="w-4 h-4 mr-1" /> Open / download in Drive</Button></a>
-                    : <Button size="sm" onClick={() => dlPdf(`/iso-documents/${sel.id}/file`, sel.file_name || sel.title)}><FileDown className="w-4 h-4 mr-1" /> Download original</Button>}
-                </div>
+                <div>This is a {selDoc.file_name?.split(".").pop()?.toUpperCase() || "binary"} file. Open or download it from Google Drive.</div>
+                {selDoc.source_url ? <a href={selDoc.source_url} target="_blank" rel="noreferrer"><Button size="sm"><ExternalLink className="w-4 h-4 mr-1" /> Open / download in Drive</Button></a>
+                  : <Button size="sm" onClick={() => dlPdf(`/iso-documents/${selDoc.id}/file`, selDoc.file_name || selDoc.title)}><FileDown className="w-4 h-4 mr-1" /> Download original</Button>}
               </div>
-              <div className="flex justify-end"><Button size="sm" variant="ghost" className="text-red-600" onClick={del}><Trash2 className="w-4 h-4 mr-1" /> Remove</Button></div>
+              {isApprover && <div className="flex justify-end"><Button size="sm" variant="ghost" className="text-red-600" onClick={delDoc}><Trash2 className="w-4 h-4 mr-1" /> Remove</Button></div>}
             </div>
           )}
-          {sel && sel.doc_type !== "file" && (
+          {sel?.kind === "doc" && selDoc && selDoc.doc_type !== "file" && (
             <div className="space-y-3">
-              <div className="grid grid-cols-1 md:grid-cols-[1fr_160px_180px] gap-2">
+              {selDoc.status === "pending_approval" && (
+                <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800 flex items-center justify-between gap-2 flex-wrap">
+                  <span className="flex items-center gap-1.5"><Clock className="w-4 h-4" /> A change is pending approval{selDoc.submitted_by ? ` (submitted by ${selDoc.submitted_by})` : ""}.</span>
+                  {isApprover && <span className="flex gap-2">
+                    <Button size="sm" className="bg-emerald-600 hover:bg-emerald-700" onClick={() => approveDoc(selDoc.id)}><CheckCircle2 className="w-4 h-4 mr-1" /> Approve</Button>
+                    <Button size="sm" variant="outline" onClick={() => rejectDoc(selDoc.id)}><XCircle className="w-4 h-4 mr-1" /> Reject</Button>
+                  </span>}
+                </div>
+              )}
+              <div className="grid grid-cols-1 md:grid-cols-[1fr_150px_150px] gap-2">
                 <Field label="Title"><Input value={meta.title} onChange={(e) => setMeta({ ...meta, title: e.target.value })} className="h-9" /></Field>
                 <Field label="Doc No"><Input value={meta.code} onChange={(e) => setMeta({ ...meta, code: e.target.value })} className="h-9" /></Field>
-                <Field label="Category"><Sel value={meta.category} onChange={(v) => setMeta({ ...meta, category: v })} options={ISO_CATEGORIES.map((c) => ({ value: c, label: c }))} /></Field>
+                <Field label="Department"><Sel value={meta.department} onChange={(v) => setMeta({ ...meta, department: v })} options={DEPARTMENTS.map((c) => ({ value: c, label: c }))} /></Field>
               </div>
-              <RichEditor key={sel.id} value={draft} onInput={setDraft} />
+              <RichEditor key={selDoc.id} value={draft} onInput={setDraft} />
               <div className="flex items-center justify-between flex-wrap gap-2">
-                <div className="text-xs text-slate-400">Rev {sel.revision || 0}{sel.source_url ? " · imported from Drive" : ""}</div>
+                <div className="text-xs text-slate-400">Rev {selDoc.revision || 0}{selDoc.approved_by ? ` · approved by ${selDoc.approved_by}` : ""}{!isApprover ? " · edits need admin approval" : ""}</div>
                 <div className="flex gap-2">
-                  <Button size="sm" variant="ghost" className="text-red-600" onClick={del}><Trash2 className="w-4 h-4 mr-1" /> Delete</Button>
-                  <Button size="sm" variant="outline" onClick={() => dlPdf(`/iso-documents/${sel.id}/docx`, `${(meta.code || meta.title).replace(/\//g, "-")}.docx`)}><FileDown className="w-4 h-4 mr-1" /> Word</Button>
-                  <Button size="sm" variant="outline" onClick={() => dlPdf(`/iso-documents/${sel.id}/pdf`, `${(meta.code || meta.title).replace(/\//g, "-")}.pdf`)}><FileDown className="w-4 h-4 mr-1" /> PDF</Button>
-                  <Button size="sm" onClick={save} disabled={saving}><Save className="w-4 h-4 mr-1" /> {saving ? "Saving…" : "Save"}</Button>
+                  {isApprover && <Button size="sm" variant="ghost" className="text-red-600" onClick={delDoc}><Trash2 className="w-4 h-4 mr-1" /> Delete</Button>}
+                  <Button size="sm" variant="outline" onClick={() => dlPdf(`/iso-documents/${selDoc.id}/docx`, `${(meta.code || meta.title).replace(/\//g, "-")}.docx`)}><FileDown className="w-4 h-4 mr-1" /> Word</Button>
+                  <Button size="sm" variant="outline" onClick={() => dlPdf(`/iso-documents/${selDoc.id}/pdf`, `${(meta.code || meta.title).replace(/\//g, "-")}.pdf`)}><FileDown className="w-4 h-4 mr-1" /> PDF</Button>
+                  <Button size="sm" onClick={saveDoc} disabled={saving}><Save className="w-4 h-4 mr-1" /> {saving ? "Saving…" : isApprover ? "Save revision" : "Submit"}</Button>
                 </div>
               </div>
             </div>
@@ -500,17 +633,63 @@ function DocumentsLibrary() {
         </CardContent></Card>
       </div>
 
+      {/* New document */}
       <Dialog open={newOpen} onOpenChange={setNewOpen}>
-        <DialogContent><DialogHeader><DialogTitle>New document</DialogTitle></DialogHeader>
+        <DialogContent><DialogHeader><DialogTitle>New document · {dept}</DialogTitle></DialogHeader>
           <div className="space-y-3">
             <Field label="Title"><Input value={nf.title} onChange={(e) => setNf({ ...nf, title: e.target.value })} /></Field>
             <div className="grid grid-cols-2 gap-2">
               <Field label="Doc No"><Input value={nf.code} onChange={(e) => setNf({ ...nf, code: e.target.value })} placeholder="F/QMS/05" /></Field>
               <Field label="Category"><Sel value={nf.category} onChange={(v) => setNf({ ...nf, category: v })} options={ISO_CATEGORIES.map((c) => ({ value: c, label: c }))} /></Field>
             </div>
-            <div className="text-xs text-slate-400">Added under <b>{scope === "master" ? "Master" : "FY 26-27"}</b>.</div>
           </div>
           <DialogFooter><Button variant="outline" onClick={() => setNewOpen(false)}>Cancel</Button><Button onClick={createDoc}>Create</Button></DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* New register */}
+      <Dialog open={regOpen} onOpenChange={setRegOpen}>
+        <DialogContent className="max-w-2xl"><DialogHeader><DialogTitle>New register · {dept}</DialogTitle></DialogHeader>
+          <div className="space-y-3">
+            <div className="grid grid-cols-1 md:grid-cols-[1fr_160px_160px] gap-2">
+              <Field label="Register name"><Input value={rf.name} onChange={(e) => setRf({ ...rf, name: e.target.value })} placeholder="Daily Production Report" /></Field>
+              <Field label="Doc No"><Input value={rf.code} onChange={(e) => setRf({ ...rf, code: e.target.value })} placeholder="F/PRD/02" /></Field>
+              <Field label="Frequency"><Sel value={rf.frequency} onChange={(v) => setRf({ ...rf, frequency: v })} options={FREQUENCIES.map((f) => ({ value: f, label: f }))} /></Field>
+            </div>
+            <div>
+              <Label className="text-xs uppercase tracking-wider text-slate-600">Columns</Label>
+              <div className="space-y-2 mt-1">
+                {rf.columns.map((c, i) => (
+                  <div key={i} className="flex gap-2 items-center">
+                    <Input value={c.label} onChange={(e) => { const cs = [...rf.columns]; cs[i] = { ...cs[i], label: e.target.value }; setRf({ ...rf, columns: cs }); }} placeholder="Column label" className="h-9 flex-1" />
+                    <div className="w-32"><Sel value={c.type} onChange={(v) => { const cs = [...rf.columns]; cs[i] = { ...cs[i], type: v }; setRf({ ...rf, columns: cs }); }} options={COL_TYPES.map((t) => ({ value: t, label: t }))} /></div>
+                    <button className="text-slate-400 hover:text-red-600" onClick={() => setRf({ ...rf, columns: rf.columns.filter((_, j) => j !== i) })}><X className="w-4 h-4" /></button>
+                  </div>
+                ))}
+                <Button size="sm" variant="outline" onClick={() => setRf({ ...rf, columns: [...rf.columns, { label: "", type: "text" }] })}><Plus className="w-4 h-4 mr-1" /> Add column</Button>
+              </div>
+            </div>
+          </div>
+          <DialogFooter><Button variant="outline" onClick={() => setRegOpen(false)}>Cancel</Button><Button onClick={createRegister}>Create register</Button></DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Approvals */}
+      <Dialog open={pendOpen} onOpenChange={setPendOpen}>
+        <DialogContent className="max-w-2xl"><DialogHeader><DialogTitle>Pending approvals</DialogTitle></DialogHeader>
+          <div className="space-y-2 max-h-[60vh] overflow-y-auto">
+            {pending.length === 0 && <div className="text-sm text-slate-400 p-3">Nothing waiting for approval.</div>}
+            {pending.map((d) => (
+              <div key={d.id} className="flex items-center justify-between gap-2 border rounded-md px-3 py-2">
+                <div><div className="text-sm font-medium">{d.title}</div><div className="text-xs text-slate-400">{d.code} · {d.department} · submitted by {d.submitted_by || "—"}</div></div>
+                <div className="flex gap-2">
+                  <Button size="sm" variant="outline" onClick={() => { setPendOpen(false); setDept(d.department || "Management"); openDoc(d.id); }}>Review</Button>
+                  <Button size="sm" className="bg-emerald-600 hover:bg-emerald-700" onClick={() => approveDoc(d.id)}><CheckCircle2 className="w-4 h-4" /></Button>
+                  <Button size="sm" variant="outline" onClick={() => rejectDoc(d.id)}><XCircle className="w-4 h-4" /></Button>
+                </div>
+              </div>
+            ))}
+          </div>
         </DialogContent>
       </Dialog>
     </div>
