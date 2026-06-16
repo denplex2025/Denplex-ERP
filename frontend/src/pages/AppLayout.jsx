@@ -86,6 +86,7 @@ const NAV_GROUPS = [
     head: "Accounts",
     items: [
       { to: "/app/invoices", label: "Sale Invoices (GST)", icon: Receipt, testid: "nav-invoices" },
+      { to: "/app/invoices/new", label: "New Sale Invoice", icon: Receipt, testid: "nav-invoice-new", end: true },
       { to: "/app/docs/credit-notes", label: "Credit Notes", icon: Receipt, testid: "nav-credit-notes" },
       { to: "/app/docs/vendor-bills", label: "Purchase Bills", icon: Receipt, testid: "nav-vendor-bills" },
       { to: "/app/accounting", label: "Accounting", icon: Calculator, testid: "nav-accounting" },
