@@ -381,6 +381,7 @@ class InventoryItem(BaseModel):
     uom: str = "pcs"
     qty_on_hand: float = 0
     qty_in_process: float = 0
+    qty_by_location: dict = Field(default_factory=dict)   # {"Vatva": 12, "Santej": 3} — per-location on-hand
     reorder_level: float = 0
     unit_cost: float = 0
     hsn: Optional[str] = ""
@@ -394,12 +395,24 @@ class StockMovement(BaseModel):
     item_id: str
     item_sku: str
     item_name: str
-    type: Literal["in", "out", "adjust", "in_process"]
+    type: Literal["in", "out", "adjust", "in_process", "transfer"]
     qty: float
+    location: Optional[str] = ""          # which location this movement affects
+    to_location: Optional[str] = ""       # for transfers: destination
     ref: Optional[str] = ""
     notes: Optional[str] = ""
     by_user: Optional[str] = ""
     created_at: str = Field(default_factory=now_iso)
+
+class StockTransfer(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    item_id: str
+    from_location: str
+    to_location: str
+    qty: float
+    notes: Optional[str] = ""
+
+DEFAULT_LOCATIONS = ["Vatva", "Santej"]
 
 class BOMLine(BaseModel):
     # Either reference a legacy inventory item (item_id) OR a Part Master entry (component_part_id).
@@ -1630,16 +1643,27 @@ async def create_movement(m: StockMovement, user=Depends(get_current_user)):
     qty = float(m.qty)
     new_oh = item["qty_on_hand"]
     new_ip = item.get("qty_in_process", 0)
+    loc = (m.location or "").strip()
+    by_loc = dict(item.get("qty_by_location") or {})
+    cur_loc = float(by_loc.get(loc, 0)) if loc else 0
     if m.type == "in":
         new_oh += qty
+        if loc: by_loc[loc] = cur_loc + qty
     elif m.type == "out":
         new_oh -= qty
+        if loc: by_loc[loc] = cur_loc - qty
     elif m.type == "adjust":
-        new_oh = qty
+        # set the chosen location to qty (or the grand total if no location given)
+        if loc:
+            by_loc[loc] = qty
+            new_oh = sum(float(v) for v in by_loc.values())
+        else:
+            new_oh = qty
     elif m.type == "in_process":
         new_ip += qty
         new_oh -= qty
-    await db.items.update_one({"id": m.item_id}, {"$set": {"qty_on_hand": new_oh, "qty_in_process": new_ip}})
+        if loc: by_loc[loc] = cur_loc - qty
+    await db.items.update_one({"id": m.item_id}, {"$set": {"qty_on_hand": new_oh, "qty_in_process": new_ip, "qty_by_location": by_loc}})
     doc = m.model_dump()
     doc["item_sku"] = item["sku"]
     doc["item_name"] = item["name"]
@@ -1682,6 +1706,46 @@ async def create_movement(m: StockMovement, user=Depends(get_current_user)):
 @api.get("/inventory/movements")
 async def list_movements(user=Depends(get_current_user)):
     return await list_collection(db.movements)
+
+@api.get("/inventory/locations")
+async def get_inventory_locations(user=Depends(get_current_user)):
+    s = await db.settings.find_one({"_id": "inventory_locations"})
+    return {"locations": (s or {}).get("locations", DEFAULT_LOCATIONS)}
+
+@api.put("/inventory/locations")
+async def set_inventory_locations(body: dict, user=Depends(require_roles("admin", "manager"))):
+    locs = [str(x).strip() for x in (body.get("locations") or []) if str(x).strip()]
+    if not locs:
+        locs = list(DEFAULT_LOCATIONS)
+    await db.settings.update_one({"_id": "inventory_locations"}, {"$set": {"locations": locs}}, upsert=True)
+    return {"locations": locs}
+
+@api.post("/inventory/transfer")
+async def transfer_stock(t: StockTransfer, user=Depends(get_current_user)):
+    """Move qty of an item from one location to another. Grand total qty_on_hand
+    is unchanged; only the per-location split shifts. Records a 'transfer' movement."""
+    item = await db.items.find_one({"id": t.item_id}, {"_id": 0})
+    if not item:
+        raise HTTPException(404, "Item not found")
+    frm = (t.from_location or "").strip(); to = (t.to_location or "").strip()
+    qty = float(t.qty)
+    if not frm or not to:
+        raise HTTPException(400, "from_location and to_location are required")
+    if frm == to:
+        raise HTTPException(400, "Source and destination must differ")
+    if qty <= 0:
+        raise HTTPException(400, "Quantity must be greater than zero")
+    by_loc = dict(item.get("qty_by_location") or {})
+    if float(by_loc.get(frm, 0)) < qty:
+        raise HTTPException(400, f"Not enough stock at {frm} (have {by_loc.get(frm, 0)}, need {qty})")
+    by_loc[frm] = float(by_loc.get(frm, 0)) - qty
+    by_loc[to] = float(by_loc.get(to, 0)) + qty
+    await db.items.update_one({"id": t.item_id}, {"$set": {"qty_by_location": by_loc}})
+    doc = StockMovement(item_id=t.item_id, item_sku=item["sku"], item_name=item["name"],
+                        type="transfer", qty=qty, location=frm, to_location=to,
+                        notes=t.notes or "", by_user=user.get("name", "")).model_dump()
+    await db.movements.insert_one(doc)
+    return {"ok": True, "qty_by_location": by_loc}
 
 BILL_EXTRACT_PROMPT = (
     "You are an accounts clerk for a precision-machining company. Read this purchase bill / "
