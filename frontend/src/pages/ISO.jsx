@@ -465,6 +465,21 @@ function RegisterView({ template, onDeleted, canManage }) {
     return true;
   });
   const chip = (active) => `px-2.5 py-1 text-xs rounded-sm font-medium border transition-colors ${active ? "bg-red-600 text-white border-red-600" : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50"}`;
+  // Build export query + filename so downloads reflect the active filter, not the whole register
+  const exportQuery = () => {
+    const p = new URLSearchParams();
+    if (locCol && locFilter !== "All") p.set("location", locFilter);
+    if (month !== "All") p.set("month", month);
+    if (search) p.set("q", search);
+    const s = p.toString();
+    return s ? `?${s}` : "";
+  };
+  const exportSuffix = () => {
+    const bits = [];
+    if (locCol && locFilter !== "All") bits.push(locFilter);
+    if (month !== "All") bits.push(monthLabel(month).replace(" ", ""));
+    return bits.length ? "-" + bits.join("-") : "";
+  };
 
   return (
     <div className="space-y-3">
@@ -476,8 +491,8 @@ function RegisterView({ template, onDeleted, canManage }) {
         </div>
         <div className="flex gap-2 flex-wrap">
           <Button size="sm" onClick={() => { setEdit(null); setOpen(true); }}><Plus className="w-4 h-4 mr-1" /> Add entry</Button>
-          <Button size="sm" variant="outline" onClick={() => dlPdf(`/registers/${template.id}/export/xlsx`, `${(template.code || template.name).replace(/\//g, "-")}.xlsx`)}><FileSpreadsheet className="w-4 h-4 mr-1" /> Excel</Button>
-          <Button size="sm" variant="outline" onClick={() => dlPdf(`/registers/${template.id}/export/pdf`, `${(template.code || template.name).replace(/\//g, "-")}.pdf`)}><FileDown className="w-4 h-4 mr-1" /> PDF</Button>
+          <Button size="sm" variant="outline" onClick={() => dlPdf(`/registers/${template.id}/export/xlsx${exportQuery()}`, `${(template.code || template.name).replace(/\//g, "-")}${exportSuffix()}.xlsx`)}><FileSpreadsheet className="w-4 h-4 mr-1" /> Excel</Button>
+          <Button size="sm" variant="outline" onClick={() => dlPdf(`/registers/${template.id}/export/pdf${exportQuery()}`, `${(template.code || template.name).replace(/\//g, "-")}${exportSuffix()}.pdf`)}><FileDown className="w-4 h-4 mr-1" /> PDF</Button>
           {canManage && <Button size="sm" variant="ghost" className="text-red-600" onClick={() => onDeleted(template)}><Trash2 className="w-4 h-4" /></Button>}
         </div>
       </div>
