@@ -6956,14 +6956,29 @@ EXPORT_COLLECTIONS = {
 }
 
 @api.get("/export/{collection}.{format}")
-async def export_collection(collection: str, format: str, user=Depends(get_current_user)):
-    """Export any registered collection as CSV or XLSX. Streams binary back."""
+async def export_collection(collection: str, format: str, q: str = "", date_from: str = "", date_to: str = "", status: str = "", user=Depends(get_current_user)):
+    """Export any registered collection as CSV or XLSX. Streams binary back.
+    Honors the same filters the list UI shows (search q, date range, status) so a
+    download reflects what the user is looking at, not the whole collection."""
     if collection not in EXPORT_COLLECTIONS:
         raise HTTPException(404, f"Unknown collection '{collection}'")
     if format not in ("csv", "xlsx"):
         raise HTTPException(400, "format must be csv or xlsx")
     coll_name, cols = EXPORT_COLLECTIONS[collection]
     rows = await db[coll_name].find({}, {"_id": 0}).sort("created_at", -1).to_list(50000)
+    # ---- apply UI filters in-memory (collections vary in shape) ----
+    df = (date_from or "").strip()[:10]; dt = (date_to or "").strip()[:10]
+    st = (status or "").strip().lower(); ql = (q or "").strip().lower()
+    def _keep(r):
+        d = str(r.get("date", ""))[:10]
+        if df and d and d < df: return False
+        if dt and d and d > dt: return False
+        if st and str(r.get("status", "")).strip().lower() != st: return False
+        if ql:
+            hay = " ".join(str(r.get(c, "")) for c in cols).lower()
+            if ql not in hay: return False
+        return True
+    rows = [r for r in rows if _keep(r)]
     if format == "csv":
         import csv as _csv
         buf = io.StringIO()
