@@ -7079,6 +7079,42 @@ async def export_collection(collection: str, format: str, q: str = "", date_from
                     media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     headers={"Content-Disposition": f'attachment; filename="{collection}.xlsx"'})
 
+# ---------------- Global search ----------------
+SEARCH_TARGETS = [
+    # (collection, type_label, frontend_route, [search_fields], label_field, sub_field)
+    ("parts", "Part", "/app/parts", ["part_number", "customer_part_number", "name", "customer_name"], "part_number", "name"),
+    ("items", "Item", "/app/inventory", ["sku", "name", "hsn"], "name", "sku"),
+    ("customers", "Customer", "/app/customers", ["name", "gstin", "phone", "email"], "name", "gstin"),
+    ("suppliers", "Supplier", "/app/suppliers", ["name", "gstin", "phone", "email"], "name", "gstin"),
+    ("invoices", "Invoice", "/app/invoices", ["code", "customer_name", "po_number"], "code", "customer_name"),
+    ("quotations", "Quotation", "/app/quotations", ["code", "customer_name"], "code", "customer_name"),
+    ("work_orders", "Work Order", "/app/work-orders", ["code", "part_name", "part_number", "customer_name"], "code", "part_name"),
+    ("purchase_orders", "Purchase Order", "/app/purchase-orders", ["code", "supplier_name"], "code", "supplier_name"),
+    ("vendor_bills", "Purchase Bill", "/app/docs/vendor-bills", ["code", "supplier_name"], "code", "supplier_name"),
+]
+
+@api.get("/search")
+async def global_search(q: str = "", limit: int = 6, user=Depends(get_current_user)):
+    """Lightweight cross-collection search for the global header search box."""
+    ql = (q or "").strip()
+    if len(ql) < 2:
+        return {"results": [], "query": ql}
+    rx = {"$regex": re.escape(ql), "$options": "i"}
+    lim = max(1, min(int(limit or 6), 15))
+    results = []
+    for coll, type_label, route, fields, label_f, sub_f in SEARCH_TARGETS:
+        try:
+            docs = await db[coll].find({"$or": [{f: rx} for f in fields]}, {"_id": 0}).limit(lim).to_list(lim)
+            for d in docs:
+                results.append({
+                    "type": type_label, "route": route, "id": d.get("id", ""),
+                    "label": str(d.get(label_f) or d.get("name") or d.get("code") or "—"),
+                    "sub": str(d.get(sub_f) or ""),
+                })
+        except Exception:
+            continue
+    return {"results": results, "query": ql}
+
 # ---------------- BOM Revisions + Drawings (Phase M.2) ----------------
 @api.post("/bom/{bid}/revisions")
 async def add_bom_revision(bid: str, rev: BOMRevision, user=Depends(get_current_user)):
