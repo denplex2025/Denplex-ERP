@@ -6779,6 +6779,42 @@ async def dashboard_receivable_payable(user=Depends(get_current_user)):
         "payable_parties_count": len(payable_parties),
     }
 
+@api.get("/reports/overdue")
+async def overdue_invoices(user=Depends(get_current_user)):
+    """Open invoices past their due date, with days overdue and outstanding amount — for payment follow-ups."""
+    today = datetime.utcnow().date()
+    invs = await db.invoices.find({"status": {"$ne": "paid"}}, {"_id": 0}).to_list(10000)
+    payments_in = await db.payments_in.find({}, {"_id": 0, "allocations": 1}).to_list(10000)
+    alloc: Dict[str, float] = {}
+    for p in payments_in:
+        for a in (p.get("allocations") or []):
+            if a.get("document_type") == "invoice":
+                alloc[a["document_id"]] = alloc.get(a["document_id"], 0) + float(a.get("amount") or 0)
+    rows = []
+    total = 0.0
+    for inv in invs:
+        outstanding = float(inv.get("total", 0)) - alloc.get(inv.get("id", ""), 0)
+        if outstanding <= 0.01:
+            continue
+        due = str(inv.get("due_date", "") or "")[:10]
+        days = None
+        try:
+            if due:
+                days = (today - datetime.strptime(due, "%Y-%m-%d").date()).days
+        except Exception:
+            days = None
+        if days is None or days <= 0:
+            continue   # not overdue yet
+        rows.append({
+            "id": inv.get("id"), "code": inv.get("code"), "customer_name": inv.get("customer_name"),
+            "customer_id": inv.get("customer_id"), "total": round(float(inv.get("total", 0)), 2),
+            "outstanding": round(outstanding, 2), "due_date": due, "days_overdue": days,
+            "phone": inv.get("customer_phone", "") or inv.get("phone", ""),
+        })
+        total += outstanding
+    rows.sort(key=lambda r: r["days_overdue"], reverse=True)
+    return {"overdue": rows, "total_overdue": round(total, 2), "count": len(rows)}
+
 @api.get("/dashboard/sales-trend")
 async def dashboard_sales_trend(days: int = 30, user=Depends(get_current_user)):
     """Daily sale totals for the last N days. For the Home chart."""
