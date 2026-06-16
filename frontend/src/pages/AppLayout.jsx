@@ -6,7 +6,7 @@ import {
   LayoutDashboard, Boxes, Layers, ClipboardList, FileText,
   ShoppingCart, Receipt, Users, UserPlus, Truck, ShieldCheck,
   FileBox, Settings as SettingsIcon, LogOut, Menu, Calculator, UsersRound, Megaphone, Wrench, ScrollText,
-  ArrowDownToLine, ArrowUpFromLine, Banknote, Undo2, Cog, CalendarRange, Search, Trash2, SlidersHorizontal
+  ArrowDownToLine, ArrowUpFromLine, Banknote, Undo2, Cog, CalendarRange, Search, Trash2, SlidersHorizontal, AlarmClock
 } from "lucide-react";
 import { useState, useEffect, useRef } from "react";
 import api from "@/lib/api";
@@ -90,6 +90,7 @@ const NAV_GROUPS = [
       { to: "/app/docs/vendor-bills", label: "Purchase Bills", icon: Receipt, testid: "nav-vendor-bills" },
       { to: "/app/accounting", label: "Accounting", icon: Calculator, testid: "nav-accounting" },
       { to: "/app/statements", label: "Account Statements", icon: ScrollText, testid: "nav-statements" },
+      { to: "/app/reminders", label: "Payment Reminders", icon: AlarmClock, testid: "nav-reminders" },
       { to: "/app/costing", label: "Costing & Profitability", icon: Calculator, testid: "nav-costing" },
     ],
   },
