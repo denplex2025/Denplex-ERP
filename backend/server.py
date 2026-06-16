@@ -1562,8 +1562,56 @@ async def update_customer(cid: str, c: Customer, user=Depends(get_current_user))
     await db.customers.update_one({"id": cid}, {"$set": data})
     return {"ok": True}
 
+# ---------------- Recycle bin (soft delete + restore) ----------------
+RECYCLE_TITLE_FIELDS = ["code", "name", "part_number", "sku", "title", "id"]
+async def _recycle(coll: str, label: str, doc, user):
+    """Snapshot a document into recycle_bin before it is hard-deleted, so it can be restored."""
+    if not doc:
+        return
+    snap = {k: v for k, v in doc.items() if k != "_id"}
+    title = next((str(snap[f]) for f in RECYCLE_TITLE_FIELDS if snap.get(f)), snap.get("id", ""))
+    await db.recycle_bin.insert_one({
+        "id": new_id(), "coll": coll, "label": label, "title": title,
+        "doc": snap, "deleted_at": now_iso(),
+        "deleted_by": (user.get("name") or user.get("email", "")) if isinstance(user, dict) else "",
+    })
+
+@api.get("/recycle-bin")
+async def list_recycle_bin(user=Depends(get_current_user)):
+    return await db.recycle_bin.find({}, {"_id": 0, "doc": 0}).sort("deleted_at", -1).to_list(2000)
+
+@api.post("/recycle-bin/{rid}/restore")
+async def restore_recycled(rid: str, user=Depends(require_roles("admin", "manager"))):
+    rec = await db.recycle_bin.find_one({"id": rid})
+    if not rec:
+        raise HTTPException(404, "Item not found in recycle bin")
+    coll = rec.get("coll")
+    doc = {k: v for k, v in (rec.get("doc") or {}).items() if k != "_id"}
+    if doc.get("id") and await db[coll].find_one({"id": doc["id"]}):
+        raise HTTPException(400, "A live record with this id already exists")
+    entries_backup = doc.pop("_entries_backup", None)
+    await db[coll].insert_one(doc)
+    if entries_backup:   # registers carry their rows along with the template
+        clean = [{k: v for k, v in e.items() if k != "_id"} for e in entries_backup]
+        if clean:
+            await db.register_entries.insert_many(clean)
+    await db.recycle_bin.delete_one({"id": rid})
+    return {"ok": True, "restored_to": coll}
+
+@api.delete("/recycle-bin/{rid}")
+async def purge_recycled(rid: str, user=Depends(require_roles("admin", "manager"))):
+    await db.recycle_bin.delete_one({"id": rid})
+    return {"ok": True}
+
+@api.delete("/recycle-bin")
+async def empty_recycle_bin(user=Depends(require_roles("admin"))):
+    r = await db.recycle_bin.delete_many({})
+    return {"deleted": r.deleted_count}
+
 @api.delete("/customers/{cid}")
 async def del_customer(cid: str, user=Depends(require_roles("admin", "manager"))):
+    doc = await db.customers.find_one({"id": cid}, {"_id": 0})
+    await _recycle("customers", "Customer", doc, user)
     await db.customers.delete_one({"id": cid})
     return {"ok": True}
 
@@ -1608,6 +1656,8 @@ async def update_supplier(sid: str, s: Supplier, user=Depends(get_current_user))
 
 @api.delete("/suppliers/{sid}")
 async def del_supplier(sid: str, user=Depends(get_current_user)):
+    doc = await db.suppliers.find_one({"id": sid}, {"_id": 0})
+    await _recycle("suppliers", "Supplier", doc, user)
     await db.suppliers.delete_one({"id": sid})
     return {"ok": True}
 
@@ -1632,6 +1682,8 @@ async def update_item(iid: str, it: InventoryItem, user=Depends(get_current_user
 
 @api.delete("/inventory/items/{iid}")
 async def del_item(iid: str, user=Depends(require_roles("admin", "manager"))):
+    doc = await db.items.find_one({"id": iid}, {"_id": 0})
+    await _recycle("items", "Inventory Item", doc, user)
     await db.items.delete_one({"id": iid})
     return {"ok": True}
 
@@ -1927,6 +1979,8 @@ async def update_wo(wid: str, w: WorkOrder, user=Depends(get_current_user)):
 
 @api.delete("/work-orders/{wid}")
 async def del_wo(wid: str, user=Depends(require_roles("admin", "manager"))):
+    doc = await db.work_orders.find_one({"id": wid}, {"_id": 0})
+    await _recycle("work_orders", "Work Order", doc, user)
     await db.work_orders.delete_one({"id": wid})
     return {"ok": True}
 
@@ -2506,6 +2560,8 @@ async def update_quote(qid: str, q: Quotation, user=Depends(get_current_user)):
 
 @api.delete("/quotations/{qid}")
 async def del_quote(qid: str, user=Depends(get_current_user)):
+    doc = await db.quotations.find_one({"id": qid}, {"_id": 0})
+    await _recycle("quotations", "Quotation", doc, user)
     await db.quotations.delete_one({"id": qid})
     return {"ok": True}
 
@@ -2531,6 +2587,8 @@ async def update_po(pid: str, p: PurchaseOrder, user=Depends(get_current_user)):
 
 @api.delete("/purchase-orders/{pid}")
 async def del_po(pid: str, user=Depends(require_roles("admin", "manager"))):
+    doc = await db.purchase_orders.find_one({"id": pid}, {"_id": 0})
+    await _recycle("purchase_orders", "Purchase Order", doc, user)
     await db.purchase_orders.delete_one({"id": pid})
     return {"ok": True}
 
@@ -2566,6 +2624,8 @@ async def update_invoice(iid: str, inv: Invoice, user=Depends(get_current_user))
 
 @api.delete("/invoices/{iid}")
 async def del_invoice(iid: str, user=Depends(require_roles("admin", "manager", "accountant", "ca"))):
+    doc = await db.invoices.find_one({"id": iid}, {"_id": 0})
+    await _recycle("invoices", "Invoice", doc, user)
     await db.invoices.delete_one({"id": iid})
     return {"ok": True}
 
@@ -4203,6 +4263,8 @@ async def reject_iso_document(did: str, user=Depends(require_roles("admin", "man
 
 @api.delete("/iso-documents/{did}")
 async def delete_iso_document(did: str, user=Depends(get_current_user)):
+    doc = await db.iso_documents.find_one({"id": did}, {"_id": 0})
+    await _recycle("iso_documents", "ISO Document", doc, user)
     await db.iso_documents.delete_one({"id": did})
     return {"ok": True}
 
@@ -4323,6 +4385,11 @@ async def update_register(tid: str, payload: Dict[str, Any], user=Depends(requir
 
 @api.delete("/registers/{tid}")
 async def delete_register(tid: str, user=Depends(require_roles("admin", "manager"))):
+    doc = await db.register_templates.find_one({"id": tid}, {"_id": 0})
+    if doc:
+        entries = await db.register_entries.find({"template_id": tid}, {"_id": 0}).to_list(20000)
+        doc["_entries_backup"] = entries   # keep entries with the snapshot so a restore brings data back
+        await _recycle("register_templates", "Register", doc, user)
     await db.register_templates.delete_one({"id": tid})
     await db.register_entries.delete_many({"template_id": tid})
     return {"ok": True}
@@ -7490,7 +7557,8 @@ async def update_part(pid: str, p: PartMaster, user=Depends(get_current_user)):
 async def delete_part(pid: str, force: bool = False, user=Depends(require_roles("admin", "manager", "design", "production"))):
     """Soft delete by default (is_active=False). Pass ?force=true for permanent removal."""
     if force:
-        p = await db.parts.find_one({"id": pid}, {"_id": 0, "part_number": 1, "name": 1})
+        p = await db.parts.find_one({"id": pid}, {"_id": 0})
+        await _recycle("parts", "Part", p, user)
         await db.parts.delete_one({"id": pid})
         await write_audit(user.get("name", ""), "part_deleted_hard", "part", pid,
                           {"part_number": p.get("part_number") if p else "", "name": p.get("name") if p else ""})
