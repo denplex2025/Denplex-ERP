@@ -425,14 +425,19 @@ function RegisterEntryDialog({ open, onClose, template, entry, onSave }) {
 }
 
 // ---- Register: the live data table (free data entry) + Excel/PDF export ----
+const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
 function RegisterView({ template, onDeleted, canManage }) {
   const [entries, setEntries] = useState([]);
   const [loading, setLoading] = useState(false);
   const [open, setOpen] = useState(false);
   const [edit, setEdit] = useState(null);
+  const [locFilter, setLocFilter] = useState("All");
+  const [month, setMonth] = useState("All");
+  const [search, setSearch] = useState("");
   const cols = template.columns || [];
   const load = async () => { setLoading(true); try { const r = await api.get(`/registers/${template.id}/entries`); setEntries(r.data || []); } catch (e) {} setLoading(false); };
-  useEffect(() => { load(); setEdit(null); }, [template.id]); // eslint-disable-line
+  useEffect(() => { load(); setEdit(null); setLocFilter("All"); setMonth("All"); setSearch(""); }, [template.id]); // eslint-disable-line
   const saveEntry = async ({ date, data }) => {
     try {
       if (edit) await api.put(`/registers/${template.id}/entries/${edit.id}`, { date, data });
@@ -441,6 +446,26 @@ function RegisterView({ template, onDeleted, canManage }) {
     } catch (e) { toast.error("Could not save entry"); }
   };
   const delEntry = async (id) => { if (!window.confirm("Delete this entry?")) return; try { await api.delete(`/registers/${template.id}/entries/${id}`); await load(); } catch (e) { toast.error("Delete failed"); } };
+
+  // Location column auto-detect (e.g. Vatva / Santej split)
+  const locCol = cols.find((c) => c.key === "location" || c.label.toLowerCase() === "location");
+  const dataCols = cols.filter((c) => c !== locCol);
+  const locValues = locCol ? Array.from(new Set(entries.map((e) => (e.data?.[locCol.key] || "").trim()).filter(Boolean))).sort() : [];
+  // Months present in the data
+  const months = Array.from(new Set(entries.map((e) => (e.date || "").slice(0, 7)).filter((m) => /^\d{4}-\d{2}$/.test(m)))).sort();
+  const monthLabel = (m) => { const [y, mm] = m.split("-"); return `${MONTH_NAMES[parseInt(mm, 10) - 1]} ${y.slice(2)}`; };
+
+  const filtered = entries.filter((e) => {
+    if (locCol && locFilter !== "All" && (e.data?.[locCol.key] || "").trim() !== locFilter) return false;
+    if (month !== "All" && (e.date || "").slice(0, 7) !== month) return false;
+    if (search) {
+      const hay = `${e.date || ""} ${cols.map((c) => e.data?.[c.key] ?? "").join(" ")}`.toLowerCase();
+      if (!hay.includes(search.toLowerCase())) return false;
+    }
+    return true;
+  });
+  const chip = (active) => `px-2.5 py-1 text-xs rounded-sm font-medium border transition-colors ${active ? "bg-red-600 text-white border-red-600" : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50"}`;
+
   return (
     <div className="space-y-3">
       <div className="flex items-start justify-between gap-3 flex-wrap">
@@ -456,18 +481,53 @@ function RegisterView({ template, onDeleted, canManage }) {
           {canManage && <Button size="sm" variant="ghost" className="text-red-600" onClick={() => onDeleted(template)}><Trash2 className="w-4 h-4" /></Button>}
         </div>
       </div>
+
+      {/* Filter bar */}
+      {(locCol || months.length > 1 || entries.length > 8) && (
+        <div className="flex items-center gap-2 flex-wrap bg-slate-50 border border-slate-200 rounded-md p-2">
+          {locCol && (
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold mr-0.5">{locCol.label}</span>
+              <button className={chip(locFilter === "All")} onClick={() => setLocFilter("All")}>All</button>
+              {locValues.map((v) => <button key={v} className={chip(locFilter === v)} onClick={() => setLocFilter(v)}>{v}</button>)}
+            </div>
+          )}
+          {months.length > 1 && (
+            <div className="flex items-center gap-1.5 ml-1">
+              <span className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">Month</span>
+              <select value={month} onChange={(e) => setMonth(e.target.value)} className="h-8 text-xs border border-slate-200 rounded-sm px-2 bg-white">
+                <option value="All">All</option>
+                {months.map((m) => <option key={m} value={m}>{monthLabel(m)}</option>)}
+              </select>
+            </div>
+          )}
+          <div className="relative ml-auto">
+            <Search className="w-3.5 h-3.5 absolute left-2 top-2.5 text-slate-400" />
+            <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search rows…" className="pl-7 h-8 text-xs w-44" />
+          </div>
+          {(locFilter !== "All" || month !== "All" || search) && (
+            <button className="text-xs text-slate-500 hover:text-red-600 inline-flex items-center gap-1" onClick={() => { setLocFilter("All"); setMonth("All"); setSearch(""); }}><X className="w-3.5 h-3.5" /> Clear</button>
+          )}
+        </div>
+      )}
+
       <Card><CardContent className="p-0 overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead><tr className="border-b bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
-            <th className="p-2">Date</th>{cols.map((c) => <th key={c.key} className="p-2">{c.label}</th>)}<th className="p-2 w-16"></th>
+        <table className="w-full text-sm border-collapse">
+          <thead><tr className="border-b bg-slate-100 text-left text-[11px] uppercase tracking-wider text-slate-500">
+            <th className="p-2 font-semibold whitespace-nowrap">Date</th>
+            {locCol && <th className="p-2 font-semibold whitespace-nowrap">{locCol.label}</th>}
+            {dataCols.map((c) => <th key={c.key} className="p-2 font-semibold">{c.label}</th>)}
+            <th className="p-2 w-16"></th>
           </tr></thead>
           <tbody>
             {loading && <tr><td colSpan={cols.length + 2} className="p-4 text-slate-400">Loading…</td></tr>}
             {!loading && entries.length === 0 && <tr><td colSpan={cols.length + 2} className="p-4 text-slate-400">No entries yet. Click “Add entry”.</td></tr>}
-            {entries.map((e) => (
-              <tr key={e.id} className="border-b hover:bg-slate-50">
-                <td className="p-2 whitespace-nowrap">{(e.date || "").slice(0, 10)}</td>
-                {cols.map((c) => <td key={c.key} className="p-2">{String(e.data?.[c.key] ?? "")}</td>)}
+            {!loading && entries.length > 0 && filtered.length === 0 && <tr><td colSpan={cols.length + 2} className="p-4 text-slate-400">No rows match the current filter.</td></tr>}
+            {filtered.map((e, i) => (
+              <tr key={e.id} className={`border-b border-slate-100 hover:bg-amber-50/60 align-top ${i % 2 ? "bg-slate-50/50" : ""}`}>
+                <td className="p-2 whitespace-nowrap text-slate-600 tabular-nums">{(e.date || "").slice(0, 10) || "—"}</td>
+                {locCol && <td className="p-2 whitespace-nowrap"><span className="inline-block px-1.5 py-0.5 rounded-sm text-[11px] font-medium bg-slate-100 text-slate-600">{String(e.data?.[locCol.key] ?? "")}</span></td>}
+                {dataCols.map((c) => <td key={c.key} className={`p-2 ${["remarks", "description", "drg_no", "part_name", "item"].includes(c.key) ? "min-w-[140px] max-w-[260px] whitespace-pre-wrap break-words" : "whitespace-nowrap"}`}>{String(e.data?.[c.key] ?? "")}</td>)}
                 <td className="p-2 text-right whitespace-nowrap">
                   <button className="text-slate-400 hover:text-slate-700 mr-2" onClick={() => { setEdit(e); setOpen(true); }}><Pencil className="w-3.5 h-3.5 inline" /></button>
                   <button className="text-slate-400 hover:text-red-600" onClick={() => delEntry(e.id)}><Trash2 className="w-3.5 h-3.5 inline" /></button>
@@ -477,6 +537,7 @@ function RegisterView({ template, onDeleted, canManage }) {
           </tbody>
         </table>
       </CardContent></Card>
+      <div className="text-[11px] text-slate-400 px-1">{filtered.length === entries.length ? `${entries.length} rows` : `${filtered.length} of ${entries.length} rows`}</div>
       <RegisterEntryDialog open={open} onClose={() => { setOpen(false); setEdit(null); }} template={template} entry={edit} onSave={saveEntry} />
     </div>
   );
