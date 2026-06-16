@@ -4311,11 +4311,31 @@ async def _register_rows(tid: str):
     cols = t.get("columns", [])
     return t, cols, entries
 
+def _filter_register_entries(cols, entries, location: str = "", month: str = "", q: str = ""):
+    """Apply the same filters the UI shows (location chip / month / search) so an
+    export reflects exactly what the user is looking at, not the whole register."""
+    loc_col = next((c for c in cols if c.get("key") == "location" or str(c.get("label", "")).lower() == "location"), None)
+    location = (location or "").strip(); month = (month or "").strip(); q = (q or "").strip().lower()
+    out = []
+    for e in entries:
+        data = e.get("data", {}) or {}
+        if loc_col and location and str(data.get(loc_col.get("key"), "")).strip() != location:
+            continue
+        if month and str(e.get("date", ""))[:7] != month:
+            continue
+        if q:
+            hay = (str(e.get("date", "")) + " " + " ".join(str(data.get(c.get("key"), "")) for c in cols)).lower()
+            if q not in hay:
+                continue
+        out.append(e)
+    return out
+
 @api.get("/registers/{tid}/export/xlsx")
-async def register_export_xlsx(tid: str, user=Depends(get_current_user)):
+async def register_export_xlsx(tid: str, location: str = "", month: str = "", q: str = "", user=Depends(get_current_user)):
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     t, cols, entries = await _register_rows(tid)
+    entries = _filter_register_entries(cols, entries, location, month, q)
     wb = Workbook(); ws = wb.active
     ws.title = re.sub(r"[\\/*?:\[\]]", "-", (t.get("code") or t.get("name") or "Register"))[:31]
     RED = "CC0000"; thin = Side(style="thin", color="CCCCCC"); border = Border(thin, thin, thin, thin)
@@ -4344,7 +4364,7 @@ async def register_export_xlsx(tid: str, user=Depends(get_current_user)):
         headers={"Content-Disposition": f'attachment; filename="{fn}.xlsx"'})
 
 @api.get("/registers/{tid}/export/pdf")
-async def register_export_pdf(tid: str, user=Depends(get_current_user)):
+async def register_export_pdf(tid: str, location: str = "", month: str = "", q: str = "", user=Depends(get_current_user)):
     from reportlab.lib.pagesizes import A4, landscape
     from reportlab.lib.units import mm
     from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
