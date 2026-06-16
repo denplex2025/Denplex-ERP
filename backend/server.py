@@ -578,6 +578,7 @@ class Invoice(BaseModel):
     purchaser_name: Optional[str] = ""
     payment_mode: Optional[str] = ""
     eway_bill_no: Optional[str] = ""
+    invoice_type: Literal["gst", "non_gst", "export"] = "gst"
     payment_terms: Optional[str] = ""       # e.g. "Net 30"
     godown: Optional[str] = ""              # dispatch location (Vatva / Santej)
     terms_text: Optional[str] = ""         # Terms & Conditions body
