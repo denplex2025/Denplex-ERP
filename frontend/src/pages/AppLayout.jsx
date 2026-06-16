@@ -6,7 +6,7 @@ import {
   LayoutDashboard, Boxes, Layers, ClipboardList, FileText,
   ShoppingCart, Receipt, Users, UserPlus, Truck, ShieldCheck,
   FileBox, Settings as SettingsIcon, LogOut, Menu, Calculator, UsersRound, Megaphone, Wrench, ScrollText,
-  ArrowDownToLine, ArrowUpFromLine, Banknote, Undo2, Cog, CalendarRange, Search, Trash2
+  ArrowDownToLine, ArrowUpFromLine, Banknote, Undo2, Cog, CalendarRange, Search, Trash2, SlidersHorizontal
 } from "lucide-react";
 import { useState, useEffect, useRef } from "react";
 import api from "@/lib/api";
@@ -104,6 +104,7 @@ const NAV_GROUPS = [
       { to: "/app/job-cards", label: "Job Cards", icon: FileText, testid: "nav-job-cards" },
       { to: "/app/docs/job-work-out", label: "Job Work Out", icon: Wrench, testid: "nav-job-work-out" },
       { to: "/app/inventory", label: "Inventory", icon: Boxes, testid: "nav-inventory" },
+      { to: "/app/bulk-items", label: "Bulk Item Update", icon: SlidersHorizontal, testid: "nav-bulk-items" },
     ],
   },
   {
