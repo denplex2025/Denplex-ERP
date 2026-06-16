@@ -4638,8 +4638,8 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
     elif style_preset == "modern":
         _margin = 14*mm; _body = 9.0; _title_sz = 22; _company_sz = 14; _border_w = 0.0  # no full borders
         _accent = colors.HexColor("#1E293B")  # near-black accent
-    else:  # standard
-        _margin = 10*mm; _body = 8.5; _title_sz = 18; _company_sz = 13; _border_w = 0.75
+    else:  # standard — kept deliberately light/subtle
+        _margin = 10*mm; _body = 8.0; _title_sz = 15; _company_sz = 12; _border_w = 0.5
         _accent = RED
 
     # Pick fonts: use registered TTF (e.g. DejaVuSans) for proper ₹ rendering
@@ -4693,7 +4693,7 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
             logo_cell = RLImage(logo_path, width=22*mm, height=22*mm)
         except Exception:
             logo_cell = Paragraph("<b>DENPLEX</b>", h2_style)
-    company_lines = [Paragraph(f"<font size=13><b>{company.get('company_name','Denplex Engineering Company')}</b></font>", smallb)]
+    company_lines = [Paragraph(f"<font size=12><b>{company.get('company_name','Denplex Engineering Company')}</b></font>", smallb)]
     if show("show_company_udyam") and company.get("company_udyam"):
         company_lines.append(Spacer(1, 1.5*mm))
         company_lines.append(Paragraph(f"<font size=8 color='#475569'>™ UDYAM REGISTRATION NUMBER - <b>{company['company_udyam']}</b></font>", tiny))
@@ -5123,13 +5123,8 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
     has_bank = show("show_bank_details") and any(company.get(k) for k in ("bank_name","bank_account_no","bank_ifsc","upi_id"))
     has_sig = show("show_signatory_image")
     if has_bank or has_sig:
-        # Optional: move bank/signatory to a new page. Toggle via show_bank_on_new_page.
-        if bool(tpl.get("show_bank_on_new_page", False)):
-            from reportlab.platypus import PageBreak
-            flow.append(PageBreak())
-            # Re-render the company header on page 2
-            flow.append(header_tbl)
-            flow.append(Spacer(1, 3*mm))
+        # Bank/signatory flow inline right after Terms — single-page invoice like the
+        # reference layout. (Previous page-break behaviour removed per user request.)
         # Bank cell with optional QR
         bank_block = [Paragraph("<b>Bank Details:</b>", smallb)]
         # QR
