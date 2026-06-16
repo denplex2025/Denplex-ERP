@@ -6,7 +6,7 @@ import {
   LayoutDashboard, Boxes, Layers, ClipboardList, FileText,
   ShoppingCart, Receipt, Users, UserPlus, Truck, ShieldCheck,
   FileBox, Settings as SettingsIcon, LogOut, Menu, Calculator, UsersRound, Megaphone, Wrench, ScrollText,
-  ArrowDownToLine, ArrowUpFromLine, Banknote, Undo2, Cog, CalendarRange, Search
+  ArrowDownToLine, ArrowUpFromLine, Banknote, Undo2, Cog, CalendarRange, Search, Trash2
 } from "lucide-react";
 import { useState, useEffect, useRef } from "react";
 import api from "@/lib/api";
@@ -143,6 +143,7 @@ const NAV_GROUPS = [
       { to: "/app/users", label: "Users", icon: SettingsIcon, testid: "nav-users" },
       { to: "/app/settings", label: "Settings", icon: Wrench, testid: "nav-settings" },
       { to: "/app/audit", label: "Audit Log", icon: ScrollText, testid: "nav-audit" },
+      { to: "/app/recycle-bin", label: "Recycle Bin", icon: Trash2, testid: "nav-recycle-bin" },
     ],
   },
 ];
