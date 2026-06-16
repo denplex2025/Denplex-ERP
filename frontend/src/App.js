@@ -52,6 +52,7 @@ import Planning from "./pages/Planning";
 import Costing from "./pages/Costing";
 import ISO from "./pages/ISO";
 import RecycleBin from "./pages/RecycleBin";
+import BulkItems from "./pages/BulkItems";
 
 function App() {
   return (
@@ -98,6 +99,7 @@ function App() {
               <Route path="costing" element={<Costing />} />
               <Route path="iso" element={<ISO />} />
               <Route path="recycle-bin" element={<RecycleBin />} />
+              <Route path="bulk-items" element={<BulkItems />} />
               <Route path="scan/:entity/:id" element={<Scan />} />
             </Route>
             <Route path="*" element={<Navigate to="/" replace />} />
