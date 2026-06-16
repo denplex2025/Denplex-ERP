@@ -6,11 +6,60 @@ import {
   LayoutDashboard, Boxes, Layers, ClipboardList, FileText,
   ShoppingCart, Receipt, Users, UserPlus, Truck, ShieldCheck,
   FileBox, Settings as SettingsIcon, LogOut, Menu, Calculator, UsersRound, Megaphone, Wrench, ScrollText,
-  ArrowDownToLine, ArrowUpFromLine, Banknote, Undo2, Cog, CalendarRange
+  ArrowDownToLine, ArrowUpFromLine, Banknote, Undo2, Cog, CalendarRange, Search
 } from "lucide-react";
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
+import api from "@/lib/api";
 import GlobalSpinner from "@/components/erp/GlobalSpinner";
 import FloatingActions from "@/components/erp/FloatingActions";
+
+function GlobalSearch() {
+  const nav = useNavigate();
+  const [q, setQ] = useState("");
+  const [results, setResults] = useState([]);
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const boxRef = useRef(null);
+  useEffect(() => {
+    if (q.trim().length < 2) { setResults([]); return; }
+    setLoading(true);
+    const t = setTimeout(async () => {
+      try { const r = await api.get(`/search?q=${encodeURIComponent(q.trim())}`); setResults(r.data?.results || []); setOpen(true); }
+      catch (e) { /* ignore */ } finally { setLoading(false); }
+    }, 250);
+    return () => clearTimeout(t);
+  }, [q]);
+  useEffect(() => {
+    const h = (e) => { if (boxRef.current && !boxRef.current.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, []);
+  const go = (r) => { setOpen(false); setQ(""); setResults([]); nav(r.route); };
+  return (
+    <div ref={boxRef} className="relative w-full max-w-md">
+      <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+      <input
+        value={q}
+        onChange={(e) => setQ(e.target.value)}
+        onFocus={() => results.length && setOpen(true)}
+        placeholder="Search parts, items, customers, invoices…"
+        className="w-full h-9 pl-9 pr-3 rounded-sm border border-slate-200 bg-slate-50 text-sm focus:bg-white focus:border-red-300 focus:outline-none"
+      />
+      {open && q.trim().length >= 2 && (
+        <div className="absolute z-50 mt-1 w-full bg-white border border-slate-200 rounded-sm shadow-lg max-h-96 overflow-auto">
+          {loading && <div className="px-3 py-2 text-xs text-slate-400">Searching…</div>}
+          {!loading && results.length === 0 && <div className="px-3 py-2 text-xs text-slate-400">No matches for “{q}”</div>}
+          {results.map((r, i) => (
+            <button key={i} onClick={() => go(r)} className="w-full text-left px-3 py-2 hover:bg-slate-50 flex items-center gap-2 border-b border-slate-50 last:border-0">
+              <span className="text-[10px] uppercase tracking-wider text-red-600 font-semibold w-24 shrink-0">{r.type}</span>
+              <span className="flex-1 truncate"><span className="font-medium">{r.label}</span>{r.sub ? <span className="text-slate-400 ml-2 text-xs">{r.sub}</span> : null}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 // Grouped sidebar nav. To add a new department head, append a new group object below.
 const NAV_GROUPS = [
@@ -170,9 +219,12 @@ export default function AppLayout() {
             <a href="mailto:admin@denplex.co?subject=Denplex%20ERP%20licence" className="underline">Upgrade →</a>
           </div>
         )}
-        <div className="lg:hidden sticky top-0 z-30 bg-white border-b border-slate-200 h-14 flex items-center justify-between px-4">
+        <div className="hidden lg:flex sticky top-0 z-30 bg-white/90 backdrop-blur border-b border-slate-200 h-14 items-center px-6 gap-4">
+          <GlobalSearch />
+        </div>
+        <div className="lg:hidden sticky top-0 z-30 bg-white border-b border-slate-200 h-14 flex items-center justify-between px-4 gap-3">
           <Button variant="ghost" size="icon" onClick={() => setOpen(!open)} data-testid="mobile-menu-toggle"><Menu className="h-5 w-5" /></Button>
-          <div className="font-display font-bold tracking-tight">Denplex ERP</div>
+          <div className="flex-1"><GlobalSearch /></div>
           <Button variant="ghost" size="icon" onClick={handleLogout}><LogOut className="h-5 w-5" /></Button>
         </div>
         <div className="p-6 lg:p-8 max-w-[1500px]">
