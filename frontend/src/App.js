@@ -54,6 +54,7 @@ import ISO from "./pages/ISO";
 import RecycleBin from "./pages/RecycleBin";
 import BulkItems from "./pages/BulkItems";
 import Reminders from "./pages/Reminders";
+import InvoiceCreate from "./pages/InvoiceCreate";
 
 function App() {
   return (
@@ -74,6 +75,7 @@ function App() {
               <Route path="quotations" element={<Quotations />} />
               <Route path="purchase-orders" element={<PurchaseOrders />} />
               <Route path="invoices" element={<Invoices />} />
+              <Route path="invoices/new" element={<InvoiceCreate />} />
               <Route path="docs/:kind" element={<DocList />} />
               <Route path="leads" element={<Leads />} />
               <Route path="customers" element={<Customers />} />
