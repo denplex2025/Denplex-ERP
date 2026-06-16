@@ -1680,6 +1680,23 @@ async def update_item(iid: str, it: InventoryItem, user=Depends(get_current_user
     await db.items.update_one({"id": iid}, {"$set": data})
     return {"ok": True}
 
+@api.post("/inventory/items/bulk-update")
+async def bulk_update_items(body: dict, user=Depends(require_roles("admin", "manager"))):
+    """Update many items at once (price / stock / reorder / hsn / gst). Body: {updates:[{id, ...fields}]}."""
+    updates = body.get("updates") or []
+    allowed = {"name", "category", "uom", "unit_cost", "reorder_level", "hsn", "gst_rate", "qty_on_hand"}
+    n = 0
+    for u in updates:
+        iid = u.get("id")
+        if not iid:
+            continue
+        data = {k: v for k, v in u.items() if k in allowed}
+        if not data:
+            continue
+        await db.items.update_one({"id": iid}, {"$set": data})
+        n += 1
+    return {"updated": n}
+
 @api.delete("/inventory/items/{iid}")
 async def del_item(iid: str, user=Depends(require_roles("admin", "manager"))):
     doc = await db.items.find_one({"id": iid}, {"_id": 0})
