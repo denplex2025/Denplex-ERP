@@ -8,7 +8,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { PageHeader, Card, Th, Td, Empty, fmtDate } from "@/components/erp/Primitives";
-import { Plus, Edit, Trash2, ArrowDownToLine, ArrowUpFromLine, RefreshCw, Sparkles, Loader2, QrCode } from "lucide-react";
+import { Plus, Edit, Trash2, ArrowDownToLine, ArrowUpFromLine, RefreshCw, Sparkles, Loader2, QrCode, ArrowLeftRight, MapPin } from "lucide-react";
 import QRView from "@/components/erp/QRView";
 import MaterialStates from "@/components/erp/MaterialStates";
 import { toast } from "sonner";
@@ -23,15 +23,35 @@ export default function Inventory() {
   const [form, setForm] = useState({ uom: "pcs", gst_rate: 18, category: "raw" });
   const [moveOpen, setMoveOpen] = useState(false);
   const [moveForm, setMoveForm] = useState({ type: "in", qty: 0 });
+  const [locations, setLocations] = useState([]);
+  const [locFilter, setLocFilter] = useState("All");
+  const [transferOpen, setTransferOpen] = useState(false);
+  const [transferForm, setTransferForm] = useState({ item_id: "", item_name: "", from_location: "", to_location: "", qty: 0, notes: "" });
   const [scanOpen, setScanOpen] = useState(false);
   const [scanLoading, setScanLoading] = useState(false);
   const [scanResult, setScanResult] = useState(null);
 
   const load = async () => {
-    const [a, b] = await Promise.all([api.get("/inventory/items"), api.get("/inventory/movements")]);
-    setItems(a.data); setMoves(b.data);
+    const [a, b, l] = await Promise.all([api.get("/inventory/items"), api.get("/inventory/movements"), api.get("/inventory/locations").catch(() => ({ data: { locations: [] } }))]);
+    setItems(a.data); setMoves(b.data); setLocations(l.data?.locations || []);
   };
   useEffect(() => { load(); }, []);
+
+  const openTransfer = (it) => {
+    const byLoc = it.qty_by_location || {};
+    const from = locations.find(l => Number(byLoc[l] || 0) > 0) || locations[0] || "";
+    const to = locations.find(l => l !== from) || "";
+    setTransferForm({ item_id: it.id, item_name: it.name, from_location: from, to_location: to, qty: 0, notes: "" });
+    setTransferOpen(true);
+  };
+  const saveTransfer = async () => {
+    try {
+      await api.post("/inventory/transfer", { ...transferForm, qty: Number(transferForm.qty) });
+      toast.success("Stock transferred"); setTransferOpen(false); await load();
+    } catch (e) { toast.error(e?.response?.data?.detail || "Transfer failed"); }
+  };
+  const locTotal = (loc) => items.reduce((s, it) => s + Number((it.qty_by_location || {})[loc] || 0), 0);
+  const visibleItems = locFilter === "All" ? items : items.filter(it => Number((it.qty_by_location || {})[locFilter] || 0) !== 0);
 
   const setF = (k, v) => setForm(p => ({ ...p, [k]: v }));
   const save = async () => {
@@ -125,27 +145,41 @@ export default function Inventory() {
         </TabsList>
 
         <TabsContent value="items">
+          {locations.length > 0 && (
+            <div className="flex items-center gap-1.5 flex-wrap mb-3">
+              <span className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold inline-flex items-center gap-1"><MapPin className="w-3 h-3" /> Location</span>
+              <button onClick={() => setLocFilter("All")} className={`px-2.5 py-1 text-xs rounded-sm font-medium border ${locFilter === "All" ? "bg-red-600 text-white border-red-600" : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50"}`}>All</button>
+              {locations.map(l => (
+                <button key={l} onClick={() => setLocFilter(l)} className={`px-2.5 py-1 text-xs rounded-sm font-medium border ${locFilter === l ? "bg-red-600 text-white border-red-600" : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50"}`}>{l} <span className="opacity-60">· {locTotal(l)}</span></button>
+              ))}
+            </div>
+          )}
           <Card>
-            {items.length === 0 ? <Empty label="No items. Add your first." /> : (
+            {visibleItems.length === 0 ? <Empty label="No items. Add your first." /> : (
               <div className="overflow-x-auto">
                 <table className="w-full">
                   <thead><tr>
-                    <Th>SKU</Th><Th>Name</Th><Th>Category</Th><Th>On Hand</Th><Th>In Process</Th><Th>Reorder</Th><Th>Cost</Th><Th>GST%</Th><Th className="text-right">Actions</Th>
+                    <Th>SKU</Th><Th>Name</Th><Th>Category</Th><Th>On Hand</Th><Th>By Location</Th><Th>In Process</Th><Th>Reorder</Th><Th>Cost</Th><Th className="text-right">Actions</Th>
                   </tr></thead>
                   <tbody>
-                    {items.map(it => (
+                    {visibleItems.map(it => (
                       <tr key={it.id} className="hover:bg-slate-50">
                         <Td><span className="font-mono-tech text-xs">{it.sku}</span></Td>
                         <Td>{it.name}</Td>
                         <Td className="capitalize">{it.category}</Td>
                         <Td><span className={`font-mono-tech ${it.qty_on_hand <= it.reorder_level ? "text-red-700 font-semibold" : ""}`}>{it.qty_on_hand} {it.uom}</span></Td>
+                        <Td>
+                          {Object.entries(it.qty_by_location || {}).filter(([, v]) => Number(v) !== 0).length === 0
+                            ? <span className="text-slate-300 text-xs">—</span>
+                            : <span className="flex flex-wrap gap-1">{Object.entries(it.qty_by_location || {}).filter(([, v]) => Number(v) !== 0).map(([l, v]) => <span key={l} className="inline-block px-1.5 py-0.5 rounded-sm text-[11px] font-medium bg-slate-100 text-slate-700">{l} {v}</span>)}</span>}
+                        </Td>
                         <Td><span className="font-mono-tech text-amber-700">{it.qty_in_process || 0}</span></Td>
                         <Td><span className="font-mono-tech">{it.reorder_level}</span></Td>
                         <Td>₹{it.unit_cost}</Td>
-                        <Td>{it.gst_rate}%</Td>
                         <Td className="text-right whitespace-nowrap">
                           <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => openMove(it, "in")} title="Stock In" data-testid={`stock-in-${it.id}`}><ArrowDownToLine className="h-4 w-4 text-emerald-700" /></Button>
                           <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => openMove(it, "out")} title="Stock Out" data-testid={`stock-out-${it.id}`}><ArrowUpFromLine className="h-4 w-4 text-red-700" /></Button>
+                          <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => openTransfer(it)} title="Transfer between locations" disabled={locations.length < 2}><ArrowLeftRight className="h-4 w-4 text-blue-600" /></Button>
                           <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => openMove(it, "adjust")} title="Adjust"><RefreshCw className="h-4 w-4 text-red-600" /></Button>
                           <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => setQrItem({ entity: "inventory", id: it.id, code: it.sku, label: it.name })} title="QR code"><QrCode className="h-4 w-4 text-slate-600" /></Button>
                           <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => { setEditing(it); setForm(it); setOpen(true); }}><Edit className="h-4 w-4" /></Button>
@@ -164,7 +198,7 @@ export default function Inventory() {
           <Card>
             {moves.length === 0 ? <Empty label="No movements yet." /> : (
               <table className="w-full">
-                <thead><tr><Th>Date</Th><Th>Item</Th><Th>Type</Th><Th>Qty</Th><Th>Ref</Th><Th>By</Th><Th>Notes</Th></tr></thead>
+                <thead><tr><Th>Date</Th><Th>Item</Th><Th>Type</Th><Th>Qty</Th><Th>Location</Th><Th>Ref</Th><Th>By</Th><Th>Notes</Th></tr></thead>
                 <tbody>
                   {moves.map(m => (
                     <tr key={m.id}>
@@ -172,6 +206,7 @@ export default function Inventory() {
                       <Td>{m.item_name} <span className="text-xs text-slate-500 font-mono-tech">({m.item_sku})</span></Td>
                       <Td className="uppercase text-xs font-semibold">{m.type}</Td>
                       <Td><span className="font-mono-tech">{m.qty}</span></Td>
+                      <Td className="text-xs">{m.type === "transfer" ? `${m.location} → ${m.to_location}` : (m.location || "—")}</Td>
                       <Td className="font-mono-tech text-xs">{m.ref || "—"}</Td>
                       <Td>{m.by_user}</Td>
                       <Td className="text-slate-500">{m.notes}</Td>
@@ -237,6 +272,14 @@ export default function Inventory() {
                 </SelectContent>
               </Select>
             </Field>
+            {locations.length > 0 && (
+              <Field label="Location">
+                <Select value={moveForm.location || ""} onValueChange={v=>setMoveForm(p=>({...p, location: v}))}>
+                  <SelectTrigger className="rounded-sm"><SelectValue placeholder="(no specific location)" /></SelectTrigger>
+                  <SelectContent>{locations.map(l => <SelectItem key={l} value={l}>{l}</SelectItem>)}</SelectContent>
+                </Select>
+              </Field>
+            )}
             <Field label="Quantity"><Input type="number" value={moveForm.qty} onChange={e=>setMoveForm(p=>({...p, qty: e.target.value}))} data-testid="move-qty" /></Field>
             <Field label="Reference"><Input value={moveForm.ref || ""} onChange={e=>setMoveForm(p=>({...p, ref: e.target.value}))} /></Field>
             <Field label="Notes"><Textarea value={moveForm.notes || ""} onChange={e=>setMoveForm(p=>({...p, notes: e.target.value}))} rows={2} /></Field>
@@ -244,6 +287,35 @@ export default function Inventory() {
           <DialogFooter>
             <Button variant="outline" className="rounded-sm" onClick={() => setMoveOpen(false)}>Cancel</Button>
             <Button onClick={saveMove} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="save-move-button">Save</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Transfer between locations */}
+      <Dialog open={transferOpen} onOpenChange={setTransferOpen}>
+        <DialogContent className="rounded-sm max-w-md">
+          <DialogHeader><DialogTitle className="font-display"><ArrowLeftRight className="inline h-4 w-4 mr-1 text-blue-600" /> Transfer — {transferForm.item_name}</DialogTitle></DialogHeader>
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="From">
+                <Select value={transferForm.from_location} onValueChange={v=>setTransferForm(p=>({...p, from_location: v}))}>
+                  <SelectTrigger className="rounded-sm"><SelectValue /></SelectTrigger>
+                  <SelectContent>{locations.map(l => <SelectItem key={l} value={l}>{l}</SelectItem>)}</SelectContent>
+                </Select>
+              </Field>
+              <Field label="To">
+                <Select value={transferForm.to_location} onValueChange={v=>setTransferForm(p=>({...p, to_location: v}))}>
+                  <SelectTrigger className="rounded-sm"><SelectValue /></SelectTrigger>
+                  <SelectContent>{locations.filter(l => l !== transferForm.from_location).map(l => <SelectItem key={l} value={l}>{l}</SelectItem>)}</SelectContent>
+                </Select>
+              </Field>
+            </div>
+            <Field label="Quantity"><Input type="number" value={transferForm.qty} onChange={e=>setTransferForm(p=>({...p, qty: e.target.value}))} /></Field>
+            <Field label="Notes"><Textarea value={transferForm.notes || ""} onChange={e=>setTransferForm(p=>({...p, notes: e.target.value}))} rows={2} /></Field>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" className="rounded-sm" onClick={() => setTransferOpen(false)}>Cancel</Button>
+            <Button onClick={saveTransfer} className="rounded-sm bg-red-600 hover:bg-red-700">Transfer</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
