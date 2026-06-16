@@ -9,10 +9,12 @@
   --bg: #FFFFFF;
   --surface: #FAFAFA;
   --surface-alt: #F4F4F5;
-  --border: #E5E5E5;
   --text-primary: #0A0A0A;
   --text-secondary: #525252;
-  --primary: #DC2626;
+  /* NOTE: --primary and --border are intentionally NOT redefined here.
+     Tailwind expects them as HSL components (see @layer base below) and uses
+     them via hsl(var(--primary)); a hex value here breaks bg-primary/border
+     (renders transparent) across the whole app. */
   --primary-hover: #B91C1C;
   --danger: #DC2626;
   --warning: #D97706;
