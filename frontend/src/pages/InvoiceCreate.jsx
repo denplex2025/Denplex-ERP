@@ -24,6 +24,7 @@ export default function InvoiceCreate() {
   const [locations, setLocations] = useState([]);
   const [saving, setSaving] = useState(false);
   const [f, setF] = useState({
+    invoice_type: "gst",
     payment_mode: "Credit", godown: "", code: "", date: today, payment_terms: "30", due_date: addDays(today, 30),
     customer_id: "", customer_name: "", customer_gstin: "", place_of_supply: "", is_interstate: false,
     purchaser_name: "", po_number: "", po_date: "", eway_bill_no: "",
@@ -65,12 +66,13 @@ export default function InvoiceCreate() {
     amt -= Number(l.discount_amount || 0);
     return amt < 0 ? 0 : amt;
   };
+  const taxable = f.invoice_type === "gst";
   const totals = useMemo(() => {
     let subtotal = 0, gst = 0;
-    for (const l of lines) { const a = lineAmount(l); subtotal += a; gst += a * Number(l.gst_rate || 0) / 100; }
+    for (const l of lines) { const a = lineAmount(l); subtotal += a; if (taxable) gst += a * Number(l.gst_rate || 0) / 100; }
     const grand = subtotal + gst + Number(f.round_off || 0) - Number(f.tds || 0);
     return { subtotal, gst, cgst: f.is_interstate ? 0 : gst / 2, sgst: f.is_interstate ? 0 : gst / 2, igst: f.is_interstate ? gst : 0, grand };
-  }, [lines, f.round_off, f.tds, f.is_interstate]);
+  }, [lines, f.round_off, f.tds, f.is_interstate, taxable]);
 
   const save = async (print) => {
     if (!f.customer_id) { toast.error("Select a customer"); return; }
@@ -85,7 +87,7 @@ export default function InvoiceCreate() {
           description: l.description, item_code: l.item_code, hsn: l.hsn,
           qty: Number(l.qty || 0), unit: l.unit, rate: Number(l.rate || 0),
           discount_pct: Number(l.discount_pct || 0), discount_amount: Number(l.discount_amount || 0),
-          gst_rate: Number(l.gst_rate || 0),
+          gst_rate: taxable ? Number(l.gst_rate || 0) : 0,
         })),
       };
       const r = await api.post("/invoices", payload);
@@ -104,6 +106,11 @@ export default function InvoiceCreate() {
           <div className="ml-3 inline-flex rounded-sm border border-slate-200 overflow-hidden text-xs">
             {["Credit", "Cash"].map(m => (
               <button key={m} onClick={() => set("payment_mode", m)} className={`px-3 py-1.5 ${f.payment_mode === m ? "bg-red-600 text-white" : "bg-white text-slate-600"}`}>{m}</button>
+            ))}
+          </div>
+          <div className="inline-flex rounded-sm border border-slate-200 overflow-hidden text-xs">
+            {[["gst", "GST"], ["non_gst", "Non-GST"], ["export", "Export"]].map(([v, lbl]) => (
+              <button key={v} onClick={() => set("invoice_type", v)} className={`px-3 py-1.5 ${f.invoice_type === v ? "bg-slate-800 text-white" : "bg-white text-slate-600"}`}>{lbl}</button>
             ))}
           </div>
         </div>
@@ -134,11 +141,15 @@ export default function InvoiceCreate() {
         </Fld>
         <Fld label="Due Date"><Input type="date" value={f.due_date} onChange={e => set("due_date", e.target.value)} /></Fld>
         <Fld label="State of Supply"><Input value={f.place_of_supply} onChange={e => set("place_of_supply", e.target.value)} placeholder="e.g. Gujarat" /></Fld>
-        <Fld label="GST Type">
-          <select value={f.is_interstate ? "inter" : "intra"} onChange={e => set("is_interstate", e.target.value === "inter")} className="w-full h-9 text-sm border border-slate-200 rounded-sm px-2 bg-white">
-            <option value="intra">Intra-state (CGST+SGST)</option><option value="inter">Inter-state (IGST)</option>
-          </select>
-        </Fld>
+        {taxable ? (
+          <Fld label="GST Type">
+            <select value={f.is_interstate ? "inter" : "intra"} onChange={e => set("is_interstate", e.target.value === "inter")} className="w-full h-9 text-sm border border-slate-200 rounded-sm px-2 bg-white">
+              <option value="intra">Intra-state (CGST+SGST)</option><option value="inter">Inter-state (IGST)</option>
+            </select>
+          </Fld>
+        ) : (
+          <Fld label="Invoice Type"><Input value={f.invoice_type === "export" ? "Export (no GST)" : "Non-GST"} disabled /></Fld>
+        )}
 
         <Fld label="PO No"><Input value={f.po_number} onChange={e => set("po_number", e.target.value)} /></Fld>
         <Fld label="PO Date"><Input type="date" value={f.po_date} onChange={e => set("po_date", e.target.value)} /></Fld>
@@ -179,7 +190,7 @@ export default function InvoiceCreate() {
         <Fld label="Terms & Conditions"><Textarea rows={6} value={f.terms_text} onChange={e => set("terms_text", e.target.value)} /></Fld>
         <div className="border border-slate-200 rounded-md p-4 space-y-2 text-sm h-fit">
           <div className="flex justify-between"><span className="text-slate-500">Subtotal</span><span className="font-mono-tech">{inr(totals.subtotal)}</span></div>
-          {f.is_interstate
+          {!taxable ? null : f.is_interstate
             ? <div className="flex justify-between"><span className="text-slate-500">IGST</span><span className="font-mono-tech">{inr(totals.igst)}</span></div>
             : <><div className="flex justify-between"><span className="text-slate-500">CGST</span><span className="font-mono-tech">{inr(totals.cgst)}</span></div><div className="flex justify-between"><span className="text-slate-500">SGST</span><span className="font-mono-tech">{inr(totals.sgst)}</span></div></>}
           <div className="flex justify-between items-center"><span className="text-slate-500">Round Off</span><Input type="number" value={f.round_off} onChange={e => set("round_off", e.target.value)} className="h-8 w-24 text-right" /></div>
