@@ -78,6 +78,12 @@ def _ensure_font_files_on_disk():
 def _try_register_pdf_fonts():
     global _PDF_FONT_REGULAR, _PDF_FONT_BOLD
     candidates = [
+        # Liberation Sans is metric-compatible with Arial/Helvetica (matches the Vyapar look)
+        # and includes the ₹ glyph. Preferred when present; otherwise fall back to DejaVu.
+        ("LiberationSans", "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+         "LiberationSans-Bold", "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"),
+        ("LiberationSans", "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+         "LiberationSans-Bold", "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf"),
         ("DejaVuSans", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
          "DejaVuSans-Bold", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
         ("DejaVuSans", str(Path(__file__).parent / "fonts" / "DejaVuSans.ttf"),
@@ -4752,6 +4758,8 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
         meta_main.append(Paragraph(f"Due Date: <b>{doc_meta['due_date']}</b>", smallb))
     if show("show_place_of_supply") and doc_meta.get("place_of_supply"):
         meta_main.append(Paragraph(f"Place of Supply: <b>{doc_meta['place_of_supply']}</b>", smallb))
+    if doc_meta.get("eway_bill_no"):
+        meta_main.append(Paragraph(f"E-Way Bill No: <b>{doc_meta['eway_bill_no']}</b>", smallb))
     meta_po = []
     if show("show_po_meta"):
         if doc_meta.get("po_date"):
@@ -4913,8 +4921,8 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
         ("GRID", (0, 0), (-1, -1), 0.4, BORDER),
         ("LEFTPADDING", (0, 0), (-1, -1), 4),
         ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-        ("TOPPADDING", (0, 0), (-1, -1), 5),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
         # Total row
         ("BACKGROUND", (0, -1), (-1, -1), LIGHTGREY),
         ("FONTNAME", (0, -1), (-1, -1), _PDF_FONT_BOLD),
@@ -5086,22 +5094,8 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
         else:
             cells_l = None
             cells_r = None
-            if cells_l is None:
-                pass  # nothing to render
-            elif not cells_r:
-                # Single-column layout
-                dt_tbl = Table([[cells_l]], colWidths=[190*mm])
-                dt_tbl.setStyle(TableStyle([
-                    ("VALIGN", (0,0), (-1,-1), "TOP"),
-                    ("BOX", (0,0), (-1,-1), 0.5, BORDER),
-                    ("LEFTPADDING", (0,0), (-1,-1), 6),
-                    ("RIGHTPADDING", (0,0), (-1,-1), 6),
-                    ("TOPPADDING", (0,0), (-1,-1), 5),
-                    ("BOTTOMPADDING", (0,0), (-1,-1), 5),
-                ]))
-                flow.append(Spacer(1, 2*mm))
-                flow.append(dt_tbl)
-            else:
+        if cells_l is not None:
+            if cells_r:
                 dt_tbl = Table([[cells_l, cells_r]], colWidths=[95*mm, 95*mm])
                 dt_tbl.setStyle(TableStyle([
                     ("VALIGN", (0,0), (-1,-1), "TOP"),
@@ -5109,18 +5103,28 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
                     ("LINEAFTER", (0,0), (0,-1), 0.4, BORDER),
                     ("LEFTPADDING", (0,0), (-1,-1), 6),
                     ("RIGHTPADDING", (0,0), (-1,-1), 6),
-                    ("TOPPADDING", (0,0), (-1,-1), 5),
-                    ("BOTTOMPADDING", (0,0), (-1,-1), 5),
+                    ("TOPPADDING", (0,0), (-1,-1), 4),
+                    ("BOTTOMPADDING", (0,0), (-1,-1), 4),
                 ]))
-                flow.append(Spacer(1, 2*mm))
-                flow.append(dt_tbl)
+            else:
+                dt_tbl = Table([[cells_l]], colWidths=[190*mm])
+                dt_tbl.setStyle(TableStyle([
+                    ("VALIGN", (0,0), (-1,-1), "TOP"),
+                    ("BOX", (0,0), (-1,-1), 0.5, BORDER),
+                    ("LEFTPADDING", (0,0), (-1,-1), 6),
+                    ("RIGHTPADDING", (0,0), (-1,-1), 6),
+                    ("TOPPADDING", (0,0), (-1,-1), 4),
+                    ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+                ]))
+            flow.append(Spacer(1, 2*mm))
+            flow.append(dt_tbl)
 
     # ---------- Bank details + QR + Signatory (optional page break) ----------
     has_bank = show("show_bank_details") and any(company.get(k) for k in ("bank_name","bank_account_no","bank_ifsc","upi_id"))
     has_sig = show("show_signatory_image")
     if has_bank or has_sig:
         # Optional: move bank/signatory to a new page. Toggle via show_bank_on_new_page.
-        if bool(tpl.get("show_bank_on_new_page", True)):
+        if bool(tpl.get("show_bank_on_new_page", False)):
             from reportlab.platypus import PageBreak
             flow.append(PageBreak())
             # Re-render the company header on page 2
@@ -5230,13 +5234,14 @@ async def invoice_pdf(iid: str, copy: Optional[str] = "ORIGINAL FOR RECIPIENT", 
         "po_number": inv.get("po_number",""),
         "po_date": inv.get("po_date",""),
         "purchaser_name": inv.get("purchaser_name",""),
+        "eway_bill_no": inv.get("eway_bill_no",""),
         "is_interstate": bool(inv.get("is_interstate")),
     }
     pdf = _build_doc_pdf("Tax Invoice", inv.get("code", ""), "Bill To", inv.get("customer_name", ""), str(inv.get("date", ""))[:10],
                          inv.get("lines", []),
                          {"subtotal": inv.get("subtotal", 0), "total": inv.get("total", 0), "gst_total": inv.get("cgst",0)+inv.get("sgst",0)+inv.get("igst",0)},
                          gst_breakup={"cgst": inv.get("cgst", 0), "sgst": inv.get("sgst", 0), "igst": inv.get("igst", 0)},
-                         company=company, notes=inv.get("notes", ""), tpl=tpl,
+                         company=company, notes=(inv.get("terms_text") or inv.get("notes", "")), tpl=tpl,
                          party_extra=party_extra, ship_to=ship_to, doc_meta=doc_meta,
                          copy_label=copy or "ORIGINAL FOR RECIPIENT",
                          bill_from=bill_from, ship_from=ship_from)
