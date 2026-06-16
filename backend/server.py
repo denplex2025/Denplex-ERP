@@ -577,6 +577,12 @@ class Invoice(BaseModel):
     po_date: Optional[str] = ""
     purchaser_name: Optional[str] = ""
     payment_mode: Optional[str] = ""
+    eway_bill_no: Optional[str] = ""
+    payment_terms: Optional[str] = ""       # e.g. "Net 30"
+    godown: Optional[str] = ""              # dispatch location (Vatva / Santej)
+    terms_text: Optional[str] = ""         # Terms & Conditions body
+    round_off: float = 0
+    tds: float = 0
     lines: List[InvoiceLine] = []
     subtotal: float = 0
     cgst: float = 0
@@ -2610,21 +2616,27 @@ async def del_po(pid: str, user=Depends(require_roles("admin", "manager"))):
     return {"ok": True}
 
 # ---------------- Invoices ----------------
-def compute_invoice_totals(lines: List[Dict[str, Any]], interstate: bool) -> Dict[str, float]:
+def compute_invoice_totals(lines: List[Dict[str, Any]], interstate: bool, round_off: float = 0, tds: float = 0) -> Dict[str, float]:
     subtotal = 0.0; gst = 0.0
     for l in lines:
         amt = float(l.get("qty", 0)) * float(l.get("rate", 0))
+        # per-line discount: percentage first, then a flat amount
+        amt -= amt * float(l.get("discount_pct", 0) or 0) / 100.0
+        amt -= float(l.get("discount_amount", 0) or 0)
+        if amt < 0:
+            amt = 0.0
         g = amt * float(l.get("gst_rate", 0)) / 100.0
         subtotal += amt; gst += g
+    total = subtotal + gst + float(round_off or 0) - float(tds or 0)
     if interstate:
-        return {"subtotal": round(subtotal, 2), "cgst": 0.0, "sgst": 0.0, "igst": round(gst, 2), "total": round(subtotal + gst, 2)}
-    return {"subtotal": round(subtotal, 2), "cgst": round(gst/2, 2), "sgst": round(gst/2, 2), "igst": 0.0, "total": round(subtotal + gst, 2)}
+        return {"subtotal": round(subtotal, 2), "cgst": 0.0, "sgst": 0.0, "igst": round(gst, 2), "total": round(total, 2)}
+    return {"subtotal": round(subtotal, 2), "cgst": round(gst/2, 2), "sgst": round(gst/2, 2), "igst": 0.0, "total": round(total, 2)}
 
 @api.post("/invoices")
 async def create_invoice(inv: Invoice, user=Depends(get_current_user)):
     doc = inv.model_dump()
-    doc["code"] = await gen_code("INV", "invoice")
-    doc.update(compute_invoice_totals(doc["lines"], doc.get("is_interstate", False)))
+    doc["code"] = (inv.code or "").strip() or await gen_code("INV", "invoice")
+    doc.update(compute_invoice_totals(doc["lines"], doc.get("is_interstate", False), doc.get("round_off", 0), doc.get("tds", 0)))
     await db.invoices.insert_one(doc)
     return serialize(doc)
 
