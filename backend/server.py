@@ -4623,6 +4623,7 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
     doc_meta = doc_meta or {}
     company = company or {}
     is_interstate = bool((doc_meta or {}).get("is_interstate")) or bool(gst_breakup and gst_breakup.get("igst"))
+    _taxable_doc = ((doc_meta or {}).get("invoice_type", "gst") == "gst")   # non_gst / export → no GST blocks
 
     RED = colors.HexColor("#DC2626")
     BLACK = colors.HexColor("#0A0A0A")
@@ -4933,7 +4934,7 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
 
     # ---------- Tax Summary + Totals sidebar ----------
     bottom_left_blocks = []
-    if show("show_tax_summary") and (lines or []):
+    if show("show_tax_summary") and (lines or []) and _taxable_doc:
         rows = _hsn_tax_summary(lines or [], is_interstate)
         if rows:
             if is_interstate:
@@ -4994,7 +4995,9 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
         if total_discount:
             sd.append(["Discount", f"₹ {total_discount:,.2f}"])
         _split_tax = bool(tpl.get("show_split_tax_in_sidebar"))  # default off (combined Tax line)
-        if _split_tax:
+        if not _taxable_doc:
+            pass  # non-GST / export invoice: no tax line in totals
+        elif _split_tax:
             if is_interstate:
                 sd.append(["IGST", f"₹ {(gst_breakup or {}).get('igst', total_gst):,.2f}"])
             else:
@@ -5231,8 +5234,11 @@ async def invoice_pdf(iid: str, copy: Optional[str] = "ORIGINAL FOR RECIPIENT", 
         "purchaser_name": inv.get("purchaser_name",""),
         "eway_bill_no": inv.get("eway_bill_no",""),
         "is_interstate": bool(inv.get("is_interstate")),
+        "invoice_type": inv.get("invoice_type", "gst"),
     }
-    pdf = _build_doc_pdf("Tax Invoice", inv.get("code", ""), "Bill To", inv.get("customer_name", ""), str(inv.get("date", ""))[:10],
+    _itype = inv.get("invoice_type", "gst")
+    _doc_title = "Export Invoice" if _itype == "export" else ("Bill of Supply" if _itype == "non_gst" else "Tax Invoice")
+    pdf = _build_doc_pdf(_doc_title, inv.get("code", ""), "Bill To", inv.get("customer_name", ""), str(inv.get("date", ""))[:10],
                          inv.get("lines", []),
                          {"subtotal": inv.get("subtotal", 0), "total": inv.get("total", 0), "gst_total": inv.get("cgst",0)+inv.get("sgst",0)+inv.get("igst",0)},
                          gst_breakup={"cgst": inv.get("cgst", 0), "sgst": inv.get("sgst", 0), "igst": inv.get("igst", 0)},
