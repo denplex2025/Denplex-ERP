@@ -527,8 +527,13 @@ class Quotation(BaseModel):
 
 class POLine(BaseModel):
     description: str
+    item_code: Optional[str] = ""
+    hsn: Optional[str] = ""
     qty: float
+    unit: Optional[str] = "Nos"
     rate: float
+    discount_pct: float = 0.0
+    discount_amount: float = 0.0
     gst_rate: float = 18.0
 
 class PurchaseOrder(BaseModel):
@@ -537,8 +542,14 @@ class PurchaseOrder(BaseModel):
     code: Optional[str] = None
     supplier_id: str
     supplier_name: str
+    supplier_gstin: Optional[str] = ""
     date: str = Field(default_factory=now_iso)
     delivery_date: Optional[str] = ""
+    reference: Optional[str] = ""
+    place_of_supply: Optional[str] = ""
+    is_interstate: bool = False
+    terms_text: Optional[str] = ""
+    round_off: float = 0
     lines: List[POLine] = []
     subtotal: float = 0
     gst_total: float = 0
@@ -2262,13 +2273,18 @@ async def seed_operations_from_part(wid: str, user=Depends(get_current_user)):
 
 
 # ---------------- Helper: totals ----------------
-def compute_totals(lines: List[Dict[str, Any]]) -> Dict[str, float]:
+def compute_totals(lines: List[Dict[str, Any]], round_off: float = 0) -> Dict[str, float]:
     subtotal = 0.0; gst_total = 0.0
     for l in lines:
         amt = float(l.get("qty", 0)) * float(l.get("rate", 0))
+        amt -= amt * float(l.get("discount_pct", 0) or 0) / 100.0
+        amt -= float(l.get("discount_amount", 0) or 0)
+        if amt < 0:
+            amt = 0.0
         gst = amt * float(l.get("gst_rate", 0)) / 100.0
         subtotal += amt; gst_total += gst
-    return {"subtotal": round(subtotal, 2), "gst_total": round(gst_total, 2), "total": round(subtotal + gst_total, 2)}
+    return {"subtotal": round(subtotal, 2), "gst_total": round(gst_total, 2),
+            "total": round(subtotal + gst_total + float(round_off or 0), 2)}
 
 # ---------------- Quotations ----------------
 class QuoteEstimateIn(BaseModel):
@@ -2599,8 +2615,8 @@ async def del_quote(qid: str, user=Depends(get_current_user)):
 @api.post("/purchase-orders")
 async def create_po(p: PurchaseOrder, user=Depends(get_current_user)):
     doc = p.model_dump()
-    doc["code"] = await gen_code("PO", "po")
-    t = compute_totals(doc["lines"]); doc.update(t)
+    doc["code"] = (p.code or "").strip() or await gen_code("PO", "po")
+    t = compute_totals(doc["lines"], doc.get("round_off", 0)); doc.update(t)
     await db.purchase_orders.insert_one(doc)
     return serialize(doc)
 
