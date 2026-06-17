@@ -56,6 +56,7 @@ import BulkItems from "./pages/BulkItems";
 import Reminders from "./pages/Reminders";
 import InvoiceCreate from "./pages/InvoiceCreate";
 import PurchaseOrderCreate from "./pages/PurchaseOrderCreate";
+import EwayBillForm from "./pages/EwayBillForm";
 
 function App() {
   return (
@@ -78,6 +79,7 @@ function App() {
               <Route path="purchase-orders/new" element={<PurchaseOrderCreate />} />
               <Route path="invoices" element={<Invoices />} />
               <Route path="invoices/new" element={<InvoiceCreate />} />
+              <Route path="invoices/:id/eway" element={<EwayBillForm />} />
               <Route path="docs/:kind" element={<DocList />} />
               <Route path="leads" element={<Leads />} />
               <Route path="customers" element={<Customers />} />
