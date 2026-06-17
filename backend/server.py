@@ -595,6 +595,11 @@ class Invoice(BaseModel):
     purchaser_name: Optional[str] = ""
     payment_mode: Optional[str] = ""
     eway_bill_no: Optional[str] = ""
+    eway_generated_at: Optional[str] = ""      # date the e-way bill was generated
+    eway_distance_km: float = 0
+    eway_over_dimensional: bool = False
+    eway_valid_until: Optional[str] = ""        # auto-computed: generated + days (1 day / 200km, ODC 1/20)
+    eway_details: dict = Field(default_factory=dict)   # full NIC form payload (dispatch/ship/transport/Part-B/value)
     invoice_type: Literal["gst", "non_gst", "export"] = "gst"
     payment_terms: Optional[str] = ""       # e.g. "Net 30"
     godown: Optional[str] = ""              # dispatch location (Vatva / Santej)
@@ -2657,9 +2662,20 @@ def compute_invoice_totals(lines: List[Dict[str, Any]], interstate: bool, round_
 
 @api.post("/invoices")
 async def create_invoice(inv: Invoice, user=Depends(get_current_user)):
+    from datetime import timedelta
     doc = inv.model_dump()
     doc["code"] = (inv.code or "").strip() or await gen_code("INV", "invoice")
     doc.update(compute_invoice_totals(doc["lines"], doc.get("is_interstate", False), doc.get("round_off", 0), doc.get("tds", 0)))
+    # If an e-way bill number is entered at creation, compute its validity window.
+    if doc.get("eway_bill_no") and not doc.get("eway_valid_until"):
+        gen = (doc.get("eway_generated_at") or str(doc.get("date", ""))[:10] or datetime.utcnow().date().isoformat())[:10]
+        try:
+            gen_d = datetime.strptime(gen, "%Y-%m-%d").date()
+        except Exception:
+            gen_d = datetime.utcnow().date(); gen = gen_d.isoformat()
+        days = _eway_validity_days(doc.get("eway_distance_km", 0), doc.get("eway_over_dimensional", False))
+        doc["eway_generated_at"] = gen
+        doc["eway_valid_until"] = (gen_d + timedelta(days=days)).isoformat()
     await db.invoices.insert_one(doc)
     return serialize(doc)
 
@@ -2667,10 +2683,66 @@ async def create_invoice(inv: Invoice, user=Depends(get_current_user)):
 async def list_invoices(user=Depends(get_current_user)):
     return await list_collection(db.invoices)
 
+def _eway_validity_days(distance_km: float, over_dimensional: bool = False) -> int:
+    """E-way bill validity: 1 day per 200 km (normal cargo), 1 day per 20 km (over-dimensional). Min 1 day."""
+    import math
+    per = 20 if over_dimensional else 200
+    dist = float(distance_km or 0)
+    return max(1, math.ceil(dist / per)) if dist > 0 else 1
+
+def _eway_edit_locked(inv: Dict[str, Any]) -> bool:
+    """True when an invoice carries an e-way bill whose validity period has ended → editing is locked."""
+    vu = (inv or {}).get("eway_valid_until")
+    if (inv or {}).get("eway_bill_no") and vu:
+        try:
+            return datetime.strptime(str(vu)[:10], "%Y-%m-%d").date() < datetime.utcnow().date()
+        except Exception:
+            return False
+    return False
+
+class EwayBillIn(BaseModel):
+    eway_bill_no: Optional[str] = ""
+    distance_km: float = 0
+    generated_at: Optional[str] = ""           # ISO date; defaults to today
+    over_dimensional: bool = False
+    details: dict = Field(default_factory=dict)   # full NIC form: dispatch/ship/transport/Part-B/value
+
+@api.post("/invoices/{iid}/eway-bill")
+async def record_eway_bill(iid: str, body: EwayBillIn, user=Depends(get_current_user)):
+    """Record an e-way bill (and its full NIC form data) against an invoice + auto-compute validity.
+    NOTE: actually filing to the government NIC system needs a GSP API connection; until then this
+    captures the prepared payload and the number you generate on the NIC portal."""
+    from datetime import timedelta
+    inv = await db.invoices.find_one({"id": iid}, {"_id": 0})
+    if not inv:
+        raise HTTPException(404, "Invoice not found")
+    gen = (body.generated_at or datetime.utcnow().date().isoformat())[:10]
+    try:
+        gen_d = datetime.strptime(gen, "%Y-%m-%d").date()
+    except Exception:
+        gen_d = datetime.utcnow().date(); gen = gen_d.isoformat()
+    days = _eway_validity_days(body.distance_km, body.over_dimensional)
+    valid_until = (gen_d + timedelta(days=days)).isoformat()
+    upd = {"eway_bill_no": (body.eway_bill_no or "").strip(), "eway_generated_at": gen,
+           "eway_distance_km": float(body.distance_km or 0), "eway_over_dimensional": bool(body.over_dimensional),
+           "eway_valid_until": valid_until, "eway_details": body.details or {}}
+    await db.invoices.update_one({"id": iid}, {"$set": upd})
+    return {"ok": True, "valid_days": days, **upd}
+
+@api.get("/invoices/{iid}")
+async def get_invoice(iid: str, user=Depends(get_current_user)):
+    inv = await db.invoices.find_one({"id": iid}, {"_id": 0})
+    if not inv:
+        raise HTTPException(404, "Invoice not found")
+    return inv
+
 @api.put("/invoices/{iid}")
 async def update_invoice(iid: str, inv: Invoice, user=Depends(get_current_user)):
+    existing = await db.invoices.find_one({"id": iid}, {"_id": 0})
+    if existing and _eway_edit_locked(existing):
+        raise HTTPException(423, "Invoice locked: its e-way bill validity period has ended, so it can no longer be edited.")
     data = inv.model_dump(); data.pop("id", None); data.pop("created_at", None)
-    data.update(compute_invoice_totals(data["lines"], data.get("is_interstate", False)))
+    data.update(compute_invoice_totals(data["lines"], data.get("is_interstate", False), data.get("round_off", 0), data.get("tds", 0)))
     await db.invoices.update_one({"id": iid}, {"$set": data})
     return {"ok": True}
 
