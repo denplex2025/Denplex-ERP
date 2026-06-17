@@ -27,7 +27,7 @@ export default function InvoiceCreate() {
     invoice_type: "gst",
     payment_mode: "Credit", godown: "", code: "", date: today, payment_terms: "30", due_date: addDays(today, 30),
     customer_id: "", customer_name: "", customer_gstin: "", place_of_supply: "", is_interstate: false,
-    purchaser_name: "", po_number: "", po_date: "", eway_bill_no: "",
+    purchaser_name: "", po_number: "", po_date: "", eway_bill_no: "", eway_distance_km: 0,
     terms_text: DEFAULT_TC, round_off: 0, tds: 0, notes: "",
   });
   const [lines, setLines] = useState([blankLine()]);
@@ -74,7 +74,7 @@ export default function InvoiceCreate() {
     return { subtotal, gst, cgst: f.is_interstate ? 0 : gst / 2, sgst: f.is_interstate ? 0 : gst / 2, igst: f.is_interstate ? gst : 0, grand };
   }, [lines, f.round_off, f.tds, f.is_interstate, taxable]);
 
-  const save = async (print) => {
+  const save = async (goEway) => {
     if (!f.customer_id) { toast.error("Select a customer"); return; }
     if (!lines.some(l => (l.description || "").trim())) { toast.error("Add at least one item"); return; }
     setSaving(true);
@@ -82,6 +82,7 @@ export default function InvoiceCreate() {
       const payload = {
         ...f,
         round_off: Number(f.round_off || 0), tds: Number(f.tds || 0),
+        eway_distance_km: Number(f.eway_distance_km || 0),
         status: "sent",
         lines: lines.filter(l => (l.description || "").trim()).map(l => ({
           description: l.description, item_code: l.item_code, hsn: l.hsn,
@@ -92,7 +93,8 @@ export default function InvoiceCreate() {
       };
       const r = await api.post("/invoices", payload);
       toast.success(`Invoice ${r.data?.code || ""} saved`);
-      navg("/app/invoices");
+      if (goEway && r.data?.id) navg(`/app/invoices/${r.data.id}/eway`);
+      else navg("/app/invoices");
     } catch (e) { toast.error(e?.response?.data?.detail || "Could not save invoice"); }
     setSaving(false);
   };
@@ -154,6 +156,7 @@ export default function InvoiceCreate() {
         <Fld label="PO No"><Input value={f.po_number} onChange={e => set("po_number", e.target.value)} /></Fld>
         <Fld label="PO Date"><Input type="date" value={f.po_date} onChange={e => set("po_date", e.target.value)} /></Fld>
         <Fld label="E-Way Bill No"><Input value={f.eway_bill_no} onChange={e => set("eway_bill_no", e.target.value)} /></Fld>
+        <Fld label="E-Way Distance (km)"><Input type="number" value={f.eway_distance_km} onChange={e => set("eway_distance_km", e.target.value)} placeholder="auto-sets validity" /></Fld>
         <Fld label="Customer GSTIN"><Input value={f.customer_gstin} onChange={e => set("customer_gstin", e.target.value)} /></Fld>
       </div>
 
@@ -203,6 +206,7 @@ export default function InvoiceCreate() {
       <div className="fixed bottom-0 right-0 left-0 lg:left-64 bg-white border-t border-slate-200 px-6 py-3 flex items-center justify-end gap-3 z-20">
         <span className="mr-auto text-sm text-slate-500">Total: <strong className="text-slate-900">{inr(totals.grand)}</strong></span>
         <Button variant="outline" className="rounded-sm" onClick={() => navg("/app/invoices")}>Cancel</Button>
+        <Button variant="outline" className="rounded-sm" onClick={() => save(true)} disabled={saving}>Save & Generate E-Way Bill</Button>
         <Button onClick={() => save(false)} disabled={saving} className="rounded-sm bg-red-600 hover:bg-red-700"><Save className="h-4 w-4 mr-1" /> {saving ? "Saving…" : "Save Invoice"}</Button>
       </div>
     </div>
