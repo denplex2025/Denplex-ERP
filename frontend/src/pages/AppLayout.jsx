@@ -114,6 +114,7 @@ const NAV_GROUPS = [
     items: [
       { to: "/app/suppliers", label: "Suppliers", icon: Truck, testid: "nav-suppliers" },
       { to: "/app/purchase-orders", label: "Purchase Orders", icon: ShoppingCart, testid: "nav-purchase-orders" },
+      { to: "/app/purchase-orders/new", label: "New Purchase Order", icon: ShoppingCart, testid: "nav-po-new", end: true },
       { to: "/app/payments-out", label: "Payment-Out", icon: ArrowUpFromLine, testid: "nav-payments-out" },
       { to: "/app/expenses", label: "Expenses", icon: Banknote, testid: "nav-expenses" },
       { to: "/app/purchase-returns", label: "Purchase Returns", icon: Undo2, testid: "nav-purchase-returns" },
