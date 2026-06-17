@@ -4643,9 +4643,10 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
 
     RED = colors.HexColor("#DC2626")
     BLACK = colors.HexColor("#0A0A0A")
+    INK = colors.HexColor("#334155")     # softer body ink (slate-700) — lighter, less heavy than pure black
     GREY = colors.HexColor("#475569")
-    LIGHTGREY = colors.HexColor("#F1F5F9")
-    BORDER = colors.HexColor("#CBD5E1")
+    LIGHTGREY = colors.HexColor("#F4F6F8")
+    BORDER = colors.HexColor("#D7DEE7")
 
     # ---- Style preset (standard / compact / modern) ----
     style_preset = (tpl.get("template_style") or "standard").lower()
@@ -4656,7 +4657,7 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
         _margin = 14*mm; _body = 9.0; _title_sz = 22; _company_sz = 14; _border_w = 0.0  # no full borders
         _accent = colors.HexColor("#1E293B")  # near-black accent
     else:  # standard — kept deliberately light/subtle
-        _margin = 10*mm; _body = 8.0; _title_sz = 15; _company_sz = 12; _border_w = 0.5
+        _margin = 10*mm; _body = 7.5; _title_sz = 13.5; _company_sz = 11; _border_w = 0.4
         _accent = RED
 
     # Pick fonts: use registered TTF (e.g. DejaVuSans) for proper ₹ rendering
@@ -4677,7 +4678,7 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
     h2_style = ParagraphStyle("h2", parent=styles["Heading2"], fontName=_FONT_B,
                               fontSize=14, textColor=BLACK, leading=16, spaceAfter=0)
     small = ParagraphStyle("sm", parent=styles["Normal"], fontName=_FONT,
-                           fontSize=_body, textColor=BLACK, leading=_body+2.5)
+                           fontSize=_body, textColor=INK, leading=_body+2.5)
     smallb = ParagraphStyle("smb", parent=small, fontName=_FONT_B)
     tiny = ParagraphStyle("ti", parent=styles["Normal"], fontName=_FONT,
                           fontSize=max(_body-1, 6.5), textColor=GREY, leading=max(_body, 8.5))
@@ -4710,7 +4711,7 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
             logo_cell = RLImage(logo_path, width=22*mm, height=22*mm)
         except Exception:
             logo_cell = Paragraph("<b>DENPLEX</b>", h2_style)
-    company_lines = [Paragraph(f"<font size=12><b>{company.get('company_name','Denplex Engineering Company')}</b></font>", smallb)]
+    company_lines = [Paragraph(f"<font size=11><b>{company.get('company_name','Denplex Engineering Company')}</b></font>", smallb)]
     if show("show_company_udyam") and company.get("company_udyam"):
         company_lines.append(Spacer(1, 1.5*mm))
         company_lines.append(Paragraph(f"<font size=8 color='#475569'>™ UDYAM REGISTRATION NUMBER - <b>{company['company_udyam']}</b></font>", tiny))
@@ -4931,7 +4932,8 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
     style = [
         ("BACKGROUND", (0, 0), (-1, 0), LIGHTGREY),
         ("FONTNAME", (0, 0), (-1, 0), _PDF_FONT_BOLD),
-        ("FONTSIZE", (0, 0), (-1, -1), 8.5),
+        ("FONTSIZE", (0, 0), (-1, -1), 8.0),
+        ("TEXTCOLOR", (0, 0), (-1, -1), INK),
         ("ALIGN", (0, 0), (0, -1), "CENTER"),
         ("ALIGN", (2 if show_hsn else 2, 0), (-1, -1), "RIGHT"),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
