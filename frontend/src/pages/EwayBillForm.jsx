@@ -26,6 +26,8 @@ export default function EwayBillForm() {
   const navg = useNavigate();
   const [inv, setInv] = useState(null);
   const [saving, setSaving] = useState(false);
+  const [gsp, setGsp] = useState({ configured: false });
+  const [filing, setFiling] = useState(false);
   const [f, setF] = useState({
     transaction_type: "Regular",
     dispatch_gstin: "", dispatch_name: "", dispatch_state: "Gujarat", dispatch_pin: "", dispatch_address: "",
@@ -34,7 +36,9 @@ export default function EwayBillForm() {
     mode: "Road", vehicle_type: "Regular", vehicle_no: "", trans_doc_no: "", trans_doc_date: "",
     taxable_amount: 0, total_value: 0, distance_km: 0,
     eway_bill_no: "", generated_at: new Date().toISOString().slice(0, 10),
+    irn: "", ack_no: "", ack_date: "", signed_qr: "",
   });
+  const [filingEinv, setFilingEinv] = useState(false);
   const set = (k, v) => setF(p => ({ ...p, [k]: v }));
 
   useEffect(() => {
@@ -48,11 +52,38 @@ export default function EwayBillForm() {
           ship_address: d.ship_to_address || "",
           taxable_amount: d.subtotal || 0, total_value: d.total || 0,
           eway_bill_no: d.eway_bill_no || "", distance_km: d.eway_distance_km || 0,
+          irn: d.irn || "", ack_no: d.ack_no || "", ack_date: d.ack_date || "", signed_qr: d.signed_qr || "",
           ...(d.eway_details || {}),
         }));
       } catch (e) { toast.error("Could not load invoice"); }
     })();
+    api.get("/eway/gsp-status").then(r => setGsp(r.data || { configured: false })).catch(() => {});
   }, [id]);
+
+  const fileToNic = async () => {
+    setFiling(true);
+    try {
+      const r = await api.post(`/invoices/${id}/eway-bill/file`);
+      toast.success(`Filed to NIC — e-way bill ${r.data?.eway_bill_no || ""}`);
+      navg("/app/invoices");
+    } catch (e) { toast.error(e?.response?.data?.detail || "Filing failed"); }
+    setFiling(false);
+  };
+  const saveEinv = async () => {
+    try {
+      await api.post(`/invoices/${id}/e-invoice/record`, { irn: f.irn, ack_no: f.ack_no, ack_date: f.ack_date, signed_qr: f.signed_qr });
+      toast.success("e-Invoice details saved");
+    } catch (e) { toast.error(e?.response?.data?.detail || "Could not save"); }
+  };
+  const fileEinv = async () => {
+    setFilingEinv(true);
+    try {
+      const r = await api.post(`/invoices/${id}/e-invoice/file`);
+      toast.success(`e-Invoice generated — IRN ${(r.data?.irn || "").slice(0, 16)}…`);
+      navg("/app/invoices");
+    } catch (e) { toast.error(e?.response?.data?.detail || "e-Invoice filing failed"); }
+    setFilingEinv(false);
+  };
 
   const odc = f.vehicle_type === "Over Dimensional Cargo";
   const days = validityDays(f.distance_km, odc);
@@ -75,12 +106,31 @@ export default function EwayBillForm() {
     <div data-testid="eway-form-page" className="pb-24 max-w-5xl">
       <div className="flex items-center gap-2 mb-2">
         <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => navg("/app/invoices")}><ArrowLeft className="h-4 w-4" /></Button>
-        <h1 className="text-xl font-bold font-display">Generate E-Way Bill</h1>
+        <h1 className="text-xl font-bold font-display">E-Way Bill & e-Invoice</h1>
         {inv ? <span className="text-sm text-slate-500">— Invoice {inv.code} · {inv.customer_name}</span> : null}
       </div>
       <div className="flex items-start gap-2 text-xs bg-amber-50 border border-amber-200 text-amber-800 rounded-md p-2.5 mb-4">
         <Info className="w-4 h-4 shrink-0 mt-0.5" />
         <span>Filing directly to the government (NIC) needs a connected GSP. For now: generate the bill on the NIC portal, then paste its number below. Validity is auto-computed from distance.</span>
+      </div>
+
+      <div className="border border-slate-200 rounded-md p-4 mb-4">
+        <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+          <h3 className="text-sm font-semibold text-slate-800">e-Invoice (IRN + signed QR)</h3>
+          <div className="flex gap-2">
+            <Button size="sm" variant="outline" className="rounded-sm" onClick={saveEinv}>Save e-Invoice details</Button>
+            {gsp.configured
+              ? <Button size="sm" onClick={fileEinv} disabled={filingEinv} className="rounded-sm bg-red-600 hover:bg-red-700">{filingEinv ? "Generating…" : "Generate e-Invoice (auto)"}</Button>
+              : <span className="text-[11px] text-slate-400 self-center">GSP required for auto-generate</span>}
+          </div>
+        </div>
+        <p className="text-[11px] text-slate-500 mb-3">e-Invoicing (IRN) applies once your annual turnover crosses ₹5 crore (or if you've voluntarily enabled it). Until then your GSTIN usually can't generate an IRN — this section is ready for when you're eligible.</p>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <Fld label="IRN"><Input value={f.irn} onChange={e => set("irn", e.target.value)} placeholder="paste from IRP, or auto" /></Fld>
+          <Fld label="Ack No"><Input value={f.ack_no} onChange={e => set("ack_no", e.target.value)} /></Fld>
+          <Fld label="Ack Date"><Input value={f.ack_date} onChange={e => set("ack_date", e.target.value)} /></Fld>
+          <div className="md:col-span-3"><Fld label="Signed QR (from IRP)"><Textarea rows={2} value={f.signed_qr} onChange={e => set("signed_qr", e.target.value)} placeholder="paste the signed QR string — it prints as a QR code on the invoice PDF" /></Fld></div>
+        </div>
       </div>
 
       <Section title="Transaction Details">
@@ -136,7 +186,10 @@ export default function EwayBillForm() {
       <div className="fixed bottom-0 right-0 left-0 lg:left-64 bg-white border-t border-slate-200 px-6 py-3 flex items-center justify-end gap-3 z-20">
         <span className="mr-auto text-sm text-slate-500 inline-flex items-center gap-1"><FileCheck2 className="w-4 h-4" /> {f.eway_bill_no ? `E-way ${f.eway_bill_no}` : "Capture e-way details"}</span>
         <Button variant="outline" className="rounded-sm" onClick={() => navg("/app/invoices")}>Cancel</Button>
-        <Button onClick={save} disabled={saving} className="rounded-sm bg-red-600 hover:bg-red-700"><Save className="h-4 w-4 mr-1" /> {saving ? "Saving…" : "Save E-Way Bill"}</Button>
+        <Button onClick={save} disabled={saving} variant="outline" className="rounded-sm"><Save className="h-4 w-4 mr-1" /> {saving ? "Saving…" : "Save details"}</Button>
+        {gsp.configured
+          ? <Button onClick={fileToNic} disabled={filing} className="rounded-sm bg-red-600 hover:bg-red-700"><FileCheck2 className="h-4 w-4 mr-1" /> {filing ? "Filing…" : "File to NIC (auto)"}</Button>
+          : <span className="text-[11px] text-slate-400 max-w-[220px]">Connect a GSP in server config to enable one-click filing.</span>}
       </div>
     </div>
   );
