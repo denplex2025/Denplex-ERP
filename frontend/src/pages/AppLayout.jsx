@@ -6,7 +6,7 @@ import {
   LayoutDashboard, Boxes, Layers, ClipboardList, FileText,
   ShoppingCart, Receipt, Users, UserPlus, Truck, ShieldCheck,
   FileBox, Settings as SettingsIcon, LogOut, Menu, Calculator, UsersRound, Megaphone, Wrench, ScrollText,
-  ArrowDownToLine, ArrowUpFromLine, Banknote, Undo2, Cog, CalendarRange, Search, Trash2, SlidersHorizontal, AlarmClock
+  ArrowDownToLine, ArrowUpFromLine, Banknote, Undo2, Cog, CalendarRange, Search, Trash2, SlidersHorizontal, AlarmClock, Webhook
 } from "lucide-react";
 import { useState, useEffect, useRef } from "react";
 import api from "@/lib/api";
@@ -148,6 +148,7 @@ const NAV_GROUPS = [
       { to: "/app/settings", label: "Settings", icon: Wrench, testid: "nav-settings" },
       { to: "/app/audit", label: "Audit Log", icon: ScrollText, testid: "nav-audit" },
       { to: "/app/recycle-bin", label: "Recycle Bin", icon: Trash2, testid: "nav-recycle-bin" },
+      { to: "/app/webhooks", label: "Integrations / Webhooks", icon: Webhook, testid: "nav-webhooks" },
     ],
   },
 ];
