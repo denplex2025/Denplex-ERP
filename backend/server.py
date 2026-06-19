@@ -2940,6 +2940,102 @@ async def file_einvoice(iid: str, user=Depends(require_roles("admin", "manager",
     await db.invoices.update_one({"id": iid}, {"$set": upd})
     return {"ok": True, "irn": irn, "ack_no": upd["ack_no"], "ack_date": upd["ack_date"]}
 
+# ---------------- Inbound webhooks (HR/attendance e.g. Mewurk) ----------------
+WEBHOOK_BASE = os.getenv("API_PUBLIC_URL", "https://denplex-erp-production.up.railway.app")
+
+async def _process_webhook(source: str, body: Any) -> str:
+    """Best-effort map an inbound HR/attendance payload into the attendance collection.
+    Tolerant of field names — refined once a real Mewurk payload is seen in the event log."""
+    if isinstance(body, list):
+        records = body
+    elif isinstance(body, dict):
+        records = body.get("data") or body.get("records") or body.get("attendance") or body.get("items") or [body]
+    else:
+        records = []
+    if isinstance(records, dict):
+        records = [records]
+    n = 0
+    for r in records:
+        if not isinstance(r, dict):
+            continue
+        emp_code = str(r.get("employee_code") or r.get("emp_code") or r.get("employee_id") or r.get("empId")
+                       or r.get("emp_id") or r.get("code") or "").strip()
+        date = str(r.get("date") or r.get("attendance_date") or r.get("day") or "")[:10]
+        if not (emp_code and date):
+            continue
+        emp = await db.employees.find_one({"code": emp_code}) or await db.employees.find_one({"id": emp_code})
+        sraw = str(r.get("status") or r.get("attendance_status") or "present").lower()
+        if "absent" in sraw or sraw == "a":
+            st = "absent"
+        elif "half" in sraw:
+            st = "half_day"
+        elif "leave" in sraw:
+            st = "leave"
+        else:
+            st = "present"
+        try:
+            hours = float(r.get("hours") or r.get("working_hours") or (8 if st == "present" else 0))
+        except Exception:
+            hours = 8 if st == "present" else 0
+        doc = {"id": new_id(), "employee_id": (emp.get("id") if emp else emp_code),
+               "employee_name": (emp.get("name") if emp else str(r.get("employee_name") or r.get("name") or "")),
+               "date": date, "status": st, "hours": hours, "notes": f"via {source}",
+               "created_at": now_iso(), "source": source}
+        await db.attendance.update_one({"employee_id": doc["employee_id"], "date": date}, {"$set": doc}, upsert=True)
+        n += 1
+    return f"attendance upserted: {n}"
+
+@api.get("/webhooks/config")
+async def get_webhook_config(user=Depends(require_roles("admin", "manager"))):
+    cfg = await get_setting("webhooks") or {}
+    src = cfg.get("mewurk") or {}
+    if not src.get("secret"):
+        src = {"secret": secrets.token_urlsafe(24), "enabled": True}
+        await db.settings.update_one({"_id": "webhooks"}, {"$set": {"mewurk": src}}, upsert=True)
+    return {"mewurk": {"enabled": src.get("enabled", True),
+                       "url": f"{WEBHOOK_BASE}/api/webhooks/mewurk/{src['secret']}",
+                       "secret": src["secret"]}}
+
+@api.post("/webhooks/config")
+async def set_webhook_config(body: dict, user=Depends(require_roles("admin", "manager"))):
+    cfg = await get_setting("webhooks") or {}
+    src = cfg.get("mewurk") or {}
+    if body.get("rotate") or not src.get("secret"):
+        src["secret"] = secrets.token_urlsafe(24)
+    if "enabled" in body:
+        src["enabled"] = bool(body["enabled"])
+    if "secret" not in src:
+        src["secret"] = secrets.token_urlsafe(24)
+    await db.settings.update_one({"_id": "webhooks"}, {"$set": {"mewurk": src}}, upsert=True)
+    return {"ok": True, "url": f"{WEBHOOK_BASE}/api/webhooks/mewurk/{src['secret']}", "secret": src["secret"]}
+
+@api.get("/webhooks/events")
+async def list_webhook_events(user=Depends(require_roles("admin", "manager"))):
+    return await db.webhook_events.find({}, {"_id": 0}).sort("received_at", -1).to_list(100)
+
+@api.post("/webhooks/{source}/{token}")
+async def receive_webhook(source: str, token: str, request: Request):
+    """Public inbound webhook (no JWT) — authenticated by the secret token in the URL.
+    Logs every event raw so the real payload format can be inspected, then best-effort maps it."""
+    cfg = await get_setting("webhooks") or {}
+    src = cfg.get(source) or {}
+    if not src or not src.get("enabled", True):
+        raise HTTPException(404, "Webhook source not enabled")
+    if not token or token != src.get("secret"):
+        raise HTTPException(401, "Invalid webhook token")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {"_raw": (await request.body()).decode("utf-8", "ignore")[:5000]}
+    ev = {"id": new_id(), "source": source, "received_at": now_iso(), "body": body, "processed": False, "result": ""}
+    try:
+        ev["result"] = await _process_webhook(source, body)
+        ev["processed"] = True
+    except Exception as e:
+        ev["result"] = f"map-skipped: {e}"
+    await db.webhook_events.insert_one(dict(ev))
+    return {"ok": True, "received": True, "result": ev["result"]}
+
 @api.put("/invoices/{iid}")
 async def update_invoice(iid: str, inv: Invoice, user=Depends(get_current_user)):
     existing = await db.invoices.find_one({"id": iid}, {"_id": 0})
