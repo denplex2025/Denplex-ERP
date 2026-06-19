@@ -57,6 +57,7 @@ import Reminders from "./pages/Reminders";
 import InvoiceCreate from "./pages/InvoiceCreate";
 import PurchaseOrderCreate from "./pages/PurchaseOrderCreate";
 import EwayBillForm from "./pages/EwayBillForm";
+import Webhooks from "./pages/Webhooks";
 
 function App() {
   return (
@@ -106,6 +107,7 @@ function App() {
               <Route path="costing" element={<Costing />} />
               <Route path="iso" element={<ISO />} />
               <Route path="recycle-bin" element={<RecycleBin />} />
+              <Route path="webhooks" element={<Webhooks />} />
               <Route path="bulk-items" element={<BulkItems />} />
               <Route path="reminders" element={<Reminders />} />
               <Route path="scan/:entity/:id" element={<Scan />} />
