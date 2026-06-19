@@ -600,6 +600,13 @@ class Invoice(BaseModel):
     eway_over_dimensional: bool = False
     eway_valid_until: Optional[str] = ""        # auto-computed: generated + days (1 day / 200km, ODC 1/20)
     eway_details: dict = Field(default_factory=dict)   # full NIC form payload (dispatch/ship/transport/Part-B/value)
+    # ---- e-Invoice (IRP / IRN) ----
+    irn: Optional[str] = ""                     # Invoice Reference Number from the IRP
+    ack_no: Optional[str] = ""                  # acknowledgement number
+    ack_date: Optional[str] = ""                # acknowledgement date
+    signed_qr: Optional[str] = ""               # signed QR payload (rendered as QR on the PDF)
+    einvoice_status: Optional[str] = ""         # ""/"generated"/"cancelled"
+    einvoice_details: dict = Field(default_factory=dict)
     invoice_type: Literal["gst", "non_gst", "export"] = "gst"
     payment_terms: Optional[str] = ""       # e.g. "Net 30"
     godown: Optional[str] = ""              # dispatch location (Vatva / Santej)
@@ -2736,6 +2743,203 @@ async def get_invoice(iid: str, user=Depends(get_current_user)):
         raise HTTPException(404, "Invoice not found")
     return inv
 
+# ---------------- E-way bill — GSP auto-filing scaffold ----------------
+# Files e-way bills to the government NIC system via a GST Suvidha Provider (GSP).
+# SECRETS are read from Railway env vars (preferred) so keys never live in code/db:
+#   EWAY_GSP_BASE_URL, EWAY_GSP_CLIENT_ID, EWAY_GSP_CLIENT_SECRET,
+#   EWAY_GSP_USERNAME, EWAY_GSP_PASSWORD   (GSTIN comes from company settings / COMPANY_GSTIN)
+# Non-secret routing (auth/generate paths, provider name) may be tuned in db.settings id="eway_gsp"
+# once the chosen GSP's API docs are known. The payload below follows the standard NIC EWB
+# "generate" JSON; a specific GSP may rename a couple of keys — adjust here when wiring the real one.
+async def _eway_gsp_config() -> Dict[str, Any]:
+    s = await get_setting("eway_gsp") or {}
+    company = await get_setting("integrations") or {}
+    return {
+        "base_url": os.getenv("EWAY_GSP_BASE_URL", s.get("base_url", "")),
+        "auth_path": os.getenv("EWAY_GSP_AUTH_PATH", s.get("auth_path", "/eway/authenticate")),
+        "generate_path": os.getenv("EWAY_GSP_GENERATE_PATH", s.get("generate_path", "/eway/generate")),
+        "client_id": os.getenv("EWAY_GSP_CLIENT_ID", s.get("client_id", "")),
+        "client_secret": os.getenv("EWAY_GSP_CLIENT_SECRET", s.get("client_secret", "")),
+        "username": os.getenv("EWAY_GSP_USERNAME", s.get("username", "")),
+        "password": os.getenv("EWAY_GSP_PASSWORD", s.get("password", "")),
+        "gstin": os.getenv("COMPANY_GSTIN", company.get("company_gstin", "")),
+        "provider": s.get("provider", os.getenv("EWAY_GSP_PROVIDER", "")),
+    }
+
+def _gsp_ready(c: Dict[str, Any]) -> bool:
+    return bool(c.get("base_url") and c.get("client_id") and c.get("username") and c.get("gstin"))
+
+@api.get("/eway/gsp-status")
+async def eway_gsp_status(user=Depends(get_current_user)):
+    c = await _eway_gsp_config()
+    return {"configured": _gsp_ready(c), "provider": c.get("provider", ""), "gstin": c.get("gstin", "")}
+
+def _ddmmyyyy(s: str) -> str:
+    try:
+        return datetime.strptime(str(s)[:10], "%Y-%m-%d").strftime("%d/%m/%Y")
+    except Exception:
+        return datetime.utcnow().strftime("%d/%m/%Y")
+
+def _build_nic_ewb_payload(inv: Dict[str, Any], d: Dict[str, Any], company: Dict[str, Any]) -> Dict[str, Any]:
+    """Standard NIC EWB 'generate' JSON, assembled from the invoice + e-way form."""
+    inter = bool(inv.get("is_interstate"))
+    items = [{
+        "productName": l.get("description", ""), "hsnCode": l.get("hsn", "") or "",
+        "quantity": l.get("qty", 0), "qtyUnit": (l.get("unit", "NOS") or "NOS").upper()[:3],
+        "taxableAmount": round(float(l.get("qty", 0)) * float(l.get("rate", 0)), 2),
+        "sgstRate": (0 if inter else float(l.get("gst_rate", 0)) / 2),
+        "cgstRate": (0 if inter else float(l.get("gst_rate", 0)) / 2),
+        "igstRate": (float(l.get("gst_rate", 0)) if inter else 0),
+    } for l in (inv.get("lines", []) or [])]
+    return {
+        "supplyType": "O", "subSupplyType": "1", "docType": "INV",
+        "docNo": inv.get("code", ""), "docDate": _ddmmyyyy(inv.get("date", "")),
+        "fromGstin": company.get("company_gstin", ""), "fromTrdName": company.get("company_name", ""),
+        "fromAddr1": d.get("dispatch_address", ""), "fromPlace": d.get("dispatch_state", ""),
+        "fromPincode": d.get("dispatch_pin", ""), "fromStateCode": d.get("dispatch_state", ""),
+        "toGstin": inv.get("customer_gstin", "") or d.get("ship_gstin", ""), "toTrdName": inv.get("customer_name", ""),
+        "toAddr1": d.get("ship_address", ""), "toPlace": d.get("ship_state", ""),
+        "toPincode": d.get("ship_pin", ""), "toStateCode": d.get("ship_state", ""),
+        "totalValue": inv.get("subtotal", 0), "cgstValue": inv.get("cgst", 0), "sgstValue": inv.get("sgst", 0),
+        "igstValue": inv.get("igst", 0), "totInvValue": inv.get("total", 0),
+        "transporterId": d.get("transporter_id", ""), "transporterName": d.get("transporter_name", ""),
+        "transMode": {"Road": "1", "Rail": "2", "Air": "3", "Ship": "4"}.get(d.get("mode", "Road"), "1"),
+        "transDistance": str(int(float(d.get("distance_km", 0) or 0))),
+        "vehicleNo": d.get("vehicle_no", ""),
+        "vehicleType": "O" if d.get("vehicle_type") == "Over Dimensional Cargo" else "R",
+        "transDocNo": d.get("trans_doc_no", ""),
+        "transDocDate": _ddmmyyyy(d.get("trans_doc_date", "")) if d.get("trans_doc_date") else "",
+        "itemList": items,
+    }
+
+@api.post("/invoices/{iid}/eway-bill/file")
+async def file_eway_to_nic(iid: str, user=Depends(require_roles("admin", "manager", "accountant", "ca"))):
+    """One-click file an e-way bill to NIC via the configured GSP. Needs GSP credentials in the server config."""
+    c = await _eway_gsp_config()
+    if not _gsp_ready(c):
+        raise HTTPException(400, "E-way GSP not configured. Add your GSP API credentials (base URL + client id/secret + "
+                                 "API username/password) to the server config, then retry. Until then, record the number manually.")
+    inv = await db.invoices.find_one({"id": iid}, {"_id": 0})
+    if not inv:
+        raise HTTPException(404, "Invoice not found")
+    company = await get_setting("integrations") or {}
+    details = inv.get("eway_details", {}) or {}
+    payload = _build_nic_ewb_payload(inv, details, company)
+    try:
+        async with httpx.AsyncClient(timeout=30) as cl:
+            auth = await cl.post(c["base_url"].rstrip("/") + c["auth_path"], json={
+                "client_id": c["client_id"], "client_secret": c["client_secret"],
+                "username": c["username"], "password": c["password"], "gstin": c["gstin"]})
+            auth.raise_for_status()
+            ad = auth.json()
+            token = ad.get("access_token") or ad.get("authtoken") or ad.get("token") or ""
+            headers = {"Authorization": f"Bearer {token}", "gstin": c["gstin"], "Content-Type": "application/json"}
+            gen = await cl.post(c["base_url"].rstrip("/") + c["generate_path"], headers=headers, json=payload)
+            gen.raise_for_status()
+            gd = gen.json()
+    except Exception as e:
+        raise HTTPException(502, f"GSP call failed: {e}. Check your GSP credentials and endpoint paths.")
+    gdata = gd.get("data") if isinstance(gd.get("data"), dict) else {}
+    ewb_no = str(gd.get("ewayBillNo") or gd.get("ewbNo") or gdata.get("ewayBillNo") or "")
+    valid_upto = str(gd.get("validUpto") or gdata.get("validUpto") or "")
+    if not ewb_no:
+        raise HTTPException(502, f"GSP did not return an e-way bill number. Response: {str(gd)[:300]}")
+    upd = {"eway_bill_no": ewb_no, "eway_generated_at": datetime.utcnow().date().isoformat(),
+           "eway_valid_until": valid_upto[:10] if valid_upto else "", "eway_details": {**details, "gsp_response": gd}}
+    await db.invoices.update_one({"id": iid}, {"$set": upd})
+    return {"ok": True, "eway_bill_no": ewb_no, "valid_upto": valid_upto, "filed_via": c.get("provider") or "GSP"}
+
+# ---------------- e-Invoice (IRN + signed QR) ----------------
+def _gstin_state(gstin: str) -> str:
+    return (gstin or "")[:2] if gstin else ""
+
+def _build_irp_einvoice_payload(inv: Dict[str, Any], company: Dict[str, Any], d: Dict[str, Any]) -> Dict[str, Any]:
+    """Standard IRP e-invoice (schema 1.1) JSON, assembled from the invoice."""
+    inter = bool(inv.get("is_interstate"))
+    seller_gstin = company.get("company_gstin", ""); buyer_gstin = inv.get("customer_gstin", "")
+    items = []
+    for i, l in enumerate(inv.get("lines", []) or [], 1):
+        qty = float(l.get("qty", 0)); rate = float(l.get("rate", 0)); gross = qty * rate
+        ass = round(gross - (gross * float(l.get("discount_pct", 0) or 0) / 100) - float(l.get("discount_amount", 0) or 0), 2)
+        if ass < 0: ass = 0.0
+        gstrt = float(l.get("gst_rate", 0)); gst = round(ass * gstrt / 100, 2)
+        items.append({"SlNo": str(i), "PrdDesc": l.get("description", ""), "IsServc": "N",
+            "HsnCd": str(l.get("hsn", "") or ""), "Qty": qty, "Unit": (l.get("unit", "NOS") or "NOS").upper()[:3],
+            "UnitPrice": rate, "TotAmt": round(gross, 2), "AssAmt": ass, "GstRt": gstrt,
+            "IgstAmt": (gst if inter else 0), "CgstAmt": (0 if inter else round(gst / 2, 2)),
+            "SgstAmt": (0 if inter else round(gst / 2, 2)), "TotItemVal": round(ass + gst, 2)})
+    return {
+        "Version": "1.1",
+        "TranDtls": {"TaxSch": "GST", "SupTyp": "B2B", "RegRev": "N", "IgstOnIntra": "N"},
+        "DocDtls": {"Typ": "INV", "No": inv.get("code", ""), "Dt": _ddmmyyyy(inv.get("date", ""))},
+        "SellerDtls": {"Gstin": seller_gstin, "LglNm": company.get("company_name", ""),
+            "Addr1": d.get("dispatch_address", "") or company.get("company_address", ""),
+            "Loc": d.get("dispatch_state", "") or "", "Pin": d.get("dispatch_pin", "") or "", "Stcd": _gstin_state(seller_gstin)},
+        "BuyerDtls": {"Gstin": buyer_gstin, "LglNm": inv.get("customer_name", ""),
+            "Pos": _gstin_state(buyer_gstin) or _gstin_state(seller_gstin),
+            "Addr1": d.get("ship_address", "") or "", "Loc": d.get("ship_state", "") or "",
+            "Pin": d.get("ship_pin", "") or "", "Stcd": _gstin_state(buyer_gstin)},
+        "ItemList": items,
+        "ValDtls": {"AssVal": inv.get("subtotal", 0), "CgstVal": inv.get("cgst", 0), "SgstVal": inv.get("sgst", 0),
+            "IgstVal": inv.get("igst", 0), "TotInvVal": inv.get("total", 0)},
+    }
+
+class EInvoiceRecordIn(BaseModel):
+    irn: Optional[str] = ""
+    ack_no: Optional[str] = ""
+    ack_date: Optional[str] = ""
+    signed_qr: Optional[str] = ""
+
+@api.post("/invoices/{iid}/e-invoice/record")
+async def record_einvoice(iid: str, body: EInvoiceRecordIn, user=Depends(get_current_user)):
+    """Manually record an IRN / Ack / signed-QR generated on the IRP portal (used until the GSP API is wired)."""
+    inv = await db.invoices.find_one({"id": iid}, {"_id": 0})
+    if not inv:
+        raise HTTPException(404, "Invoice not found")
+    upd = {"irn": (body.irn or "").strip(), "ack_no": (body.ack_no or "").strip(),
+           "ack_date": (body.ack_date or "").strip(), "signed_qr": (body.signed_qr or "").strip(),
+           "einvoice_status": "generated" if (body.irn or "").strip() else ""}
+    await db.invoices.update_one({"id": iid}, {"$set": upd})
+    return {"ok": True, **upd}
+
+@api.post("/invoices/{iid}/e-invoice/file")
+async def file_einvoice(iid: str, user=Depends(require_roles("admin", "manager", "accountant", "ca"))):
+    """One-click generate an e-invoice IRN via the configured GSP/IRP. Needs GSP credentials in server config."""
+    c = await _eway_gsp_config()
+    s = await get_setting("eway_gsp") or {}
+    einv_path = os.getenv("EINV_GSP_GENERATE_PATH", s.get("einvoice_path", "/einvoice/generate"))
+    if not _gsp_ready(c):
+        raise HTTPException(400, "GSP not configured. Add your GSP API credentials in the server config to enable e-invoice filing.")
+    inv = await db.invoices.find_one({"id": iid}, {"_id": 0})
+    if not inv:
+        raise HTTPException(404, "Invoice not found")
+    if inv.get("invoice_type", "gst") != "gst":
+        raise HTTPException(400, "e-Invoice applies to GST invoices only.")
+    company = await get_setting("integrations") or {}
+    payload = _build_irp_einvoice_payload(inv, company, inv.get("eway_details", {}) or {})
+    try:
+        async with httpx.AsyncClient(timeout=30) as cl:
+            auth = await cl.post(c["base_url"].rstrip("/") + c["auth_path"], json={
+                "client_id": c["client_id"], "client_secret": c["client_secret"],
+                "username": c["username"], "password": c["password"], "gstin": c["gstin"]})
+            auth.raise_for_status(); ad = auth.json()
+            token = ad.get("access_token") or ad.get("authtoken") or ad.get("token") or ""
+            headers = {"Authorization": f"Bearer {token}", "gstin": c["gstin"], "Content-Type": "application/json"}
+            gen = await cl.post(c["base_url"].rstrip("/") + einv_path, headers=headers, json=payload)
+            gen.raise_for_status(); gd = gen.json()
+    except Exception as e:
+        raise HTTPException(502, f"IRP/GSP call failed: {e}. Check your GSP credentials and endpoint paths.")
+    data = gd.get("data") if isinstance(gd.get("data"), dict) else gd
+    irn = str(data.get("Irn") or data.get("irn") or "")
+    if not irn:
+        raise HTTPException(502, f"IRP did not return an IRN. Response: {str(gd)[:300]}")
+    upd = {"irn": irn, "ack_no": str(data.get("AckNo") or data.get("ackNo") or ""),
+           "ack_date": str(data.get("AckDt") or data.get("ackDt") or ""),
+           "signed_qr": str(data.get("SignedQRCode") or data.get("signedQRCode") or ""),
+           "einvoice_status": "generated", "einvoice_details": gd}
+    await db.invoices.update_one({"id": iid}, {"$set": upd})
+    return {"ok": True, "irn": irn, "ack_no": upd["ack_no"], "ack_date": upd["ack_date"]}
+
 @api.put("/invoices/{iid}")
 async def update_invoice(iid: str, inv: Invoice, user=Depends(get_current_user)):
     existing = await db.invoices.find_one({"id": iid}, {"_id": 0})
@@ -4832,6 +5036,25 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
     ]))
     flow.append(header_tbl)
 
+    # ---------- e-Invoice IRN + signed QR (shown at top when present) ----------
+    if doc_meta.get("irn"):
+        qr_cell = Paragraph("", tiny)
+        try:
+            import qrcode as _qr
+            _qimg = _qr.make(doc_meta.get("signed_qr") or doc_meta.get("irn"))
+            _bio = io.BytesIO(); _qimg.save(_bio, format="PNG"); _bio.seek(0)
+            qr_cell = RLImage(_bio, width=20*mm, height=20*mm)
+        except Exception:
+            qr_cell = Paragraph("", tiny)
+        einv_txt = [Paragraph("<b>e-Invoice</b>", smallb), Paragraph(f"IRN: {doc_meta['irn']}", tiny)]
+        if doc_meta.get("ack_no"):
+            einv_txt.append(Paragraph(f"Ack No: {doc_meta['ack_no']} &nbsp; Ack Date: {doc_meta.get('ack_date','')}", tiny))
+        einv_tbl = Table([[einv_txt, qr_cell]], colWidths=[160*mm, 30*mm])
+        einv_tbl.setStyle(TableStyle([("VALIGN", (0,0), (-1,-1), "TOP"), ("BOX", (0,0), (-1,-1), 0.5, BORDER),
+            ("ALIGN", (1,0), (1,-1), "RIGHT"), ("LEFTPADDING", (0,0), (-1,-1), 6), ("RIGHTPADDING", (0,0), (-1,-1), 6),
+            ("TOPPADDING", (0,0), (-1,-1), 4), ("BOTTOMPADDING", (0,0), (-1,-1), 4)]))
+        flow.append(einv_tbl)
+
     # ---------- Bill To / Invoice Details (two-column box) ----------
     bill_lines = [Paragraph(f"<b>{party_label}:</b>", box_label),
                   Paragraph(f"<font size=10><b>{party_name}</b></font>", smallb)]
@@ -5325,6 +5548,8 @@ async def invoice_pdf(iid: str, copy: Optional[str] = "ORIGINAL FOR RECIPIENT", 
         "eway_bill_no": inv.get("eway_bill_no",""),
         "is_interstate": bool(inv.get("is_interstate")),
         "invoice_type": inv.get("invoice_type", "gst"),
+        "irn": inv.get("irn",""), "ack_no": inv.get("ack_no",""),
+        "ack_date": inv.get("ack_date",""), "signed_qr": inv.get("signed_qr",""),
     }
     _itype = inv.get("invoice_type", "gst")
     _doc_title = "Export Invoice" if _itype == "export" else ("Bill of Supply" if _itype == "non_gst" else "Tax Invoice")
