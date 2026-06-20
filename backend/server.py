@@ -860,7 +860,8 @@ class PaymentAllocation(BaseModel):
     document_id: str
     document_code: Optional[str] = ""
     document_type: Literal["invoice", "vendor_bill", "expense", "credit_note", "debit_note"] = "invoice"
-    amount: float
+    amount: float                                 # cash applied to this document
+    tds_amount: float = 0                         # TDS deducted by the party — settles the doc but is not cash received
 
 class PaymentIn(BaseModel):
     """Money received from a customer. Can be unallocated, partially allocated,
@@ -7734,6 +7735,45 @@ def _recalc_payment_status(p: Dict[str, Any]) -> Dict[str, Any]:
         p["status"] = "Used"
     return p
 
+async def _settled_per_invoice(invoice_ids=None):
+    """Map invoice_id -> total settled (cash allocations + TDS deducted) across all payments-in."""
+    q = {"allocations.document_id": {"$in": list(invoice_ids)}} if invoice_ids else {}
+    pays = await db.payments_in.find(q, {"_id": 0, "allocations": 1}).to_list(20000)
+    settled: Dict[str, float] = {}
+    for p in pays:
+        for a in (p.get("allocations") or []):
+            if a.get("document_type") == "invoice":
+                settled[a["document_id"]] = settled.get(a["document_id"], 0) + float(a.get("amount") or 0) + float(a.get("tds_amount") or 0)
+    return settled
+
+async def _refresh_invoice_paid_status(invoice_ids):
+    invoice_ids = [i for i in (invoice_ids or []) if i]
+    if not invoice_ids:
+        return
+    settled = await _settled_per_invoice(invoice_ids)
+    for iid in invoice_ids:
+        inv = await db.invoices.find_one({"id": iid}, {"_id": 0, "total": 1})
+        if not inv:
+            continue
+        if settled.get(iid, 0) >= float(inv.get("total", 0)) - 0.01:
+            await db.invoices.update_one({"id": iid}, {"$set": {"status": "paid"}})
+        else:
+            await db.invoices.update_one({"id": iid, "status": "paid"}, {"$set": {"status": "sent"}})
+
+@api.get("/payments-in/open-invoices/{party_id}")
+async def open_invoices_for_party(party_id: str, user=Depends(get_current_user)):
+    """A customer's invoices with a remaining balance — for allocating a payment (with optional TDS adjustment)."""
+    invs = await db.invoices.find({"customer_id": party_id}, {"_id": 0}).to_list(10000)
+    settled = await _settled_per_invoice()
+    out = []
+    for inv in invs:
+        bal = float(inv.get("total", 0)) - settled.get(inv.get("id", ""), 0)
+        if bal > 0.01:
+            out.append({"id": inv.get("id"), "code": inv.get("code"), "date": str(inv.get("date", ""))[:10],
+                        "total": round(float(inv.get("total", 0)), 2), "outstanding": round(bal, 2)})
+    out.sort(key=lambda r: r["date"])
+    return out
+
 @api.post("/payments-in")
 async def create_payment_in(p: PaymentIn, user=Depends(get_current_user)):
     doc = p.model_dump()
@@ -7741,6 +7781,7 @@ async def create_payment_in(p: PaymentIn, user=Depends(get_current_user)):
     _recalc_payment_status(doc)
     await db.payments_in.insert_one(doc)
     serialize(doc)
+    await _refresh_invoice_paid_status([a.get("document_id") for a in (doc.get("allocations") or []) if a.get("document_type") == "invoice"])
     await write_audit(user.get("name", ""), "payment_in_created", "payment_in", doc["id"], {"amount": doc["amount"], "party": doc["party_name"]})
     return doc
 
@@ -7753,6 +7794,7 @@ async def update_payment_in(pid: str, p: PaymentIn, user=Depends(get_current_use
     data = p.model_dump(); data.pop("id", None); data.pop("created_at", None)
     _recalc_payment_status(data)
     await db.payments_in.update_one({"id": pid}, {"$set": data})
+    await _refresh_invoice_paid_status([a.get("document_id") for a in (data.get("allocations") or []) if a.get("document_type") == "invoice"])
     return {"ok": True}
 
 @api.delete("/payments-in/{pid}")
@@ -7868,7 +7910,7 @@ async def dashboard_receivable_payable(user=Depends(get_current_user)):
     for p in payments_in:
         for a in (p.get("allocations") or []):
             if a.get("document_type") == "invoice":
-                allocated_per_inv[a["document_id"]] = allocated_per_inv.get(a["document_id"], 0) + float(a.get("amount") or 0)
+                allocated_per_inv[a["document_id"]] = allocated_per_inv.get(a["document_id"], 0) + float(a.get("amount") or 0) + float(a.get("tds_amount") or 0)
     receivable_total = 0.0
     receivable_parties = set()
     for inv in open_invoices:
@@ -7885,7 +7927,7 @@ async def dashboard_receivable_payable(user=Depends(get_current_user)):
     for p in payments_out:
         for a in (p.get("allocations") or []):
             if a.get("document_type") == "vendor_bill":
-                allocated_per_bill[a["document_id"]] = allocated_per_bill.get(a["document_id"], 0) + float(a.get("amount") or 0)
+                allocated_per_bill[a["document_id"]] = allocated_per_bill.get(a["document_id"], 0) + float(a.get("amount") or 0) + float(a.get("tds_amount") or 0)
     payable_total = 0.0
     payable_parties = set()
     for b in bills:
@@ -7914,7 +7956,7 @@ async def overdue_invoices(user=Depends(get_current_user)):
     for p in payments_in:
         for a in (p.get("allocations") or []):
             if a.get("document_type") == "invoice":
-                alloc[a["document_id"]] = alloc.get(a["document_id"], 0) + float(a.get("amount") or 0)
+                alloc[a["document_id"]] = alloc.get(a["document_id"], 0) + float(a.get("amount") or 0) + float(a.get("tds_amount") or 0)
     rows = []
     total = 0.0
     for inv in invs:
