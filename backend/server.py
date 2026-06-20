@@ -596,6 +596,11 @@ class Quotation(BaseModel):
     notes: Optional[str] = ""
     created_at: str = Field(default_factory=now_iso)
 
+class ExtraCharge(BaseModel):
+    """Document-level additional charge (Freight / Packaging / Adjustment). Lump sum, non-taxable."""
+    name: str
+    amount: float = 0
+
 class POLine(BaseModel):
     description: str
     item_code: Optional[str] = ""
@@ -698,11 +703,6 @@ class InvoiceLine(BaseModel):
     discount_pct: float = 0.0
     discount_amount: float = 0.0
     gst_rate: float = 18.0
-
-class ExtraCharge(BaseModel):
-    """Document-level additional charge (Freight / Packaging / Adjustment). Lump sum, non-taxable."""
-    name: str
-    amount: float = 0
 
 class Invoice(BaseModel):
     model_config = ConfigDict(extra="ignore")
