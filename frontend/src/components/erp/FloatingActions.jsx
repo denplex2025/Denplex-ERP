@@ -29,7 +29,7 @@ export default function FloatingActions() {
   const handleClick = (to) => { setOpen(false); navigate(to); };
 
   return (
-    <div ref={ref} className="fixed bottom-6 right-6 z-50 flex flex-col items-end gap-2">
+    <div ref={ref} className="fixed bottom-24 right-6 z-50 flex flex-col items-end gap-2">
       {open && (
         <div className="flex flex-col items-end gap-2 mb-1">
           {ACTIONS.map((a) => {
@@ -50,11 +50,12 @@ export default function FloatingActions() {
         </div>
       )}
       <button onClick={() => setOpen(!open)}
-        className={`rounded-full p-4 shadow-lg transition-all ${
-          open ? "bg-slate-700 hover:bg-slate-800 rotate-45" : "bg-blue-600 hover:bg-blue-700"
+        className={`flex items-center gap-2 rounded-full pl-3 pr-4 py-3 shadow-lg transition-all ${
+          open ? "bg-slate-700 hover:bg-slate-800" : "bg-blue-600 hover:bg-blue-700"
         } text-white`}
         title={open ? "Close" : "Quick actions"} aria-label="Quick actions">
-        {open ? <X className="w-6 h-6" /> : <Plus className="w-6 h-6" />}
+        {open ? <X className="w-5 h-5" /> : <Plus className="w-5 h-5" />}
+        <span className="font-semibold text-sm">{open ? "Close" : "Quick Actions"}</span>
       </button>
     </div>
   );
