@@ -60,6 +60,7 @@ import EwayBillForm from "./pages/EwayBillForm";
 import Webhooks from "./pages/Webhooks";
 import SalesOrderCreate from "./pages/SalesOrderCreate";
 import PurchaseBillCreate from "./pages/PurchaseBillCreate";
+import PartLibrary from "./pages/PartLibrary";
 
 function App() {
   return (
@@ -106,6 +107,7 @@ function App() {
               <Route path="sale-returns" element={<SaleReturns />} />
               <Route path="purchase-returns" element={<PurchaseReturns />} />
               <Route path="parts" element={<Parts />} />
+              <Route path="part-library" element={<PartLibrary />} />
               <Route path="machines" element={<Machines />} />
               <Route path="planning" element={<Planning />} />
               <Route path="costing" element={<Costing />} />
