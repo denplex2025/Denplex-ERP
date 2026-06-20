@@ -6,7 +6,7 @@ import {
   LayoutDashboard, Boxes, Layers, ClipboardList, FileText,
   ShoppingCart, Receipt, Users, UserPlus, Truck, ShieldCheck,
   FileBox, Settings as SettingsIcon, LogOut, Menu, Calculator, UsersRound, Megaphone, Wrench, ScrollText,
-  ArrowDownToLine, ArrowUpFromLine, Banknote, Undo2, Cog, CalendarRange, Search, Trash2, SlidersHorizontal, AlarmClock, Webhook, Library, Landmark
+  ArrowDownToLine, ArrowUpFromLine, Banknote, Undo2, Cog, CalendarRange, Search, Trash2, SlidersHorizontal, AlarmClock, Webhook, Library, Landmark, Wallet
 } from "lucide-react";
 import { useState, useEffect, useRef } from "react";
 import api from "@/lib/api";
@@ -93,6 +93,8 @@ const NAV_GROUPS = [
       { to: "/app/purchase-bills/new", label: "New Purchase Bill", icon: Receipt, testid: "nav-pb-new", end: true },
       { to: "/app/accounting", label: "Accounting", icon: Calculator, testid: "nav-accounting" },
       { to: "/app/gst-reports", label: "GST Reports", icon: Landmark, testid: "nav-gst-reports" },
+      { to: "/app/bank-cash", label: "Cash & Bank", icon: Wallet, testid: "nav-bank-cash" },
+      { to: "/app/doc-masters", label: "Document Masters", icon: FileText, testid: "nav-doc-masters" },
       { to: "/app/statements", label: "Account Statements", icon: ScrollText, testid: "nav-statements" },
       { to: "/app/reminders", label: "Payment Reminders", icon: AlarmClock, testid: "nav-reminders" },
       { to: "/app/costing", label: "Costing & Profitability", icon: Calculator, testid: "nav-costing" },
