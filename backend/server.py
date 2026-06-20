@@ -420,6 +420,77 @@ class StockTransfer(BaseModel):
 
 DEFAULT_LOCATIONS = ["Vatva", "Santej"]
 
+# ---------------------------------------------------------------------------
+# Standard Parts Library — reusable catalog of common bought-out components
+# (fasteners, pneumatics, bearings, standard hardware) so they don't have to
+# be re-typed for every BOM / inventory entry. Seeded once on first read.
+# ---------------------------------------------------------------------------
+PART_LIB_CATEGORIES = ["Fastener", "Pneumatic", "Bearing", "Standard", "Electrical", "Other"]
+
+class PartLibraryItem(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    category: str = "Standard"          # one of PART_LIB_CATEGORIES
+    name: str                            # e.g. "Socket Head Cap Screw M6x20"
+    standard: Optional[str] = ""         # e.g. "ISO 4762", "DIN 625"
+    size: Optional[str] = ""             # e.g. "M6x20", "6205", "1/4\" BSP"
+    material: Optional[str] = ""         # e.g. "SS304", "Grade 12.9", "Brass"
+    uom: str = "Nos"
+    hsn: Optional[str] = ""
+    gst_rate: float = 18.0
+    unit_cost: float = 0
+    notes: Optional[str] = ""
+    seeded: bool = False                 # True for built-in catalog rows
+    created_at: str = Field(default_factory=now_iso)
+
+def _seed_part(category, name, standard="", size="", material="", uom="Nos", hsn="", gst_rate=18.0, unit_cost=0):
+    return {"id": new_id(), "category": category, "name": name, "standard": standard, "size": size,
+            "material": material, "uom": uom, "hsn": hsn, "gst_rate": gst_rate, "unit_cost": unit_cost,
+            "notes": "", "seeded": True, "created_at": now_iso()}
+
+STANDARD_PARTS_SEED = [
+    # Fasteners (HSN 7318 typical)
+    _seed_part("Fastener", "Socket Head Cap Screw M5x16", "ISO 4762", "M5x16", "Grade 12.9", hsn="7318", unit_cost=3),
+    _seed_part("Fastener", "Socket Head Cap Screw M6x20", "ISO 4762", "M6x20", "Grade 12.9", hsn="7318", unit_cost=4),
+    _seed_part("Fastener", "Socket Head Cap Screw M8x25", "ISO 4762", "M8x25", "Grade 12.9", hsn="7318", unit_cost=6),
+    _seed_part("Fastener", "Socket Head Cap Screw M10x30", "ISO 4762", "M10x30", "Grade 12.9", hsn="7318", unit_cost=9),
+    _seed_part("Fastener", "Hex Bolt M8x40", "ISO 4014", "M8x40", "Grade 8.8", hsn="7318", unit_cost=5),
+    _seed_part("Fastener", "Hex Bolt M10x50", "ISO 4014", "M10x50", "Grade 8.8", hsn="7318", unit_cost=8),
+    _seed_part("Fastener", "Hex Nut M8", "ISO 4032", "M8", "Grade 8", hsn="7318", unit_cost=2),
+    _seed_part("Fastener", "Hex Nut M10", "ISO 4032", "M10", "Grade 8", hsn="7318", unit_cost=3),
+    _seed_part("Fastener", "Plain Washer M8", "ISO 7089", "M8", "SS304", hsn="7318", unit_cost=1),
+    _seed_part("Fastener", "Spring Washer M8", "IS 3063", "M8", "Spring Steel", hsn="7318", unit_cost=1),
+    _seed_part("Fastener", "Dowel Pin Ø6x20", "ISO 2338", "Ø6x20", "Hardened Steel", hsn="7318", unit_cost=7),
+    _seed_part("Fastener", "Dowel Pin Ø8x25", "ISO 2338", "Ø8x25", "Hardened Steel", hsn="7318", unit_cost=9),
+    _seed_part("Fastener", "Grub Screw M6x10", "ISO 4029", "M6x10", "Grade 45H", hsn="7318", unit_cost=3),
+    # Pneumatics (HSN 8412 / 8481 typical)
+    _seed_part("Pneumatic", "Pneumatic Cylinder Ø32x100 (DA)", "ISO 15552", "Ø32x100", "Aluminium", uom="Nos", hsn="8412", unit_cost=1200),
+    _seed_part("Pneumatic", "Pneumatic Cylinder Ø40x150 (DA)", "ISO 15552", "Ø40x150", "Aluminium", uom="Nos", hsn="8412", unit_cost=1650),
+    _seed_part("Pneumatic", "5/2 Solenoid Valve 1/4\" BSP", "", "1/4\" BSP", "Aluminium", uom="Nos", hsn="8481", unit_cost=900),
+    _seed_part("Pneumatic", "One-Touch Fitting 6mm-1/8\"", "", "6mm-1/8\"", "Brass", uom="Nos", hsn="8481", unit_cost=35),
+    _seed_part("Pneumatic", "One-Touch Fitting 8mm-1/4\"", "", "8mm-1/4\"", "Brass", uom="Nos", hsn="8481", unit_cost=45),
+    _seed_part("Pneumatic", "Polyurethane Tube 6mm OD", "", "6mm OD", "PU", uom="Mtr", hsn="3917", unit_cost=18),
+    _seed_part("Pneumatic", "Polyurethane Tube 8mm OD", "", "8mm OD", "PU", uom="Mtr", hsn="3917", unit_cost=24),
+    _seed_part("Pneumatic", "Flow Control Valve 1/4\" BSP", "", "1/4\" BSP", "Brass", uom="Nos", hsn="8481", unit_cost=140),
+    _seed_part("Pneumatic", "FRL Unit 1/4\"", "", "1/4\"", "Aluminium", uom="Nos", hsn="8421", unit_cost=1400),
+    # Bearings (HSN 8482)
+    _seed_part("Bearing", "Deep Groove Ball Bearing 6200", "DIN 625", "6200", "Chrome Steel", uom="Nos", hsn="8482", unit_cost=90),
+    _seed_part("Bearing", "Deep Groove Ball Bearing 6202", "DIN 625", "6202", "Chrome Steel", uom="Nos", hsn="8482", unit_cost=110),
+    _seed_part("Bearing", "Deep Groove Ball Bearing 6205", "DIN 625", "6205", "Chrome Steel", uom="Nos", hsn="8482", unit_cost=160),
+    _seed_part("Bearing", "Linear Bearing LM12UU", "", "LM12UU", "Chrome Steel", uom="Nos", hsn="8482", unit_cost=180),
+    _seed_part("Bearing", "Thrust Bearing 51105", "DIN 711", "51105", "Chrome Steel", uom="Nos", hsn="8482", unit_cost=210),
+    # Standard hardware / locating
+    _seed_part("Standard", "Toggle Clamp Horizontal 200kg", "", "GH-201", "Steel", uom="Nos", hsn="8205", unit_cost=320),
+    _seed_part("Standard", "Toggle Clamp Vertical 340kg", "", "GH-101", "Steel", uom="Nos", hsn="8205", unit_cost=360),
+    _seed_part("Standard", "Locating Pin (Diamond) Ø10", "", "Ø10", "Hardened Steel", uom="Nos", hsn="8466", unit_cost=240),
+    _seed_part("Standard", "Locating Pin (Round) Ø10", "", "Ø10", "Hardened Steel", uom="Nos", hsn="8466", unit_cost=220),
+    _seed_part("Standard", "Rest Pad Flat Ø16", "", "Ø16", "Hardened Steel", uom="Nos", hsn="8466", unit_cost=150),
+    _seed_part("Standard", "Compression Spring Ø10x30", "", "Ø10x30", "Spring Steel", uom="Nos", hsn="7320", unit_cost=12),
+    _seed_part("Standard", "Knob / Hand Lever M10", "", "M10", "Thermoplastic", uom="Nos", hsn="3926", unit_cost=85),
+    _seed_part("Electrical", "Proximity Sensor M12 PNP NO", "", "M12", "", uom="Nos", hsn="8536", unit_cost=420),
+    _seed_part("Electrical", "Limit Switch (Roller Lever)", "", "", "", uom="Nos", hsn="8536", unit_cost=180),
+]
+
 class BOMLine(BaseModel):
     # Either reference a legacy inventory item (item_id) OR a Part Master entry (component_part_id).
     # Going forward, component_part_id is preferred. item_id is kept for back-compat.
@@ -1791,6 +1862,79 @@ async def del_item(iid: str, user=Depends(require_roles("admin", "manager"))):
     await _recycle("items", "Inventory Item", doc, user)
     await db.items.delete_one({"id": iid})
     return {"ok": True}
+
+# ---------------------------------------------------------------------------
+# Standard Parts Library endpoints
+# ---------------------------------------------------------------------------
+async def _ensure_part_lib_seeded():
+    if await db.part_library.count_documents({}) == 0:
+        await db.part_library.insert_many([dict(p) for p in STANDARD_PARTS_SEED])
+
+@api.get("/part-library")
+async def list_part_library(category: Optional[str] = None, q: Optional[str] = None, user=Depends(get_current_user)):
+    await _ensure_part_lib_seeded()
+    query = {}
+    if category and category != "All":
+        query["category"] = category
+    rows = await list_collection(db.part_library, query=query, sort_key="name")
+    if q:
+        ql = q.lower()
+        rows = [r for r in rows if ql in (r.get("name", "") + " " + r.get("standard", "") + " " + r.get("size", "") + " " + r.get("material", "")).lower()]
+    rows.sort(key=lambda r: (r.get("category", ""), r.get("name", "")))
+    return rows
+
+@api.get("/part-library/categories")
+async def part_library_categories(user=Depends(get_current_user)):
+    return PART_LIB_CATEGORIES
+
+@api.post("/part-library")
+async def create_part_library(p: PartLibraryItem, user=Depends(get_current_user)):
+    p.seeded = False
+    doc = p.model_dump()
+    await db.part_library.insert_one(doc)
+    return serialize(doc)
+
+@api.put("/part-library/{pid}")
+async def update_part_library(pid: str, p: PartLibraryItem, user=Depends(get_current_user)):
+    data = p.model_dump(); data.pop("id", None); data.pop("created_at", None); data.pop("seeded", None)
+    await db.part_library.update_one({"id": pid}, {"$set": data})
+    return {"ok": True}
+
+@api.delete("/part-library/{pid}")
+async def del_part_library(pid: str, user=Depends(require_roles("admin", "manager"))):
+    doc = await db.part_library.find_one({"id": pid}, {"_id": 0})
+    if doc:
+        await _recycle("part_library", "Part Library Item", doc, user)
+    await db.part_library.delete_one({"id": pid})
+    return {"ok": True}
+
+@api.post("/part-library/{pid}/to-inventory")
+async def part_library_to_inventory(pid: str, body: Optional[dict] = None, user=Depends(get_current_user)):
+    """Create an inventory item from a library part. Optional body: {sku, qty_on_hand, location}."""
+    p = await db.part_library.find_one({"id": pid}, {"_id": 0})
+    if not p:
+        raise HTTPException(404, "Part not found")
+    body = body or {}
+    sku = (body.get("sku") or "").strip()
+    if not sku:
+        base = "".join(ch for ch in (p.get("size") or p.get("name") or "PRT").upper() if ch.isalnum())[:10] or "PRT"
+        sku = f"{p.get('category','STD')[:3].upper()}-{base}"
+        n = 1
+        while await db.items.find_one({"sku": sku}):
+            n += 1; sku = f"{p.get('category','STD')[:3].upper()}-{base}-{n}"
+    elif await db.items.find_one({"sku": sku}):
+        raise HTTPException(400, "SKU already exists")
+    qty = float(body.get("qty_on_hand") or 0)
+    loc = (body.get("location") or "").strip()
+    item = InventoryItem(
+        sku=sku, name=p["name"], category="consumable" if p.get("category") == "Fastener" else "raw",
+        uom=p.get("uom", "Nos"), qty_on_hand=qty, unit_cost=float(p.get("unit_cost") or 0),
+        hsn=p.get("hsn", ""), gst_rate=float(p.get("gst_rate") or 18.0), location=loc,
+        qty_by_location=({loc: qty} if loc and qty else {}),
+    )
+    doc = item.model_dump()
+    await db.items.insert_one(doc)
+    return serialize(doc)
 
 @api.post("/inventory/movements")
 async def create_movement(m: StockMovement, user=Depends(get_current_user)):
