@@ -261,6 +261,14 @@ async def next_seq(name: str) -> int:
 async def gen_code(prefix: str, name: str) -> str:
     n = await next_seq(name)
     year = datetime.now(timezone.utc).strftime("%y")
+    # Use the saved Document-Masters prefix for this doc type when configured (e.g. "2627/" -> "2627/0001")
+    try:
+        doc = await db.settings.find_one({"_id": "masters_prefixes"}, {"_id": 0})
+        pref = ((doc or {}).get("value") or {}).get(name)
+        if pref:
+            return f"{pref}{n:04d}"
+    except Exception:
+        pass
     return f"{prefix}-{year}-{n:04d}"
 
 # ---------------- Models ----------------
