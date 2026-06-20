@@ -21,9 +21,10 @@ export default function PurchaseBillCreate() {
   const [f, setF] = useState({
     code: "", date: today, due_date: "", reference: "",
     supplier_id: "", supplier_name: "", supplier_gstin: "", place_of_supply: "", is_interstate: false,
-    terms_text: "", round_off: 0, notes: "",
+    terms_text: "", round_off: 0, tds: 0, tds_rate: 0, tds_section: "", tcs: 0, tcs_rate: 0, extra_charges: [], notes: "",
   });
   const [lines, setLines] = useState([blankLine()]);
+  const [tdsSections, setTdsSections] = useState([]);
   const set = (k, v) => setF(p => ({ ...p, [k]: v }));
 
   useEffect(() => {
@@ -33,6 +34,7 @@ export default function PurchaseBillCreate() {
         setSuppliers(s.data || []); setItems(it.data || []);
       } catch (e) { /* ignore */ }
     })();
+    api.get("/masters").then(r => setTdsSections(r.data?.tds_sections || [])).catch(() => {});
   }, []);
 
   const pickSupplier = (id) => {
@@ -47,6 +49,16 @@ export default function PurchaseBillCreate() {
   const addLine = () => setLines(ls => [...ls, blankLine()]);
   const delLine = (i) => setLines(ls => ls.length > 1 ? ls.filter((_, idx) => idx !== i) : ls);
 
+  const addCharge = () => setF(p => ({ ...p, extra_charges: [...(p.extra_charges || []), { name: "", amount: 0 }] }));
+  const setCharge = (i, k, v) => setF(p => ({ ...p, extra_charges: p.extra_charges.map((c, idx) => idx === i ? { ...c, [k]: v } : c) }));
+  const delCharge = (i) => setF(p => ({ ...p, extra_charges: p.extra_charges.filter((_, idx) => idx !== i) }));
+  const pickTds = (sec) => {
+    const s = tdsSections.find(x => `${x.section}|${x.name}` === sec);
+    const rate = s ? Number(s.rate) : 0;
+    setF(p => ({ ...p, tds_section: sec, tds_rate: rate, tds: Math.round((totals.subtotal * rate / 100) * 100) / 100 }));
+  };
+  const setTcsRate = (r) => setF(p => ({ ...p, tcs_rate: r, tcs: Math.round(((totals.subtotal + totals.gst) * Number(r || 0) / 100) * 100) / 100 }));
+
   const lineAmount = (l) => {
     let amt = Number(l.qty || 0) * Number(l.rate || 0);
     amt -= amt * Number(l.discount_pct || 0) / 100;
@@ -56,9 +68,10 @@ export default function PurchaseBillCreate() {
   const totals = useMemo(() => {
     let subtotal = 0, gst = 0;
     for (const l of lines) { const a = lineAmount(l); subtotal += a; gst += a * Number(l.gst_rate || 0) / 100; }
-    const grand = subtotal + gst + Number(f.round_off || 0);
-    return { subtotal, gst, cgst: f.is_interstate ? 0 : gst / 2, sgst: f.is_interstate ? 0 : gst / 2, igst: f.is_interstate ? gst : 0, grand };
-  }, [lines, f.round_off, f.is_interstate]);
+    const chargesTotal = (f.extra_charges || []).reduce((a, c) => a + Number(c.amount || 0), 0);
+    const grand = subtotal + gst + chargesTotal + Number(f.round_off || 0) - Number(f.tds || 0) + Number(f.tcs || 0);
+    return { subtotal, gst, chargesTotal, cgst: f.is_interstate ? 0 : gst / 2, sgst: f.is_interstate ? 0 : gst / 2, igst: f.is_interstate ? gst : 0, grand };
+  }, [lines, f.round_off, f.tds, f.tcs, f.extra_charges, f.is_interstate]);
 
   const save = async () => {
     if (!f.supplier_id) { toast.error("Select a supplier"); return; }
@@ -67,6 +80,9 @@ export default function PurchaseBillCreate() {
     try {
       const payload = {
         ...f, round_off: Number(f.round_off || 0), status: "unpaid",
+        tds: Number(f.tds || 0), tds_rate: Number(f.tds_rate || 0), tds_section: f.tds_section || "",
+        tcs: Number(f.tcs || 0), tcs_rate: Number(f.tcs_rate || 0),
+        extra_charges: (f.extra_charges || []).filter(c => (c.name || "").trim() || Number(c.amount || 0)).map(c => ({ name: c.name || "Charge", amount: Number(c.amount || 0) })),
         lines: lines.filter(l => (l.description || "").trim()).map(l => ({
           description: l.description, item_code: l.item_code, hsn: l.hsn,
           qty: Number(l.qty || 0), unit: l.unit, rate: Number(l.rate || 0),
@@ -142,7 +158,26 @@ export default function PurchaseBillCreate() {
           {f.is_interstate
             ? <div className="flex justify-between"><span className="text-slate-500">IGST</span><span className="font-mono-tech">{inr(totals.igst)}</span></div>
             : <><div className="flex justify-between"><span className="text-slate-500">CGST</span><span className="font-mono-tech">{inr(totals.cgst)}</span></div><div className="flex justify-between"><span className="text-slate-500">SGST</span><span className="font-mono-tech">{inr(totals.sgst)}</span></div></>}
+          {(f.extra_charges || []).map((c, i) => (
+            <div key={i} className="flex items-center gap-2">
+              <Input value={c.name} onChange={e => setCharge(i, "name", e.target.value)} placeholder="Freight / Packing…" className="h-8 flex-1" />
+              <Input type="number" value={c.amount} onChange={e => setCharge(i, "amount", e.target.value)} className="h-8 w-24 text-right" />
+              <button onClick={() => delCharge(i)} className="text-slate-300 hover:text-red-600"><Trash2 className="h-3.5 w-3.5" /></button>
+            </div>
+          ))}
+          <button onClick={addCharge} className="text-xs text-red-600 hover:underline">+ Add charge (freight / packing)</button>
           <div className="flex justify-between items-center"><span className="text-slate-500">Round Off</span><Input type="number" value={f.round_off} onChange={e => set("round_off", e.target.value)} className="h-8 w-24 text-right" /></div>
+          <div className="flex items-center gap-2"><span className="text-slate-500 whitespace-nowrap">TDS</span>
+            <select value={f.tds_section} onChange={e => pickTds(e.target.value)} className="h-8 text-xs border border-slate-200 rounded-sm px-1 bg-white flex-1 min-w-0">
+              <option value="">None</option>{tdsSections.map((s, i) => <option key={i} value={`${s.section}|${s.name}`}>{s.section} · {s.name} ({s.rate}%)</option>)}
+            </select>
+            <Input type="number" value={f.tds} onChange={e => set("tds", e.target.value)} className="h-8 w-24 text-right" />
+          </div>
+          <div className="flex items-center gap-2"><span className="text-slate-500 whitespace-nowrap">TCS %</span>
+            <Input type="number" value={f.tcs_rate} onChange={e => setTcsRate(e.target.value)} className="h-8 w-16 text-right" />
+            <span className="text-slate-400 text-xs flex-1">amount</span>
+            <Input type="number" value={f.tcs} onChange={e => set("tcs", e.target.value)} className="h-8 w-24 text-right" />
+          </div>
           <div className="flex justify-between border-t border-slate-200 pt-2 text-base font-bold"><span>Total</span><span className="font-mono-tech text-red-600">{inr(totals.grand)}</span></div>
         </div>
       </div>
