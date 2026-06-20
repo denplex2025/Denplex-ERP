@@ -58,6 +58,8 @@ import InvoiceCreate from "./pages/InvoiceCreate";
 import PurchaseOrderCreate from "./pages/PurchaseOrderCreate";
 import EwayBillForm from "./pages/EwayBillForm";
 import Webhooks from "./pages/Webhooks";
+import SalesOrderCreate from "./pages/SalesOrderCreate";
+import PurchaseBillCreate from "./pages/PurchaseBillCreate";
 
 function App() {
   return (
@@ -78,6 +80,8 @@ function App() {
               <Route path="quotations" element={<Quotations />} />
               <Route path="purchase-orders" element={<PurchaseOrders />} />
               <Route path="purchase-orders/new" element={<PurchaseOrderCreate />} />
+              <Route path="sale-orders/new" element={<SalesOrderCreate />} />
+              <Route path="purchase-bills/new" element={<PurchaseBillCreate />} />
               <Route path="invoices" element={<Invoices />} />
               <Route path="invoices/new" element={<InvoiceCreate />} />
               <Route path="invoices/:id/eway" element={<EwayBillForm />} />
