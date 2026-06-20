@@ -7528,6 +7528,153 @@ async def overdue_invoices(user=Depends(get_current_user)):
     rows.sort(key=lambda r: r["days_overdue"], reverse=True)
     return {"overdue": rows, "total_overdue": round(total, 2), "count": len(rows)}
 
+# ---------------------------------------------------------------------------
+# GST Reports — GSTR-1 (outward), GSTR-3B (summary), GSTR-2/Purchase register.
+# Computed directly from invoices + vendor_bills. Read-only.
+# ---------------------------------------------------------------------------
+def _fy_default_range():
+    today = datetime.utcnow().date()
+    y = today.year if today.month >= 4 else today.year - 1
+    return f"{y}-04-01", f"{y+1}-03-31"
+
+def _date10(v):
+    return str(v or "")[:10]
+
+def _in_range(d, frm, to):
+    d = _date10(d)
+    return bool(d) and frm <= d <= to
+
+def _line_taxable(l):
+    amt = float(l.get("qty", 0)) * float(l.get("rate", 0))
+    amt -= amt * float(l.get("discount_pct", 0)) / 100.0
+    amt -= float(l.get("discount_amount", 0))
+    return amt if amt > 0 else 0.0
+
+async def _gst_collect(frm, to):
+    """Return (invoices, vendor_bills) within range."""
+    invs = [i for i in await db.invoices.find({}, {"_id": 0}).to_list(50000) if _in_range(i.get("date"), frm, to)]
+    bills = [b for b in await db.vendor_bills.find({}, {"_id": 0}).to_list(50000) if _in_range(b.get("date"), frm, to)]
+    return invs, bills
+
+def _build_gstr1(invs):
+    b2b, b2c_map, hsn_map = [], {}, {}
+    for inv in invs:
+        itype = inv.get("invoice_type", "gst")
+        inter = bool(inv.get("is_interstate"))
+        taxable = float(inv.get("subtotal", 0))
+        cgst, sgst, igst = float(inv.get("cgst", 0)), float(inv.get("sgst", 0)), float(inv.get("igst", 0))
+        row = {
+            "invoice_no": inv.get("code", ""), "date": _date10(inv.get("date")),
+            "party": inv.get("customer_name", ""), "gstin": inv.get("customer_gstin", "") or "",
+            "place_of_supply": inv.get("place_of_supply", ""), "type": itype,
+            "taxable": round(taxable, 2), "cgst": round(cgst, 2), "sgst": round(sgst, 2),
+            "igst": round(igst, 2), "total": round(float(inv.get("total", 0)), 2),
+        }
+        if (inv.get("customer_gstin") or "").strip():
+            b2b.append(row)
+        else:
+            key = (round(_max_line_rate(inv), 2), inv.get("place_of_supply", ""))
+            agg = b2c_map.setdefault(key, {"rate": key[0], "place_of_supply": key[1], "taxable": 0, "cgst": 0, "sgst": 0, "igst": 0, "total": 0, "count": 0})
+            for k, v in (("taxable", taxable), ("cgst", cgst), ("sgst", sgst), ("igst", igst), ("total", float(inv.get("total", 0)))):
+                agg[k] += v
+            agg["count"] += 1
+        # HSN summary (skip non-gst/export tax)
+        for l in (inv.get("lines") or []):
+            tx = _line_taxable(l)
+            rate = float(l.get("gst_rate", 0)) if itype == "gst" else 0.0
+            tax = tx * rate / 100.0
+            hk = (l.get("hsn", "") or "", rate)
+            h = hsn_map.setdefault(hk, {"hsn": hk[0], "rate": rate, "qty": 0, "taxable": 0, "cgst": 0, "sgst": 0, "igst": 0})
+            h["qty"] += float(l.get("qty", 0)); h["taxable"] += tx
+            if inter: h["igst"] += tax
+            else: h["cgst"] += tax / 2; h["sgst"] += tax / 2
+    for d in list(b2c_map.values()) + list(hsn_map.values()):
+        for k in ("taxable", "cgst", "sgst", "igst", "total", "qty"):
+            if k in d: d[k] = round(d[k], 2)
+    return {"b2b": b2b, "b2c": list(b2c_map.values()), "hsn": list(hsn_map.values())}
+
+def _max_line_rate(inv):
+    rates = [float(l.get("gst_rate", 0)) for l in (inv.get("lines") or [])]
+    return max(rates) if rates else 0.0
+
+def _sum_docs(docs):
+    t = {"taxable": 0, "cgst": 0, "sgst": 0, "igst": 0, "total": 0}
+    for d in docs:
+        t["taxable"] += float(d.get("subtotal", 0)); t["cgst"] += float(d.get("cgst", 0))
+        t["sgst"] += float(d.get("sgst", 0)); t["igst"] += float(d.get("igst", 0))
+        t["total"] += float(d.get("total", 0))
+    return {k: round(v, 2) for k, v in t.items()}
+
+@api.get("/reports/gst/summary")
+async def gst_summary(date_from: str = "", date_to: str = "", user=Depends(get_current_user)):
+    frm, to = (date_from or "", date_to or "")
+    if not frm or not to:
+        d1, d2 = _fy_default_range(); frm = frm or d1; to = to or d2
+    invs, bills = await _gst_collect(frm, to)
+    taxable_invs = [i for i in invs if i.get("invoice_type", "gst") == "gst"]
+    export_invs = [i for i in invs if i.get("invoice_type") == "export"]
+    nongst_invs = [i for i in invs if i.get("invoice_type") == "non_gst"]
+    gstr1 = _build_gstr1(invs)
+    outward = _sum_docs(taxable_invs)
+    inward = _sum_docs(bills)
+    out_tax = round(outward["cgst"] + outward["sgst"] + outward["igst"], 2)
+    itc = round(inward["cgst"] + inward["sgst"] + inward["igst"], 2)
+    gstr3b = {
+        "outward": outward, "export_value": round(sum(float(i.get("total", 0)) for i in export_invs), 2),
+        "nongst_value": round(sum(float(i.get("total", 0)) for i in nongst_invs), 2),
+        "inward_itc": inward, "output_tax": out_tax, "input_tax_credit": itc,
+        "net_payable": round(out_tax - itc, 2),
+    }
+    gstr2 = [{
+        "bill_no": b.get("code", ""), "date": _date10(b.get("date")), "party": b.get("supplier_name", ""),
+        "gstin": b.get("supplier_gstin", "") or "", "taxable": round(float(b.get("subtotal", 0)), 2),
+        "cgst": round(float(b.get("cgst", 0)), 2), "sgst": round(float(b.get("sgst", 0)), 2),
+        "igst": round(float(b.get("igst", 0)), 2), "total": round(float(b.get("total", 0)), 2),
+    } for b in bills]
+    return {
+        "range": {"from": frm, "to": to},
+        "counts": {"invoices": len(invs), "bills": len(bills)},
+        "gstr1": gstr1, "gstr3b": gstr3b, "gstr2": gstr2,
+    }
+
+@api.get("/reports/gst/export.xlsx")
+async def gst_export_xlsx(date_from: str = "", date_to: str = "", user=Depends(get_current_user)):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    data = await gst_summary(date_from, date_to, user)
+    frm, to = data["range"]["from"], data["range"]["to"]
+    wb = Workbook(); wb.remove(wb.active)
+    hdr = Font(bold=True, color="FFFFFF"); fill = PatternFill("solid", fgColor="DC2626")
+    def sheet(name, cols, rows):
+        ws = wb.create_sheet(name[:31])
+        for c, h in enumerate(cols, 1):
+            cell = ws.cell(1, c, h); cell.font = hdr; cell.fill = fill
+        for r, row in enumerate(rows, 2):
+            for c, v in enumerate(row, 1):
+                ws.cell(r, c, v)
+        return ws
+    g1 = data["gstr1"]
+    sheet("GSTR-1 B2B", ["Invoice No", "Date", "Party", "GSTIN", "Place of Supply", "Type", "Taxable", "CGST", "SGST", "IGST", "Total"],
+          [[r["invoice_no"], r["date"], r["party"], r["gstin"], r["place_of_supply"], r["type"], r["taxable"], r["cgst"], r["sgst"], r["igst"], r["total"]] for r in g1["b2b"]])
+    sheet("GSTR-1 B2C", ["Rate%", "Place of Supply", "Invoices", "Taxable", "CGST", "SGST", "IGST", "Total"],
+          [[r["rate"], r["place_of_supply"], r["count"], r["taxable"], r["cgst"], r["sgst"], r["igst"], r["total"]] for r in g1["b2c"]])
+    sheet("HSN Summary", ["HSN/SAC", "Rate%", "Qty", "Taxable", "CGST", "SGST", "IGST"],
+          [[r["hsn"], r["rate"], r["qty"], r["taxable"], r["cgst"], r["sgst"], r["igst"]] for r in g1["hsn"]])
+    b = data["gstr3b"]
+    sheet("GSTR-3B", ["Section", "Taxable", "CGST", "SGST", "IGST"],
+          [["Outward taxable (3.1a)", b["outward"]["taxable"], b["outward"]["cgst"], b["outward"]["sgst"], b["outward"]["igst"]],
+           ["Zero-rated/Export (3.1b)", b["export_value"], 0, 0, 0],
+           ["Nil/Non-GST (3.1e)", b["nongst_value"], 0, 0, 0],
+           ["Inward ITC (4a)", b["inward_itc"]["taxable"], b["inward_itc"]["cgst"], b["inward_itc"]["sgst"], b["inward_itc"]["igst"]],
+           ["Output Tax", "", "", "", b["output_tax"]],
+           ["Input Tax Credit", "", "", "", b["input_tax_credit"]],
+           ["NET PAYABLE", "", "", "", b["net_payable"]]])
+    sheet("GSTR-2 Purchases", ["Bill No", "Date", "Party", "GSTIN", "Taxable", "CGST", "SGST", "IGST", "Total"],
+          [[r["bill_no"], r["date"], r["party"], r["gstin"], r["taxable"], r["cgst"], r["sgst"], r["igst"], r["total"]] for r in data["gstr2"]])
+    buf = io.BytesIO(); wb.save(buf); buf.seek(0)
+    return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                             headers={"Content-Disposition": f'attachment; filename="GST_Report_{frm}_to_{to}.xlsx"'})
+
 @api.get("/dashboard/sales-trend")
 async def dashboard_sales_trend(days: int = 30, user=Depends(get_current_user)):
     """Daily sale totals for the last N days. For the Home chart."""
