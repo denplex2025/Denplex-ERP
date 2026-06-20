@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import api from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { AlertTriangle, RefreshCw, Trash2, ShieldCheck } from "lucide-react";
+import { AlertTriangle, RefreshCw, Trash2, ShieldCheck, Sparkles } from "lucide-react";
 import { toast } from "sonner";
 
 export default function ResetData() {
@@ -11,6 +11,19 @@ export default function ResetData() {
   const [confirm, setConfirm] = useState("");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [seeding, setSeeding] = useState(false);
+
+  const seed = async () => {
+    if (!window.confirm("Load a sample dataset (items, parties, invoices, bills, payments, orders)? Use this on an empty ERP to test, then Reset before importing real data.")) return;
+    setSeeding(true);
+    try {
+      const r = await api.post("/admin/seed-sample", {});
+      const s = r.data?.seeded || {};
+      toast.success(`Seeded ${s.invoices || 0} invoices, ${s.vendor_bills || 0} bills, ${s.items || 0} items, ${s.customers || 0} parties`);
+      await load();
+    } catch (e) { toast.error(e?.response?.data?.detail || "Seeding failed"); }
+    setSeeding(false);
+  };
 
   const load = async () => {
     setLoading(true);
@@ -45,6 +58,15 @@ export default function ResetData() {
         <h1 className="text-xl font-bold font-display">Reset Trial Data</h1>
       </div>
       <p className="text-sm text-slate-500 mb-4">Permanently clear imported / trial data so you can do a clean re-import. Pick the groups to wipe. This is a <strong>hard delete</strong> — it skips the Recycle Bin and cannot be undone.</p>
+
+      <div className="flex items-start gap-3 text-sm bg-emerald-50 border border-emerald-200 rounded-md p-3 mb-4">
+        <Sparkles className="h-4 w-4 mt-0.5 shrink-0 text-emerald-600" />
+        <div className="flex-1">
+          <div className="font-medium text-emerald-800">Load sample data</div>
+          <div className="text-emerald-700/90">Seed a realistic demo set — items, customers, suppliers, sale invoices (GST/non-GST/export), purchase bills, payments with allocations, orders & expenses — so you can test every screen on an empty ERP. Reset before importing real data.</div>
+        </div>
+        <Button onClick={seed} disabled={seeding} className="rounded-sm bg-emerald-600 hover:bg-emerald-700 shrink-0"><Sparkles className="h-4 w-4 mr-1" /> {seeding ? "Seeding…" : "Load Sample"}</Button>
+      </div>
 
       <div className="flex items-start gap-2 text-sm bg-amber-50 border border-amber-200 text-amber-800 rounded-md p-3 mb-4">
         <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
