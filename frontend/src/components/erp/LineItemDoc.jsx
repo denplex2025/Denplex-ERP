@@ -1,4 +1,5 @@
 import { useEffect, useState, useRef } from "react";
+import { useNavigate } from "react-router-dom";
 import api from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -23,7 +24,10 @@ export default function LineItemDoc({
   whatsappPartyEndpoint, // to look up phone for whatsapp
   isInvoice = false,
   aiQuote = false,
+  createTo,            // if set, "New" navigates here (full-page form) instead of the inline dialog
+  editTo,              // if set, row edit navigates to editTo(row) instead of the inline dialog
 }) {
+  const navigate = useNavigate();
   const [items, setItems] = useState([]);
   const [parties, setParties] = useState([]);
   const [open, setOpen] = useState(false);
@@ -46,6 +50,7 @@ export default function LineItemDoc({
   useEffect(() => { load(); }, []);
 
   const openNew = () => {
+    if (createTo) { navigate(createTo); return; }
     setEditing(null);
     setForm({ lines: [{ description: "", qty: 1, rate: 0, gst_rate: 18 }], status: "draft", date: new Date().toISOString().slice(0,10), is_interstate: false });
     setOpen(true);
@@ -100,7 +105,10 @@ export default function LineItemDoc({
     } catch (e) { toast.error(e?.response?.data?.detail || "Word download failed"); }
     setAiBusy(false);
   };
-  const openEdit = (row) => { setEditing(row); setForm({ ...row, lines: row.lines || [] }); setOpen(true); };
+  const openEdit = (row) => {
+    if (editTo) { navigate(editTo(row)); return; }
+    setEditing(row); setForm({ ...row, lines: row.lines || [] }); setOpen(true);
+  };
   const setF = (k, v) => setForm(p => ({ ...p, [k]: v }));
   const setLine = (i, k, v) => setForm(p => {
     const ls = [...(p.lines || [])]; ls[i] = { ...ls[i], [k]: v }; return { ...p, lines: ls };
