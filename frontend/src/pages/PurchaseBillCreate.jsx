@@ -57,6 +57,7 @@ export default function PurchaseBillCreate() {
     const rate = s ? Number(s.rate) : 0;
     setF(p => ({ ...p, tds_section: sec, tds_rate: rate, tds: Math.round((totals.subtotal * rate / 100) * 100) / 100 }));
   };
+  const setTdsRate = (r) => setF(p => ({ ...p, tds_rate: r, tds_section: "", tds: Math.round((totals.subtotal * Number(r || 0) / 100) * 100) / 100 }));
   const setTcsRate = (r) => setF(p => ({ ...p, tcs_rate: r, tcs: Math.round(((totals.subtotal + totals.gst) * Number(r || 0) / 100) * 100) / 100 }));
 
   const lineAmount = (l) => {
@@ -169,8 +170,9 @@ export default function PurchaseBillCreate() {
           <div className="flex justify-between items-center"><span className="text-slate-500">Round Off</span><Input type="number" value={f.round_off} onChange={e => set("round_off", e.target.value)} className="h-8 w-24 text-right" /></div>
           <div className="flex items-center gap-2"><span className="text-slate-500 whitespace-nowrap">TDS</span>
             <select value={f.tds_section} onChange={e => pickTds(e.target.value)} className="h-8 text-xs border border-slate-200 rounded-sm px-1 bg-white flex-1 min-w-0">
-              <option value="">None</option>{tdsSections.map((s, i) => <option key={i} value={`${s.section}|${s.name}`}>{s.section} · {s.name} ({s.rate}%)</option>)}
+              <option value="">% / section</option>{tdsSections.map((s, i) => <option key={i} value={`${s.section}|${s.name}`}>{s.section} · {s.name} ({s.rate}%)</option>)}
             </select>
+            <Input type="number" value={f.tds_rate} onChange={e => setTdsRate(e.target.value)} className="h-8 w-14 text-right" placeholder="%" />
             <Input type="number" value={f.tds} onChange={e => set("tds", e.target.value)} className="h-8 w-24 text-right" />
           </div>
           <div className="flex items-center gap-2"><span className="text-slate-500 whitespace-nowrap">TCS %</span>
