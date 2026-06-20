@@ -2002,6 +2002,191 @@ async def reset_data(body: dict, user=Depends(require_roles("admin"))):
         pass
     return {"ok": True, "deleted": deleted, "total": sum(deleted.values())}
 
+@api.post("/admin/seed-sample")
+async def seed_sample_data(body: Optional[dict] = None, user=Depends(require_roles("admin"))):
+    """Insert a coherent SAMPLE dataset (realistic items/HSN, fictional parties) across
+    sales, purchase, payments, orders & expenses so every screen can be verified. Idempotent
+    unless force=true. All docs carry seeded_demo=True."""
+    body = body or {}
+    if not body.get("force") and await db.invoices.count_documents({}) > 0:
+        raise HTTPException(400, "ERP already has invoices. Pass force=true to seed anyway, or Reset first.")
+    from datetime import timedelta as _td
+    D = lambda days: (datetime.utcnow().date() - _td(days=days)).isoformat()
+    tag = {"seeded_demo": True}
+
+    def line(desc, code, hsn, qty, unit, rate, gst):
+        return {"description": desc, "item_code": code, "hsn": hsn, "qty": qty, "unit": unit,
+                "rate": rate, "discount_pct": 0, "discount_amount": 0, "gst_rate": gst}
+
+    def amt(l):
+        a = float(l["qty"]) * float(l["rate"]); a -= a * float(l.get("discount_pct", 0)) / 100; a -= float(l.get("discount_amount", 0))
+        return a if a > 0 else 0
+
+    def totals(lines, itype, inter, round_off=0):
+        sub = sum(amt(l) for l in lines)
+        tax = sum(amt(l) * float(l["gst_rate"]) / 100 for l in lines) if itype == "gst" else 0.0
+        out = {"subtotal": round(sub, 2), "cgst": 0.0, "sgst": 0.0, "igst": 0.0, "gst_total": round(tax, 2), "total": round(sub + tax + round_off, 2)}
+        if itype == "gst":
+            if inter: out["igst"] = round(tax, 2)
+            else: out["cgst"] = round(tax / 2, 2); out["sgst"] = round(tax / 2, 2)
+        return out
+
+    # ---- Items (real catalogue) ----
+    items_spec = [
+        ("ALU-ROD-50", "ROD ALU Ø50.8MM", "7604", "Kg", 533, 420, 18),
+        ("HYD-ROD-80", "HYD CYL PISTON ROD 80MM", "7222", "Nos", 8870, 7000, 18),
+        ("CAGE-SS304", "CAGE ARM - SS304", "8487", "Nos", 12760, 9500, 5),
+        ("MS-PLT-16", "MS PLATE 600X600X16MM", "72082630", "Kg", 90, 70, 18),
+        ("PEEK-FLAT", "PEEK FLAT 1240X62X25MM", "8483", "Nos", 38500, 31000, 5),
+        ("BRASS-P8", "BRASS PIPE Ø8MM", "7412", "Mtr", 650, 480, 12),
+        ("EN24-45", "ROUND BAR EN24 Ø45MM", "7228", "Kg", 225, 180, 18),
+        ("MS-CH-100", "MS CHANNEL 100X50X6MM", "72163100", "Kg", 66, 52, 18),
+        ("JOBWORK", "VMC Machining Job Work", "9988", "Nos", 5000, 0, 18),
+        ("FREIGHT", "Freight", "9965", "Nos", 2000, 0, 18),
+    ]
+    items = []
+    for sku, name, hsn, uom, sale, cost, gst in items_spec:
+        it = {"id": new_id(), "sku": sku, "name": name, "category": "raw", "uom": uom,
+              "qty_on_hand": 100, "qty_in_process": 0, "qty_by_location": {"Vatva": 60, "Santej": 40},
+              "reorder_level": 10, "unit_cost": cost, "hsn": hsn, "gst_rate": gst, "location": "Vatva",
+              "created_at": now_iso(), **tag}
+        items.append(it)
+    await db.items.insert_many([dict(i) for i in items])
+
+    # ---- Customers (mix intra Gujarat / interstate / export) ----
+    cust_spec = [
+        ("Shakti Auto Components", "24ABCFS1234A1Z5", "Gujarat", False, "gst"),
+        ("Anand Engineering Works", "24AAECA5678B1Z2", "Gujarat", False, "gst"),
+        ("Deccan Hydraulics Pvt Ltd", "36AADCD9012C1Z8", "Telangana", True, "gst"),
+        ("Northern Tooling Co", "06AAFCN3456D1Z1", "Haryana", True, "gst"),
+        ("Surya Fabricators", "", "Gujarat", False, "non_gst"),
+        ("Global Exports FZE", "", "Other Territory", True, "export"),
+    ]
+    customers = []
+    for nm, gstin, state, inter, itype in cust_spec:
+        customers.append({"id": new_id(), "name": nm, "gstin": gstin, "address": state,
+                          "phone": "90000000" + str(10 + len(customers)), "email": "", "customer_type": "repeat",
+                          "orders_count": 0, "created_at": now_iso(), "_state": state, "_inter": inter, "_itype": itype, **tag})
+    await db.customers.insert_many([{k: v for k, v in c.items() if not k.startswith("_")} for c in customers])
+
+    # ---- Suppliers ----
+    sup_spec = [
+        ("Maruti Steel Traders", "24AAACM1111E1Z3", "Gujarat", False),
+        ("Bombay Alloys & Metals", "27AABCB2222F1Z9", "Maharashtra", True),
+        ("Sanghvi Hardware", "24AAGFS3333G1Z7", "Gujarat", False),
+    ]
+    suppliers = []
+    for nm, gstin, state, inter in sup_spec:
+        suppliers.append({"id": new_id(), "name": nm, "gstin": gstin, "address": state,
+                          "phone": "98000000" + str(10 + len(suppliers)), "email": "", "created_at": now_iso(),
+                          "_state": state, "_inter": inter, **tag})
+    await db.suppliers.insert_many([{k: v for k, v in s.items() if not k.startswith("_")} for s in suppliers])
+
+    I = {i["sku"]: i for i in items}
+    sale_price = {sku: sp for (sku, _n, _h, _u, sp, _c, _g) in items_spec}
+    def SL(sku, qty):
+        it = I[sku]; return line(it["name"], sku, it["hsn"], qty, it["uom"], sale_price[sku], it["gst_rate"])
+
+    # ---- Sale Invoices ----
+    inv_plan = [
+        ("DEMO/26-0001", 0, [("HYD-ROD-80", 4), ("FREIGHT", 1)], 22),
+        ("DEMO/26-0002", 1, [("MS-PLT-16", 120), ("MS-CH-100", 80)], 18),
+        ("DEMO/26-0003", 2, [("CAGE-SS304", 6)], 14),     # interstate, 5%
+        ("DEMO/26-0004", 3, [("EN24-45", 200), ("JOBWORK", 3)], 10),  # interstate 18%
+        ("DEMO/26-0005", 0, [("BRASS-P8", 50)], 7),
+        ("DEMO/26-0006", 1, [("ALU-ROD-50", 90)], 30),    # older -> overdue
+        ("DEMO/26-0007", 4, [("MS-PLT-16", 60)], 5),      # non-GST customer
+        ("DEMO/26-0008", 5, [("PEEK-FLAT", 2)], 12),      # export
+    ]
+    invoices = []
+    for code, ci, lns, ago in inv_plan:
+        c = customers[ci]; itype = c["_itype"]; inter = c["_inter"]
+        lines = [SL(sku, q) for sku, q in lns]
+        t = totals(lines, itype, inter)
+        inv = {"id": new_id(), "code": code, "customer_id": c["id"], "customer_name": c["name"],
+               "customer_gstin": c["gstin"], "place_of_supply": c["_state"], "is_interstate": inter,
+               "invoice_type": itype, "date": D(ago), "due_date": D(ago - 30), "lines": lines,
+               "round_off": 0, "tds": 0, "status": "sent", "godown": "Vatva", "created_at": now_iso(), **t, **tag}
+        invoices.append(inv)
+    await db.invoices.insert_many([dict(i) for i in invoices])
+
+    # ---- Purchase Bills ----
+    bill_plan = [
+        ("BILL-MS-7781", 0, [("MS-PLT-16", 300), ("MS-CH-100", 150)], 20),
+        ("BILL-ALY-552", 1, [("HYD-ROD-80", 5)], 16),       # interstate
+        ("BILL-HW-1043", 2, [("BRASS-P8", 100), ("EN24-45", 250)], 9),
+        ("BILL-MS-7802", 0, [("ALU-ROD-50", 120)], 6),
+        ("BILL-ALY-560", 1, [("PEEK-FLAT", 2)], 3),         # interstate 5%
+    ]
+    bills = []
+    for code, si, lns, ago in bill_plan:
+        s = suppliers[si]; inter = s["_inter"]
+        lines = [line(I[sku]["name"], sku, I[sku]["hsn"], q, I[sku]["uom"], I[sku]["unit_cost"], I[sku]["gst_rate"]) for sku, q in lns]
+        t = totals(lines, "gst", inter)
+        bills.append({"id": new_id(), "code": code, "supplier_id": s["id"], "supplier_name": s["name"],
+                      "supplier_gstin": s["gstin"], "place_of_supply": s["_state"], "is_interstate": inter,
+                      "date": D(ago), "due_date": D(ago - 30), "lines": lines, "round_off": 0,
+                      "status": "unpaid", "created_at": now_iso(), **t, **tag})
+    await db.vendor_bills.insert_many([dict(b) for b in bills])
+
+    # ---- Payments In (with allocations -> bill-to-bill) ----
+    def alloc(doc, amount, dtype="invoice"):
+        return {"document_id": doc["id"], "document_code": doc["code"], "document_type": dtype, "amount": round(amount, 2)}
+    pays_in = []
+    # full settle inv1; partial inv2; full inv3
+    plan_in = [(invoices[0], invoices[0]["total"], 20), (invoices[1], round(invoices[1]["total"] * 0.5, 2), 15), (invoices[2], invoices[2]["total"], 12)]
+    for inv, amount, ago in plan_in:
+        c = next(x for x in customers if x["id"] == inv["customer_id"])
+        pays_in.append({"id": new_id(), "code": f"PMT-IN-{len(pays_in)+1:04d}", "party_id": c["id"], "party_name": c["name"],
+                        "date": D(ago), "amount": amount, "allocated_amount": amount, "payment_type": "Bank Transfer",
+                        "bank_name": "IndusInd", "allocations": [alloc(inv, amount)],
+                        "status": "Used" if abs(amount - inv["total"]) < 0.01 else "Partially Used", "created_at": now_iso(), **tag})
+    await db.payments_in.insert_many([dict(p) for p in pays_in])
+
+    # ---- Payments Out ----
+    pays_out = []
+    plan_out = [(bills[0], bills[0]["total"], 18), (bills[2], round(bills[2]["total"] * 0.6, 2), 7)]
+    for b, amount, ago in plan_out:
+        s = next(x for x in suppliers if x["id"] == b["supplier_id"])
+        pays_out.append({"id": new_id(), "code": f"PMT-OUT-{len(pays_out)+1:04d}", "party_id": s["id"], "party_name": s["name"],
+                         "date": D(ago), "amount": amount, "allocated_amount": amount, "payment_type": "Bank Transfer",
+                         "bank_name": "IndusInd", "allocations": [alloc(b, amount, "vendor_bill")],
+                         "status": "Used" if abs(amount - b["total"]) < 0.01 else "Partially Used", "created_at": now_iso(), **tag})
+    await db.payments_out.insert_many([dict(p) for p in pays_out])
+
+    # ---- A Quotation, Proforma, Sale Order, Purchase Order, Expenses ----
+    c0, c1 = customers[0], customers[1]; s0 = suppliers[0]
+    q_lines = [SL("HYD-ROD-80", 4)]; qt = totals(q_lines, "gst", False)
+    await db.quotations.insert_one({"id": new_id(), "code": "QT-26-0001", "customer_id": c0["id"], "customer_name": c0["name"],
+        "customer_gstin": c0["gstin"], "place_of_supply": "Gujarat", "is_interstate": False, "date": D(25),
+        "lines": q_lines, "status": "sent", "created_at": now_iso(), **qt, **tag})
+    pf_lines = [SL("CAGE-SS304", 6)]; pft = totals(pf_lines, "gst", True)
+    await db.proforma_invoices.insert_one({"id": new_id(), "code": "PI-26-0001", "customer_id": customers[2]["id"], "customer_name": customers[2]["name"],
+        "customer_gstin": customers[2]["gstin"], "place_of_supply": "Telangana", "is_interstate": True, "date": D(20),
+        "lines": pf_lines, "status": "sent", "created_at": now_iso(), **pft, **tag})
+    so_lines = [SL("EN24-45", 150)]; sot = totals(so_lines, "gst", False)
+    await db.sale_orders.insert_one({"id": new_id(), "code": "SO-26-0001", "customer_id": c1["id"], "customer_name": c1["name"],
+        "customer_gstin": c1["gstin"], "place_of_supply": "Gujarat", "is_interstate": False, "date": D(18),
+        "lines": so_lines, "status": "confirmed", "created_at": now_iso(), **sot, **tag})
+    po_lines = [line(I["MS-PLT-16"]["name"], "MS-PLT-16", I["MS-PLT-16"]["hsn"], 500, "Kg", I["MS-PLT-16"]["unit_cost"], 18)]
+    pot = totals(po_lines, "gst", False)
+    await db.purchase_orders.insert_one({"id": new_id(), "code": "PO-26-0001", "supplier_id": s0["id"], "supplier_name": s0["name"],
+        "supplier_gstin": s0["gstin"], "place_of_supply": "Gujarat", "is_interstate": False, "date": D(15),
+        "lines": po_lines, "status": "sent", "created_at": now_iso(), **pot, **tag})
+    await db.expenses.insert_many([
+        {"id": new_id(), "code": "EXP-0001", "category": "Power & Fuel", "party_name": "Torrent Power", "date": D(12),
+         "amount": 28500, "total": 28500, "notes": "Electricity - Vatva", "created_at": now_iso(), **tag},
+        {"id": new_id(), "code": "EXP-0002", "category": "Consumables", "party_name": "Local Hardware", "date": D(6),
+         "amount": 7400, "total": 7400, "notes": "Cutting tools & inserts", "created_at": now_iso(), **tag},
+    ])
+
+    return {"ok": True, "seeded": {
+        "items": len(items), "customers": len(customers), "suppliers": len(suppliers),
+        "invoices": len(invoices), "vendor_bills": len(bills), "payments_in": len(pays_in),
+        "payments_out": len(pays_out), "quotations": 1, "proforma": 1, "sale_orders": 1,
+        "purchase_orders": 1, "expenses": 2,
+    }}
+
 @api.post("/inventory/movements")
 async def create_movement(m: StockMovement, user=Depends(get_current_user)):
     item = await db.items.find_one({"id": m.item_id}, {"_id": 0})
