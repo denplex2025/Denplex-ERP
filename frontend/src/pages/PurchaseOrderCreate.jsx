@@ -35,6 +35,10 @@ export default function PurchaseOrderCreate() {
         setSuppliers(s.data || []); setItems(it.data || []);
       } catch (e) { /* ignore */ }
     })();
+    api.get("/masters").then(r => {
+      const t = r.data?.doc_terms?.["Purchase Order"];
+      if (t) setF(p => (p.terms_text === DEFAULT_TC || !p.terms_text ? { ...p, terms_text: t } : p));
+    }).catch(() => {});
   }, []);
 
   const pickSupplier = (id) => {

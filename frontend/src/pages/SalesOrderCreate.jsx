@@ -34,6 +34,10 @@ export default function SalesOrderCreate() {
         setCustomers(c.data || []); setItems(it.data || []);
       } catch (e) { /* ignore */ }
     })();
+    api.get("/masters").then(r => {
+      const t = r.data?.doc_terms?.["Sale Order"];
+      if (t) setF(p => (p.terms_text === DEFAULT_TC || !p.terms_text ? { ...p, terms_text: t } : p));
+    }).catch(() => {});
   }, []);
 
   const pickCustomer = (id) => {

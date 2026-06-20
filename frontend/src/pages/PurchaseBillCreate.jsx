@@ -34,7 +34,11 @@ export default function PurchaseBillCreate() {
         setSuppliers(s.data || []); setItems(it.data || []);
       } catch (e) { /* ignore */ }
     })();
-    api.get("/masters").then(r => setTdsSections(r.data?.tds_sections || [])).catch(() => {});
+    api.get("/masters").then(r => {
+      setTdsSections(r.data?.tds_sections || []);
+      const t = r.data?.doc_terms?.["Purchase Bill"];
+      if (t) setF(p => (p.terms_text ? p : { ...p, terms_text: t }));
+    }).catch(() => {});
   }, []);
 
   const pickSupplier = (id) => {

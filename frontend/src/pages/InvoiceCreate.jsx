@@ -44,7 +44,11 @@ export default function InvoiceCreate() {
         setCustomers(c.data || []); setItems(it.data || []); setLocations(lo.data?.locations || []);
       } catch (e) { /* ignore */ }
     })();
-    api.get("/masters").then(r => setTdsSections(r.data?.tds_sections || [])).catch(() => {});
+    api.get("/masters").then(r => {
+      setTdsSections(r.data?.tds_sections || []);
+      const t = r.data?.doc_terms?.["Sale Invoice"];
+      if (t) setF(p => (p.terms_text === DEFAULT_TC || !p.terms_text ? { ...p, terms_text: t } : p));
+    }).catch(() => {});
   }, []);
 
   const pickCustomer = (id) => {
