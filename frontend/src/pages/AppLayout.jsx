@@ -12,6 +12,7 @@ import { useState, useEffect, useRef } from "react";
 import api from "@/lib/api";
 import GlobalSpinner from "@/components/erp/GlobalSpinner";
 import FloatingActions from "@/components/erp/FloatingActions";
+import Aria from "@/components/erp/Aria";
 
 function GlobalSearch() {
   const nav = useNavigate();
@@ -67,7 +68,6 @@ const NAV_GROUPS = [
     head: null,
     items: [
       { to: "/app", label: "Dashboard", icon: LayoutDashboard, end: true, testid: "nav-dashboard" },
-      { to: "/app/assistant", label: "AI Assistant", icon: Sparkles, testid: "nav-assistant" },
     ],
   },
   {
@@ -255,6 +255,7 @@ export default function AppLayout() {
       </main>
       <GlobalSpinner />
       <FloatingActions />
+      <Aria />
       <Toaster position="top-right" richColors />
     </div>
   );
