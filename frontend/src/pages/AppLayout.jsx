@@ -151,6 +151,7 @@ const NAV_GROUPS = [
       { to: "/app/settings", label: "Settings", icon: Wrench, testid: "nav-settings" },
       { to: "/app/audit", label: "Audit Log", icon: ScrollText, testid: "nav-audit" },
       { to: "/app/recycle-bin", label: "Recycle Bin", icon: Trash2, testid: "nav-recycle-bin" },
+      { to: "/app/reset-data", label: "Reset Trial Data", icon: Trash2, testid: "nav-reset-data" },
       { to: "/app/webhooks", label: "Integrations / Webhooks", icon: Webhook, testid: "nav-webhooks" },
     ],
   },
