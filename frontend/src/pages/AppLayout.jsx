@@ -6,7 +6,7 @@ import {
   LayoutDashboard, Boxes, Layers, ClipboardList, FileText,
   ShoppingCart, Receipt, Users, UserPlus, Truck, ShieldCheck,
   FileBox, Settings as SettingsIcon, LogOut, Menu, Calculator, UsersRound, Megaphone, Wrench, ScrollText,
-  ArrowDownToLine, ArrowUpFromLine, Banknote, Undo2, Cog, CalendarRange, Search, Trash2, SlidersHorizontal, AlarmClock, Webhook, Library, Landmark, Wallet
+  ArrowDownToLine, ArrowUpFromLine, Banknote, Undo2, Cog, CalendarRange, Search, Trash2, SlidersHorizontal, AlarmClock, Webhook, Library, Landmark, Wallet, Sparkles
 } from "lucide-react";
 import { useState, useEffect, useRef } from "react";
 import api from "@/lib/api";
@@ -67,6 +67,7 @@ const NAV_GROUPS = [
     head: null,
     items: [
       { to: "/app", label: "Dashboard", icon: LayoutDashboard, end: true, testid: "nav-dashboard" },
+      { to: "/app/assistant", label: "AI Assistant", icon: Sparkles, testid: "nav-assistant" },
     ],
   },
   {
