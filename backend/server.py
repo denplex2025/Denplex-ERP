@@ -392,7 +392,9 @@ class InventoryItem(BaseModel):
     sku: str
     name: str
     category: Optional[str] = "raw"  # raw, wip, finished, tool, consumable
-    uom: str = "pcs"
+    uom: str = "pcs"                 # base unit
+    secondary_unit: Optional[str] = ""        # optional alternate unit (e.g. Box)
+    conversion_factor: float = 0              # 1 secondary unit = conversion_factor base units
     qty_on_hand: float = 0
     qty_in_process: float = 0
     qty_by_location: dict = Field(default_factory=dict)   # {"Vatva": 12, "Santej": 3} — per-location on-hand
@@ -753,6 +755,7 @@ class Invoice(BaseModel):
     invoice_type: Literal["gst", "non_gst", "export"] = "gst"
     payment_terms: Optional[str] = ""       # e.g. "Net 30"
     godown: Optional[str] = ""              # dispatch location (Vatva / Santej)
+    custom_fields: dict = Field(default_factory=dict)   # configurable doc fields (Transport Name, Vehicle No, etc.)
     terms_text: Optional[str] = ""         # Terms & Conditions body
     round_off: float = 0
     tds: float = 0                         # TDS amount deducted (reduces total)
@@ -2337,7 +2340,14 @@ async def _put_setting(key, value):
 
 MASTER_KEYS = {"doc_terms": "masters_doc_terms", "payment_terms": "masters_payment_terms",
                "prefixes": "masters_prefixes", "company_bank": "masters_company_bank",
-               "tds_sections": "masters_tds_sections"}
+               "tds_sections": "masters_tds_sections", "doc_custom_fields": "masters_doc_custom_fields"}
+
+DEFAULT_DOC_CUSTOM_FIELDS = [
+    {"name": "Transport Name", "enabled": True, "type": "text"},
+    {"name": "Vehicle Number", "enabled": True, "type": "text"},
+    {"name": "Delivery Date", "enabled": True, "type": "date"},
+    {"name": "Delivery Location", "enabled": True, "type": "text"},
+]
 
 DEFAULT_TDS_SECTIONS = [
     {"section": "192", "name": "Payment of salary", "rate": 1.0},
@@ -2355,6 +2365,7 @@ async def get_masters(user=Depends(get_current_user)):
         "prefixes": await _get_setting(MASTER_KEYS["prefixes"], {}),
         "company_bank": await _get_setting(MASTER_KEYS["company_bank"], {}),
         "tds_sections": await _get_setting(MASTER_KEYS["tds_sections"], DEFAULT_TDS_SECTIONS),
+        "doc_custom_fields": await _get_setting(MASTER_KEYS["doc_custom_fields"], DEFAULT_DOC_CUSTOM_FIELDS),
     }
 
 @api.put("/masters/{section}")
@@ -2392,6 +2403,7 @@ async def seed_masters(user=Depends(require_roles("admin", "manager"))):
     await _put_setting(MASTER_KEYS["prefixes"], prefixes)
     await _put_setting(MASTER_KEYS["company_bank"], company_bank)
     await _put_setting(MASTER_KEYS["tds_sections"], DEFAULT_TDS_SECTIONS)
+    await _put_setting(MASTER_KEYS["doc_custom_fields"], DEFAULT_DOC_CUSTOM_FIELDS)
     # also create a Bank account from these details if none exists yet
     await _ensure_accounts_seeded()
     if not await db.fin_accounts.find_one({"name": company_bank["account_name"]}):
@@ -5833,6 +5845,9 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
         meta_main.append(Paragraph(f"Place of Supply: <b>{doc_meta['place_of_supply']}</b>", smallb))
     if doc_meta.get("eway_bill_no"):
         meta_main.append(Paragraph(f"E-Way Bill No: <b>{doc_meta['eway_bill_no']}</b>", smallb))
+    for _cfn, _cfv in (doc_meta.get("custom_fields") or {}).items():
+        if str(_cfv or "").strip():
+            meta_main.append(Paragraph(f"{_cfn}: <b>{_cfv}</b>", smallb))
     meta_po = []
     if show("show_po_meta"):
         if doc_meta.get("po_date"):
@@ -6323,6 +6338,7 @@ async def invoice_pdf(iid: str, copy: Optional[str] = "ORIGINAL FOR RECIPIENT", 
         "po_date": inv.get("po_date",""),
         "purchaser_name": inv.get("purchaser_name",""),
         "eway_bill_no": inv.get("eway_bill_no",""),
+        "custom_fields": inv.get("custom_fields", {}),
         "is_interstate": bool(inv.get("is_interstate")),
         "invoice_type": inv.get("invoice_type", "gst"),
         "irn": inv.get("irn",""), "ack_no": inv.get("ack_no",""),
