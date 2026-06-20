@@ -8007,6 +8007,102 @@ async def overdue_invoices(user=Depends(get_current_user)):
     return {"overdue": rows, "total_overdue": round(total, 2), "count": len(rows)}
 
 # ---------------------------------------------------------------------------
+# AI Assistant (read-only) — answers questions from a live data snapshot.
+# ---------------------------------------------------------------------------
+ASSISTANT_SYSTEM = (
+    "You are the Denplex ERP assistant for a precision-machining / jigs & fixtures company. "
+    "Answer the user's question ONLY from the JSON data snapshot provided in the user message. "
+    "Be concise and direct. Show money in Indian rupees (₹) with thousands separators. "
+    "If the snapshot does not contain the answer, say you don't have that data yet rather than guessing. "
+    "Never invent numbers, customers, or invoices. You are READ-ONLY: if asked to create, edit, send, or delete "
+    "anything, explain that you can only answer questions for now and they should use the relevant ERP screen."
+)
+
+class AssistantIn(BaseModel):
+    question: str
+    history: list = []
+
+async def _assistant_snapshot():
+    invs = await db.invoices.find({}, {"_id": 0}).to_list(20000)
+    bills = await db.vendor_bills.find({}, {"_id": 0}).to_list(20000)
+    items = await db.items.find({}, {"_id": 0}).to_list(20000)
+    settled = await _settled_per_invoice()
+    today = datetime.utcnow().date()
+    recv = 0.0; overdue = []; cust_tot: Dict[str, float] = {}
+    for inv in invs:
+        out = float(inv.get("total", 0)) - settled.get(inv.get("id", ""), 0)
+        if out > 0.01:
+            recv += out
+        cust_tot[inv.get("customer_name", "?")] = cust_tot.get(inv.get("customer_name", "?"), 0) + float(inv.get("total", 0))
+        due = str(inv.get("due_date", "") or "")[:10]
+        if out > 0.01 and due:
+            try:
+                d = (today - datetime.strptime(due, "%Y-%m-%d").date()).days
+                if d > 0:
+                    overdue.append({"code": inv.get("code"), "customer": inv.get("customer_name"), "outstanding": round(out, 2), "days_overdue": d})
+            except Exception:
+                pass
+    overdue.sort(key=lambda r: r["days_overdue"], reverse=True)
+    recent = [{"code": i.get("code"), "customer": i.get("customer_name"), "date": str(i.get("date", ""))[:10],
+               "total": round(float(i.get("total", 0)), 2), "status": i.get("status")}
+              for i in sorted(invs, key=lambda x: str(x.get("date", "")), reverse=True)[:10]]
+    pouts = await db.payments_out.find({}, {"_id": 0, "allocations": 1}).to_list(20000)
+    paid_bill: Dict[str, float] = {}
+    for p in pouts:
+        for a in (p.get("allocations") or []):
+            if a.get("document_type") == "vendor_bill":
+                paid_bill[a["document_id"]] = paid_bill.get(a["document_id"], 0) + float(a.get("amount") or 0) + float(a.get("tds_amount") or 0)
+    pay = 0.0
+    for b in bills:
+        if b.get("status") == "paid":
+            continue
+        out = float(b.get("total", 0)) - paid_bill.get(b.get("id", ""), 0)
+        if out > 0.01:
+            pay += out
+    low = [{"sku": it.get("sku"), "name": it.get("name"), "qty_on_hand": it.get("qty_on_hand"), "reorder_level": it.get("reorder_level")}
+           for it in items if float(it.get("reorder_level", 0) or 0) > 0 and float(it.get("qty_on_hand", 0) or 0) <= float(it.get("reorder_level", 0) or 0)][:15]
+    await _ensure_accounts_seeded()
+    accts = await db.fin_accounts.find({}, {"_id": 0}).to_list(100)
+    acc = [{"name": a.get("name"), "type": a.get("type"), "balance": await _account_balance(a)} for a in accts]
+    top_cust = sorted(cust_tot.items(), key=lambda kv: -kv[1])[:5]
+    return {
+        "as_of": now_iso()[:10],
+        "counts": {"invoices": len(invs), "vendor_bills": len(bills), "items": len(items),
+                   "customers": await db.customers.count_documents({}), "suppliers": await db.suppliers.count_documents({})},
+        "sales_total_all_time": round(sum(float(i.get("total", 0)) for i in invs), 2),
+        "purchase_total_all_time": round(sum(float(b.get("total", 0)) for b in bills), 2),
+        "receivable_total": round(recv, 2), "payable_total": round(pay, 2),
+        "overdue_count": len(overdue), "overdue_total": round(sum(o["outstanding"] for o in overdue), 2), "overdue_top": overdue[:10],
+        "recent_invoices": recent, "top_customers_by_sales": [{"customer": k, "total": round(v, 2)} for k, v in top_cust],
+        "low_stock_items": low, "cash_bank_accounts": acc,
+    }
+
+@api.post("/assistant")
+async def ai_assistant(inp: AssistantIn, user=Depends(get_current_user)):
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(503, "AI assistant is not configured. Set ANTHROPIC_API_KEY in the backend environment.")
+    import json as _json
+    snap = await _assistant_snapshot()
+    user_content = f"DATA SNAPSHOT (JSON, as of {snap['as_of']}):\n{_json.dumps(snap, default=str)}\n\nQUESTION: {inp.question}"
+    msgs = []
+    for h in (inp.history or [])[-6:]:
+        if h.get("role") in ("user", "assistant") and h.get("content"):
+            msgs.append({"role": h["role"], "content": str(h["content"])[:2000]})
+    msgs.append({"role": "user", "content": user_content})
+    body = {"model": QC_VISION_MODEL, "max_tokens": 1024, "system": ASSISTANT_SYSTEM, "messages": msgs}
+    headers = {"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=60) as cx:
+            r = await cx.post(f"{ANTHROPIC_BASE_URL}/v1/messages", json=body, headers=headers)
+    except Exception as e:
+        raise HTTPException(502, f"Could not reach the AI API: {e}")
+    if r.status_code >= 400:
+        raise HTTPException(502, f"AI API error {r.status_code}: {r.text[:200]}")
+    data = r.json()
+    text = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
+    return {"answer": text.strip() or "I couldn't generate an answer."}
+
+# ---------------------------------------------------------------------------
 # GST Reports — GSTR-1 (outward), GSTR-3B (summary), GSTR-2/Purchase register.
 # Computed directly from invoices + vendor_bills. Read-only.
 # ---------------------------------------------------------------------------
