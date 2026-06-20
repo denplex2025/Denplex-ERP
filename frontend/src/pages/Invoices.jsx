@@ -4,7 +4,7 @@ export default function Invoices() {
     <LineItemDoc
       testid="invoices-page"
       overline="Accounting"
-      title="GST Invoices"
+      title="Sale Invoices"
       subtitle="CGST/SGST for intra-state, IGST for inter-state — auto computed."
       endpoint="/invoices"
       partyEndpoint="/customers"
@@ -13,6 +13,8 @@ export default function Invoices() {
       partyKey="customer"
       statusOptions={["draft","sent","paid","overdue"]}
       isInvoice
+      createTo="/app/invoices/new"
+      editTo={(row) => `/app/invoices/${row.id}/edit`}
     />
   );
 }

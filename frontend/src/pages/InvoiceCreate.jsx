@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 import api from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -18,6 +18,8 @@ const Fld = ({ label, children }) => (<div><Label className="text-[11px] upperca
 
 export default function InvoiceCreate() {
   const navg = useNavigate();
+  const { id } = useParams();
+  const isEdit = !!id;
   const today = new Date().toISOString().slice(0, 10);
   const [customers, setCustomers] = useState([]);
   const [items, setItems] = useState([]);
@@ -52,6 +54,20 @@ export default function InvoiceCreate() {
       if (t) setF(p => (p.terms_text === DEFAULT_TC || !p.terms_text ? { ...p, terms_text: t } : p));
     }).catch(() => {});
   }, []);
+
+  // Edit mode — load the existing invoice
+  useEffect(() => {
+    if (!id) return;
+    api.get(`/invoices/${id}`).then(r => {
+      const d = r.data || {};
+      setF(p => ({
+        ...p, ...d,
+        date: (d.date || "").slice(0, 10), due_date: (d.due_date || "").slice(0, 10), po_date: (d.po_date || "").slice(0, 10),
+        extra_charges: d.extra_charges || [], custom_fields: d.custom_fields || {},
+      }));
+      setLines((d.lines && d.lines.length ? d.lines : [blankLine()]).map(l => ({ ...blankLine(), ...l })));
+    }).catch(() => toast.error("Could not load invoice"));
+  }, [id]);
 
   const pickCustomer = (id) => {
     const c = customers.find(x => x.id === id);
@@ -105,7 +121,7 @@ export default function InvoiceCreate() {
         tcs: Number(f.tcs || 0), tcs_rate: Number(f.tcs_rate || 0),
         extra_charges: (f.extra_charges || []).filter(c => (c.name || "").trim() || Number(c.amount || 0)).map(c => ({ name: c.name || "Charge", amount: Number(c.amount || 0) })),
         eway_distance_km: Number(f.eway_distance_km || 0),
-        status: "sent",
+        status: isEdit ? (f.status || "sent") : "sent",
         lines: lines.filter(l => (l.description || "").trim()).map(l => ({
           description: l.description, item_code: l.item_code, hsn: l.hsn,
           qty: Number(l.qty || 0), unit: l.unit, rate: Number(l.rate || 0),
@@ -113,9 +129,11 @@ export default function InvoiceCreate() {
           gst_rate: taxable ? Number(l.gst_rate || 0) : 0,
         })),
       };
-      const r = await api.post("/invoices", payload);
-      toast.success(`Invoice ${r.data?.code || ""} saved`);
-      if (goEway && r.data?.id) navg(`/app/invoices/${r.data.id}/eway`);
+      const r = isEdit ? await api.put(`/invoices/${id}`, payload) : await api.post("/invoices", payload);
+      const code = r.data?.code || f.code || "";
+      toast.success(isEdit ? `Invoice ${code} updated` : `Invoice ${code} saved`);
+      const newId = r.data?.id || id;
+      if (goEway && newId) navg(`/app/invoices/${newId}/eway`);
       else navg("/app/invoices");
     } catch (e) { toast.error(e?.response?.data?.detail || "Could not save invoice"); }
     setSaving(false);
@@ -126,7 +144,7 @@ export default function InvoiceCreate() {
       <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
         <div className="flex items-center gap-2">
           <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => navg("/app/invoices")}><ArrowLeft className="h-4 w-4" /></Button>
-          <h1 className="text-xl font-bold font-display">New Sale Invoice</h1>
+          <h1 className="text-xl font-bold font-display">{isEdit ? "Edit Sale Invoice" : "New Sale Invoice"}</h1>
           <div className="ml-3 inline-flex rounded-sm border border-slate-200 overflow-hidden text-xs">
             {["Credit", "Cash"].map(m => (
               <button key={m} onClick={() => set("payment_mode", m)} className={`px-3 py-1.5 ${f.payment_mode === m ? "bg-red-600 text-white" : "bg-white text-slate-600"}`}>{m}</button>
@@ -262,7 +280,7 @@ export default function InvoiceCreate() {
         <span className="mr-auto text-sm text-slate-500">Total: <strong className="text-slate-900">{inr(totals.grand)}</strong></span>
         <Button variant="outline" className="rounded-sm" onClick={() => navg("/app/invoices")}>Cancel</Button>
         <Button variant="outline" className="rounded-sm" onClick={() => save(true)} disabled={saving}>Save & Generate E-Way Bill</Button>
-        <Button onClick={() => save(false)} disabled={saving} className="rounded-sm bg-red-600 hover:bg-red-700"><Save className="h-4 w-4 mr-1" /> {saving ? "Saving…" : "Save Invoice"}</Button>
+        <Button onClick={() => save(false)} disabled={saving} className="rounded-sm bg-red-600 hover:bg-red-700"><Save className="h-4 w-4 mr-1" /> {saving ? "Saving…" : (isEdit ? "Update Invoice" : "Save Invoice")}</Button>
       </div>
     </div>
   );
