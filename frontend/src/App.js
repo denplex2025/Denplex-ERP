@@ -61,6 +61,7 @@ import Webhooks from "./pages/Webhooks";
 import SalesOrderCreate from "./pages/SalesOrderCreate";
 import PurchaseBillCreate from "./pages/PurchaseBillCreate";
 import PartLibrary from "./pages/PartLibrary";
+import ResetData from "./pages/ResetData";
 
 function App() {
   return (
@@ -113,6 +114,7 @@ function App() {
               <Route path="costing" element={<Costing />} />
               <Route path="iso" element={<ISO />} />
               <Route path="recycle-bin" element={<RecycleBin />} />
+              <Route path="reset-data" element={<ResetData />} />
               <Route path="webhooks" element={<Webhooks />} />
               <Route path="bulk-items" element={<BulkItems />} />
               <Route path="reminders" element={<Reminders />} />
