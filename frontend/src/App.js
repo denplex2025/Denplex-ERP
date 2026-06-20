@@ -90,6 +90,7 @@ function App() {
               <Route path="purchase-bills/new" element={<PurchaseBillCreate />} />
               <Route path="invoices" element={<Invoices />} />
               <Route path="invoices/new" element={<InvoiceCreate />} />
+              <Route path="invoices/:id/edit" element={<InvoiceCreate />} />
               <Route path="invoices/:id/eway" element={<EwayBillForm />} />
               <Route path="docs/:kind" element={<DocList />} />
               <Route path="leads" element={<Leads />} />
