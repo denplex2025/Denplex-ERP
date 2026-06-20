@@ -2187,6 +2187,182 @@ async def seed_sample_data(body: Optional[dict] = None, user=Depends(require_rol
         "purchase_orders": 1, "expenses": 2,
     }}
 
+# ===========================================================================
+# Bank & Cash Accounts  +  Document Masters  (Vyapar full-replacement modules)
+# ===========================================================================
+class FinAccount(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    name: str
+    type: Literal["bank", "cash"] = "bank"
+    opening_balance: float = 0
+    opening_date: Optional[str] = ""
+    bank_name: Optional[str] = ""
+    account_no: Optional[str] = ""
+    ifsc: Optional[str] = ""
+    upi: Optional[str] = ""
+    is_default: bool = False
+    created_at: str = Field(default_factory=now_iso)
+
+async def _ensure_accounts_seeded():
+    if await db.fin_accounts.count_documents({}) == 0:
+        await db.fin_accounts.insert_one(FinAccount(name="Cash", type="cash", is_default=True).model_dump())
+
+def _acct_matches(p, acct):
+    return p.get("account_id") == acct["id"] or (p.get("bank_name") and p.get("bank_name") == acct.get("name")) \
+        or (acct.get("type") == "cash" and (p.get("payment_type") == "Cash") and not p.get("account_id") and not p.get("bank_name"))
+
+async def _account_balance(acct):
+    pin = await db.payments_in.find({}, {"_id": 0}).to_list(50000)
+    pout = await db.payments_out.find({}, {"_id": 0}).to_list(50000)
+    bal = float(acct.get("opening_balance", 0))
+    for p in pin:
+        if _acct_matches(p, acct): bal += float(p.get("amount", 0))
+    for p in pout:
+        if _acct_matches(p, acct): bal -= float(p.get("amount", 0))
+    return round(bal, 2)
+
+@api.get("/accounts")
+async def list_accounts(user=Depends(get_current_user)):
+    await _ensure_accounts_seeded()
+    accts = await list_collection(db.fin_accounts, sort_key="name")
+    for a in accts:
+        a["balance"] = await _account_balance(a)
+    return accts
+
+@api.post("/accounts")
+async def create_account(a: FinAccount, user=Depends(get_current_user)):
+    doc = a.model_dump()
+    if doc.get("is_default"):
+        await db.fin_accounts.update_many({}, {"$set": {"is_default": False}})
+    await db.fin_accounts.insert_one(doc)
+    return serialize(doc)
+
+@api.put("/accounts/{aid}")
+async def update_account(aid: str, a: FinAccount, user=Depends(get_current_user)):
+    data = a.model_dump(); data.pop("id", None); data.pop("created_at", None)
+    if data.get("is_default"):
+        await db.fin_accounts.update_many({}, {"$set": {"is_default": False}})
+    await db.fin_accounts.update_one({"id": aid}, {"$set": data})
+    return {"ok": True}
+
+@api.delete("/accounts/{aid}")
+async def delete_account(aid: str, user=Depends(require_roles("admin", "manager"))):
+    doc = await db.fin_accounts.find_one({"id": aid}, {"_id": 0})
+    if doc:
+        await _recycle("fin_accounts", "Account", doc, user)
+    await db.fin_accounts.delete_one({"id": aid})
+    return {"ok": True}
+
+@api.get("/accounts/{aid}/ledger")
+async def account_ledger(aid: str, date_from: str = "", date_to: str = "", user=Depends(get_current_user)):
+    acct = await db.fin_accounts.find_one({"id": aid}, {"_id": 0})
+    if not acct:
+        raise HTTPException(404, "Account not found")
+    pin = await db.payments_in.find({}, {"_id": 0}).to_list(50000)
+    pout = await db.payments_out.find({}, {"_id": 0}).to_list(50000)
+    rows = []
+    for p in pin:
+        if _acct_matches(p, acct):
+            rows.append({"date": _date10(p.get("date")), "ref": p.get("code", ""), "particulars": p.get("party_name", ""),
+                         "mode": p.get("payment_type", ""), "credit": float(p.get("amount", 0)), "debit": 0})
+    for p in pout:
+        if _acct_matches(p, acct):
+            rows.append({"date": _date10(p.get("date")), "ref": p.get("code", ""), "particulars": p.get("party_name", ""),
+                         "mode": p.get("payment_type", ""), "credit": 0, "debit": float(p.get("amount", 0))})
+    if date_from: rows = [r for r in rows if r["date"] >= date_from]
+    if date_to: rows = [r for r in rows if r["date"] <= date_to]
+    rows.sort(key=lambda r: r["date"])
+    bal = float(acct.get("opening_balance", 0))
+    for r in rows:
+        bal += r["credit"] - r["debit"]; r["balance"] = round(bal, 2)
+    return {"account": acct, "opening_balance": float(acct.get("opening_balance", 0)), "rows": rows, "closing_balance": round(bal, 2)}
+
+@api.get("/cheques")
+async def cheque_register(user=Depends(get_current_user)):
+    out = []
+    for coll, kind in (("payments_in", "in"), ("payments_out", "out")):
+        for p in await db[coll].find({"payment_type": "Cheque"}, {"_id": 0}).to_list(20000):
+            out.append({"id": p.get("id"), "coll": coll, "direction": kind, "code": p.get("code", ""),
+                        "date": _date10(p.get("date")), "party": p.get("party_name", ""), "amount": float(p.get("amount", 0)),
+                        "ref_no": p.get("ref_no", ""), "bank_name": p.get("bank_name", ""),
+                        "cheque_status": p.get("cheque_status", "Pending")})
+    out.sort(key=lambda r: r["date"], reverse=True)
+    return out
+
+@api.put("/cheques/{coll}/{pid}/status")
+async def update_cheque_status(coll: str, pid: str, body: dict, user=Depends(get_current_user)):
+    if coll not in ("payments_in", "payments_out"):
+        raise HTTPException(400, "Bad collection")
+    status = (body or {}).get("cheque_status")
+    if status not in ("Pending", "Cleared", "Bounced"):
+        raise HTTPException(400, "Bad status")
+    await db[coll].update_one({"id": pid}, {"$set": {"cheque_status": status}})
+    return {"ok": True}
+
+# ---- Document Masters (Terms & Conditions, prefixes, payment terms, bank) ----
+async def _get_setting(key, default):
+    doc = await db.settings.find_one({"_id": key}, {"_id": 0})
+    return doc.get("value", default) if doc else default
+
+async def _put_setting(key, value):
+    await db.settings.update_one({"_id": key}, {"$set": {"value": value}}, upsert=True)
+
+MASTER_KEYS = {"doc_terms": "masters_doc_terms", "payment_terms": "masters_payment_terms",
+               "prefixes": "masters_prefixes", "company_bank": "masters_company_bank"}
+
+@api.get("/masters")
+async def get_masters(user=Depends(get_current_user)):
+    return {
+        "doc_terms": await _get_setting(MASTER_KEYS["doc_terms"], {}),
+        "payment_terms": await _get_setting(MASTER_KEYS["payment_terms"], []),
+        "prefixes": await _get_setting(MASTER_KEYS["prefixes"], {}),
+        "company_bank": await _get_setting(MASTER_KEYS["company_bank"], {}),
+    }
+
+@api.put("/masters/{section}")
+async def put_masters(section: str, body: dict, user=Depends(get_current_user)):
+    if section not in MASTER_KEYS:
+        raise HTTPException(400, "Unknown masters section")
+    await _put_setting(MASTER_KEYS[section], (body or {}).get("value"))
+    return {"ok": True}
+
+@api.post("/admin/seed-masters")
+async def seed_masters(user=Depends(require_roles("admin", "manager"))):
+    """Load Denplex's real Vyapar masters (T&C library, FY prefixes, payment terms, bank) as ERP defaults."""
+    doc_terms = {
+        "Sale Invoice": "*Subject to Ahmedabad jurisdiction only\n1) The bill must be paid within due date otherwise interest @18% will be charged extra\n2) Goods once sold will not be taken back.\n3) Our responsibility ceases on delivery the goods to the carrier.\n4) Payment requested by CASH/CHEQUE/Bank Transfer only\n5) If any rejection or rework occurs please notify within 10 days of material receipt; after that it won't be accepted.",
+        "Sale Order": "Thanks for doing business with us!",
+        "Delivery Challan": "1. Handle the equipment with care and take all necessary precautions to prevent damage.\n2. Keep the equipment in good working condition and perform routine cleaning and maintenance.\n3. Do not modify, tamper with, or repair the equipment without prior written consent.\n4. If the equipment is damaged, a damage fee will be charged based on the extent of damage.",
+        "Estimate Quotation": "•\tPayment Terms : 50% advance, 50% against delivery\n•\tDelivery Time : 15-20 working days\n•\tFreight : Extra at actual\n•\tStock : Ex-works Ahmedabad",
+        "Proforma Invoice": "Thanks for doing business with us!",
+        "Purchase Bill": "Thanks for doing business with us!",
+        "Purchase Order": "1. All consignments must carry proper documents, like invoices, test certificates etc.\n2. Invoice must have PO No., Material No., HSN/SAC Code, Vendor No., full address with our PAN & GSTIN.\n3. Test certificate does not relieve responsibility for product quality; results from our QA dept. shall be final.\n4. If goods are not delivered as per schedule, Denplex may buy elsewhere and supplier shall be liable for actual costs and damages.\n5. On any non-compliance of GST provisions (Returns/E-way/E-invoice) resulting in ITC loss, the supplier shall indemnify such loss with interest & penalty.",
+    }
+    payment_terms = [
+        {"name": "Due on Receipt", "days": 0, "is_default": False},
+        {"name": "Net 15", "days": 15, "is_default": False},
+        {"name": "Net 30", "days": 30, "is_default": True},
+        {"name": "Net 45", "days": 45, "is_default": False},
+        {"name": "Net 60", "days": 60, "is_default": False},
+    ]
+    prefixes = {"invoice": "2627/", "purchase_order": "2025-26/", "proforma": "202526",
+                "sale_order": "SO-26-", "credit_note": "CN-26-", "delivery_challan": "DC-26-"}
+    company_bank = {"account_name": "Denplex Engineering Company", "bank_name": "IndusInd Bank, Bodakdev",
+                    "account_no": "259033338999", "ifsc": "INDB0000232", "upi": "denplexengineering-1@okicici"}
+    await _put_setting(MASTER_KEYS["doc_terms"], doc_terms)
+    await _put_setting(MASTER_KEYS["payment_terms"], payment_terms)
+    await _put_setting(MASTER_KEYS["prefixes"], prefixes)
+    await _put_setting(MASTER_KEYS["company_bank"], company_bank)
+    # also create a Bank account from these details if none exists yet
+    await _ensure_accounts_seeded()
+    if not await db.fin_accounts.find_one({"name": company_bank["account_name"]}):
+        await db.fin_accounts.insert_one(FinAccount(
+            name=company_bank["account_name"], type="bank", opening_balance=1066594.5,
+            bank_name=company_bank["bank_name"], account_no=company_bank["account_no"],
+            ifsc=company_bank["ifsc"], upi=company_bank["upi"], is_default=True).model_dump())
+    return {"ok": True, "doc_terms": len(doc_terms), "payment_terms": len(payment_terms), "prefixes": len(prefixes)}
+
 @api.post("/inventory/movements")
 async def create_movement(m: StockMovement, user=Depends(get_current_user)):
     item = await db.items.find_one({"id": m.item_id}, {"_id": 0})
