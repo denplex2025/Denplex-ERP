@@ -6,7 +6,7 @@ import {
   LayoutDashboard, Boxes, Layers, ClipboardList, FileText,
   ShoppingCart, Receipt, Users, UserPlus, Truck, ShieldCheck,
   FileBox, Settings as SettingsIcon, LogOut, Menu, Calculator, UsersRound, Megaphone, Wrench, ScrollText,
-  ArrowDownToLine, ArrowUpFromLine, Banknote, Undo2, Cog, CalendarRange, Search, Trash2, SlidersHorizontal, AlarmClock, Webhook
+  ArrowDownToLine, ArrowUpFromLine, Banknote, Undo2, Cog, CalendarRange, Search, Trash2, SlidersHorizontal, AlarmClock, Webhook, Library
 } from "lucide-react";
 import { useState, useEffect, useRef } from "react";
 import api from "@/lib/api";
@@ -101,6 +101,7 @@ const NAV_GROUPS = [
     head: "Production",
     items: [
       { to: "/app/parts", label: "Part Master", icon: Cog, testid: "nav-parts" },
+      { to: "/app/part-library", label: "Parts Library", icon: Library, testid: "nav-part-library" },
       { to: "/app/bom", label: "BOM", icon: Layers, testid: "nav-bom" },
       { to: "/app/work-orders", label: "Work Orders", icon: ClipboardList, testid: "nav-work-orders" },
       { to: "/app/machines", label: "Machines", icon: Cog, testid: "nav-machines" },
@@ -159,6 +160,9 @@ export default function AppLayout() {
   const { user, logout } = useAuth();
   const nav = useNavigate();
   const [open, setOpen] = useState(false);
+  const [zoom, setZoom] = useState(() => { try { return parseFloat(localStorage.getItem("erp_zoom")) || 1; } catch (e) { return 1; } });
+  useEffect(() => { try { document.documentElement.style.zoom = String(zoom); localStorage.setItem("erp_zoom", String(zoom)); } catch (e) {} }, [zoom]);
+  const setZ = (z) => setZoom(Math.min(1.5, Math.max(0.7, Math.round(z * 100) / 100)));
 
   if (!user) {
     nav("/login");
@@ -229,6 +233,11 @@ export default function AppLayout() {
         )}
         <div className="hidden lg:flex sticky top-0 z-30 bg-white/90 backdrop-blur border-b border-slate-200 h-14 items-center px-6 gap-4">
           <GlobalSearch />
+          <div className="ml-auto inline-flex items-center gap-1 text-xs" title="Zoom the whole app (pages & dialogs)">
+            <button onClick={() => setZ(zoom - 0.1)} className="px-2 py-1 rounded-sm border border-slate-200 hover:bg-slate-50 font-semibold">A−</button>
+            <button onClick={() => setZ(1)} className="px-2 py-1 rounded-sm border border-slate-200 hover:bg-slate-50 tabular-nums w-12 text-slate-600">{Math.round(zoom * 100)}%</button>
+            <button onClick={() => setZ(zoom + 0.1)} className="px-2 py-1 rounded-sm border border-slate-200 hover:bg-slate-50 font-semibold">A+</button>
+          </div>
         </div>
         <div className="lg:hidden sticky top-0 z-30 bg-white border-b border-slate-200 h-14 flex items-center justify-between px-4 gap-3">
           <Button variant="ghost" size="icon" onClick={() => setOpen(!open)} data-testid="mobile-menu-toggle"><Menu className="h-5 w-5" /></Button>
