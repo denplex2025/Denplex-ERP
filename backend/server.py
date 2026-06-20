@@ -670,6 +670,13 @@ class VendorBill(BaseModel):
     is_interstate: bool = False
     terms_text: Optional[str] = ""
     round_off: float = 0
+    tds: float = 0
+    tds_rate: float = 0
+    tds_section: Optional[str] = ""
+    tcs: float = 0
+    tcs_rate: float = 0
+    extra_charges: List[ExtraCharge] = []
+    charges_total: float = 0
     lines: List[POLine] = []
     subtotal: float = 0
     cgst: float = 0
@@ -691,6 +698,11 @@ class InvoiceLine(BaseModel):
     discount_pct: float = 0.0
     discount_amount: float = 0.0
     gst_rate: float = 18.0
+
+class ExtraCharge(BaseModel):
+    """Document-level additional charge (Freight / Packaging / Adjustment). Lump sum, non-taxable."""
+    name: str
+    amount: float = 0
 
 class Invoice(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -735,7 +747,13 @@ class Invoice(BaseModel):
     godown: Optional[str] = ""              # dispatch location (Vatva / Santej)
     terms_text: Optional[str] = ""         # Terms & Conditions body
     round_off: float = 0
-    tds: float = 0
+    tds: float = 0                         # TDS amount deducted (reduces total)
+    tds_rate: float = 0
+    tds_section: Optional[str] = ""
+    tcs: float = 0                         # TCS amount collected (adds to total)
+    tcs_rate: float = 0
+    extra_charges: List[ExtraCharge] = []
+    charges_total: float = 0
     lines: List[InvoiceLine] = []
     subtotal: float = 0
     cgst: float = 0
@@ -2309,7 +2327,16 @@ async def _put_setting(key, value):
     await db.settings.update_one({"_id": key}, {"$set": {"value": value}}, upsert=True)
 
 MASTER_KEYS = {"doc_terms": "masters_doc_terms", "payment_terms": "masters_payment_terms",
-               "prefixes": "masters_prefixes", "company_bank": "masters_company_bank"}
+               "prefixes": "masters_prefixes", "company_bank": "masters_company_bank",
+               "tds_sections": "masters_tds_sections"}
+
+DEFAULT_TDS_SECTIONS = [
+    {"section": "192", "name": "Payment of salary", "rate": 1.0},
+    {"section": "194C", "name": "Contractors — HUF/Individual", "rate": 1.0},
+    {"section": "194C", "name": "Contractors — Others", "rate": 2.0},
+    {"section": "194J", "name": "Technical services", "rate": 2.0},
+    {"section": "194J", "name": "Professional services", "rate": 10.0},
+]
 
 @api.get("/masters")
 async def get_masters(user=Depends(get_current_user)):
@@ -2318,6 +2345,7 @@ async def get_masters(user=Depends(get_current_user)):
         "payment_terms": await _get_setting(MASTER_KEYS["payment_terms"], []),
         "prefixes": await _get_setting(MASTER_KEYS["prefixes"], {}),
         "company_bank": await _get_setting(MASTER_KEYS["company_bank"], {}),
+        "tds_sections": await _get_setting(MASTER_KEYS["tds_sections"], DEFAULT_TDS_SECTIONS),
     }
 
 @api.put("/masters/{section}")
@@ -2354,6 +2382,7 @@ async def seed_masters(user=Depends(require_roles("admin", "manager"))):
     await _put_setting(MASTER_KEYS["payment_terms"], payment_terms)
     await _put_setting(MASTER_KEYS["prefixes"], prefixes)
     await _put_setting(MASTER_KEYS["company_bank"], company_bank)
+    await _put_setting(MASTER_KEYS["tds_sections"], DEFAULT_TDS_SECTIONS)
     # also create a Bank account from these details if none exists yet
     await _ensure_accounts_seeded()
     if not await db.fin_accounts.find_one({"name": company_bank["account_name"]}):
@@ -3274,7 +3303,8 @@ async def del_po(pid: str, user=Depends(require_roles("admin", "manager"))):
     return {"ok": True}
 
 # ---------------- Invoices ----------------
-def compute_invoice_totals(lines: List[Dict[str, Any]], interstate: bool, round_off: float = 0, tds: float = 0) -> Dict[str, float]:
+def compute_invoice_totals(lines: List[Dict[str, Any]], interstate: bool, round_off: float = 0, tds: float = 0,
+                           extra_charges: Optional[List[Dict[str, Any]]] = None, tcs: float = 0) -> Dict[str, float]:
     subtotal = 0.0; gst = 0.0
     for l in lines:
         amt = float(l.get("qty", 0)) * float(l.get("rate", 0))
@@ -3285,17 +3315,19 @@ def compute_invoice_totals(lines: List[Dict[str, Any]], interstate: bool, round_
             amt = 0.0
         g = amt * float(l.get("gst_rate", 0)) / 100.0
         subtotal += amt; gst += g
-    total = subtotal + gst + float(round_off or 0) - float(tds or 0)
+    charges_total = sum(float(c.get("amount", 0) or 0) for c in (extra_charges or []))
+    total = subtotal + gst + charges_total + float(round_off or 0) - float(tds or 0) + float(tcs or 0)
+    extra = {"charges_total": round(charges_total, 2), "tds": round(float(tds or 0), 2), "tcs": round(float(tcs or 0), 2)}
     if interstate:
-        return {"subtotal": round(subtotal, 2), "cgst": 0.0, "sgst": 0.0, "igst": round(gst, 2), "total": round(total, 2)}
-    return {"subtotal": round(subtotal, 2), "cgst": round(gst/2, 2), "sgst": round(gst/2, 2), "igst": 0.0, "total": round(total, 2)}
+        return {"subtotal": round(subtotal, 2), "cgst": 0.0, "sgst": 0.0, "igst": round(gst, 2), "total": round(total, 2), **extra}
+    return {"subtotal": round(subtotal, 2), "cgst": round(gst/2, 2), "sgst": round(gst/2, 2), "igst": 0.0, "total": round(total, 2), **extra}
 
 @api.post("/invoices")
 async def create_invoice(inv: Invoice, user=Depends(get_current_user)):
     from datetime import timedelta
     doc = inv.model_dump()
     doc["code"] = (inv.code or "").strip() or await gen_code("INV", "invoice")
-    doc.update(compute_invoice_totals(doc["lines"], doc.get("is_interstate", False), doc.get("round_off", 0), doc.get("tds", 0)))
+    doc.update(compute_invoice_totals(doc["lines"], doc.get("is_interstate", False), doc.get("round_off", 0), doc.get("tds", 0), doc.get("extra_charges"), doc.get("tcs", 0)))
     # If an e-way bill number is entered at creation, compute its validity window.
     if doc.get("eway_bill_no") and not doc.get("eway_valid_until"):
         gen = (doc.get("eway_generated_at") or str(doc.get("date", ""))[:10] or datetime.utcnow().date().isoformat())[:10]
@@ -3665,7 +3697,7 @@ async def update_invoice(iid: str, inv: Invoice, user=Depends(get_current_user))
     if existing and _eway_edit_locked(existing):
         raise HTTPException(423, "Invoice locked: its e-way bill validity period has ended, so it can no longer be edited.")
     data = inv.model_dump(); data.pop("id", None); data.pop("created_at", None)
-    data.update(compute_invoice_totals(data["lines"], data.get("is_interstate", False), data.get("round_off", 0), data.get("tds", 0)))
+    data.update(compute_invoice_totals(data["lines"], data.get("is_interstate", False), data.get("round_off", 0), data.get("tds", 0), data.get("extra_charges"), data.get("tcs", 0)))
     await db.invoices.update_one({"id": iid}, {"$set": data})
     return {"ok": True}
 
@@ -6050,6 +6082,23 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
             else:
                 label = "Tax"
             sd.append([label, f"₹ {total_gst:,.2f}"])
+        # Additional charges (lump sum) + TDS (deducted) + TCS (collected)
+        _charges = totals.get("extra_charges") or []
+        _ct = float(totals.get("charges_total") or 0)
+        if _charges:
+            for _c in _charges:
+                if float(_c.get("amount", 0) or 0):
+                    sd.append([str(_c.get("name") or "Charges"), f"₹ {float(_c.get('amount', 0) or 0):,.2f}"])
+        elif _ct:
+            sd.append(["Additional Charges", f"₹ {_ct:,.2f}"])
+        _tds = float(totals.get("tds") or 0)
+        if _tds:
+            _tr = float(totals.get("tds_rate") or 0)
+            sd.append([f"TDS{f' ({_tr:g}%)' if _tr else ''}", f"- ₹ {_tds:,.2f}"])
+        _tcs = float(totals.get("tcs") or 0)
+        if _tcs:
+            _cr = float(totals.get("tcs_rate") or 0)
+            sd.append([f"TCS{f' ({_cr:g}%)' if _cr else ''}", f"+ ₹ {_tcs:,.2f}"])
         # Round-off: round total to whole rupees.
         # The grand total = net + tax; total_amount may be net-only when inline GST is off.
         grand_total_raw = (total_amount + total_gst) if not tpl.get("show_inline_gst_column") else total_amount
@@ -6274,7 +6323,9 @@ async def invoice_pdf(iid: str, copy: Optional[str] = "ORIGINAL FOR RECIPIENT", 
     _doc_title = "Export Invoice" if _itype == "export" else ("Bill of Supply" if _itype == "non_gst" else "Tax Invoice")
     pdf = _build_doc_pdf(_doc_title, inv.get("code", ""), "Bill To", inv.get("customer_name", ""), str(inv.get("date", ""))[:10],
                          inv.get("lines", []),
-                         {"subtotal": inv.get("subtotal", 0), "total": inv.get("total", 0), "gst_total": inv.get("cgst",0)+inv.get("sgst",0)+inv.get("igst",0)},
+                         {"subtotal": inv.get("subtotal", 0), "total": inv.get("total", 0), "gst_total": inv.get("cgst",0)+inv.get("sgst",0)+inv.get("igst",0),
+                          "charges_total": inv.get("charges_total", 0), "extra_charges": inv.get("extra_charges", []),
+                          "tds": inv.get("tds", 0), "tds_rate": inv.get("tds_rate", 0), "tcs": inv.get("tcs", 0), "tcs_rate": inv.get("tcs_rate", 0)},
                          gst_breakup={"cgst": inv.get("cgst", 0), "sgst": inv.get("sgst", 0), "igst": inv.get("igst", 0)},
                          company=company, notes=(inv.get("terms_text") or inv.get("notes", "")), tpl=tpl,
                          party_extra=party_extra, ship_to=ship_to, doc_meta=doc_meta,
@@ -6344,8 +6395,8 @@ async def _generic_doc_pdf(coll, did: str, title: str, party_label: str, party_f
     return Response(content=pdf, media_type="application/pdf",
                     headers={"Content-Disposition": f'inline; filename="{d.get("code",doc_type)}.pdf"'})
 
-def _doc_totals_with_gst(lines, interstate, round_off=0):
-    t = compute_invoice_totals(lines, interstate, round_off, 0)
+def _doc_totals_with_gst(lines, interstate, round_off=0, tds=0, extra_charges=None, tcs=0):
+    t = compute_invoice_totals(lines, interstate, round_off, tds, extra_charges, tcs)
     t["gst_total"] = round(t.get("cgst", 0) + t.get("sgst", 0) + t.get("igst", 0), 2)
     return t
 
@@ -6361,7 +6412,7 @@ async def create_sale_order(so: SaleOrder, user=Depends(get_current_user)):
 async def create_vendor_bill(vb: VendorBill, user=Depends(get_current_user)):
     doc = vb.model_dump()
     doc["code"] = (vb.code or "").strip() or await gen_code("PB", "vendor_bill")
-    doc.update(_doc_totals_with_gst(doc["lines"], doc.get("is_interstate", False), doc.get("round_off", 0)))
+    doc.update(_doc_totals_with_gst(doc["lines"], doc.get("is_interstate", False), doc.get("round_off", 0), doc.get("tds", 0), doc.get("extra_charges"), doc.get("tcs", 0)))
     await db.vendor_bills.insert_one(doc)
     return serialize(doc)
 
