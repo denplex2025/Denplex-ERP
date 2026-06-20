@@ -1936,6 +1936,72 @@ async def part_library_to_inventory(pid: str, body: Optional[dict] = None, user=
     await db.items.insert_one(doc)
     return serialize(doc)
 
+# ---------------------------------------------------------------------------
+# Admin: Reset Trial Data — hard-purge selected groups (for clean re-import).
+# Protects system collections (users, settings, counters, ISO docs, registers,
+# email accounts, etc.) — they can never be touched by this tool.
+# ---------------------------------------------------------------------------
+RESET_GROUPS = {
+    "parties":    {"label": "Parties (Customers, Suppliers, Leads)",
+                   "cols": ["customers", "suppliers", "leads"]},
+    "inventory":  {"label": "Inventory items & stock movements",
+                   "cols": ["items", "movements", "material_state_movements"]},
+    "sales":      {"label": "Sales (Quotations, Sale Orders, Invoices, Proforma, Sale Returns, Payments-In, Credit Notes, Delivery Challans)",
+                   "cols": ["quotations", "sale_orders", "invoices", "proforma_invoices", "sale_returns", "payments_in", "credit_notes", "delivery_challans"]},
+    "purchase":   {"label": "Purchase (POs, Vendor Bills, Purchase Returns, Payments-Out, Expenses, Debit Notes)",
+                   "cols": ["purchase_orders", "vendor_bills", "purchase_returns", "payments_out", "expenses", "debit_notes"]},
+    "production": {"label": "Production (Work Orders, Operations, Job Cards, BOMs, Part Master, QC, NCR, CAPA, Job-Work-Out)",
+                   "cols": ["work_orders", "wo_operations", "job_cards", "boms", "parts", "qc_inspections", "qc_reports", "ncrs", "capas", "job_work_out"]},
+}
+RESET_PROTECTED = {"users", "settings", "counters", "audit_logs", "email_accounts", "iso_documents",
+                   "register_templates", "register_entries", "trial_requests", "recycle_bin",
+                   "webhook_events", "machines", "instruments", "employees", "attendance"}
+
+@api.get("/admin/reset-data/preview")
+async def reset_data_preview(user=Depends(require_roles("admin"))):
+    out = []
+    for key, g in RESET_GROUPS.items():
+        counts = {}
+        total = 0
+        for c in g["cols"]:
+            n = await db[c].count_documents({})
+            counts[c] = n
+            total += n
+        out.append({"key": key, "label": g["label"], "cols": g["cols"], "counts": counts, "total": total})
+    return {"groups": out}
+
+@api.post("/admin/reset-data")
+async def reset_data(body: dict, user=Depends(require_roles("admin"))):
+    """Hard-purge chosen groups. Body: {groups:[...], confirm:"RESET"}. Irreversible."""
+    if (body or {}).get("confirm") != "RESET":
+        raise HTTPException(400, "Confirmation text must be exactly RESET")
+    groups = (body or {}).get("groups") or []
+    if not groups:
+        raise HTTPException(400, "No groups selected")
+    deleted = {}
+    cols_done = set()
+    for key in groups:
+        g = RESET_GROUPS.get(key)
+        if not g:
+            continue
+        for c in g["cols"]:
+            if c in RESET_PROTECTED or c in cols_done:
+                continue
+            res = await db[c].delete_many({})
+            deleted[c] = res.deleted_count
+            cols_done.add(c)
+    # also clear recycle-bin entries for the wiped collections so nothing lingers
+    if cols_done:
+        await db.recycle_bin.delete_many({"collection": {"$in": list(cols_done)}})
+    try:
+        await db.audit_logs.insert_one({
+            "id": new_id(), "action": "reset_trial_data", "by_user": (user or {}).get("email", ""),
+            "groups": groups, "deleted": deleted, "created_at": now_iso(),
+        })
+    except Exception:
+        pass
+    return {"ok": True, "deleted": deleted, "total": sum(deleted.values())}
+
 @api.post("/inventory/movements")
 async def create_movement(m: StockMovement, user=Depends(get_current_user)):
     item = await db.items.find_one({"id": m.item_id}, {"_id": 0})
