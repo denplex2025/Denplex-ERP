@@ -11,13 +11,13 @@ const TC_DOCS = ["Sale Invoice", "Sale Order", "Delivery Challan", "Estimate Quo
 const PREFIX_KEYS = [["invoice", "Sale Invoice"], ["purchase_order", "Purchase Order"], ["proforma", "Proforma"], ["sale_order", "Sale Order"], ["credit_note", "Credit Note"], ["delivery_challan", "Delivery Challan"]];
 
 export default function DocMasters() {
-  const [m, setM] = useState({ doc_terms: {}, payment_terms: [], prefixes: {}, company_bank: {} });
+  const [m, setM] = useState({ doc_terms: {}, payment_terms: [], prefixes: {}, company_bank: {}, doc_custom_fields: [] });
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
 
   const load = async () => {
     setLoading(true);
-    try { const r = await api.get("/masters"); setM({ doc_terms: r.data.doc_terms || {}, payment_terms: r.data.payment_terms || [], prefixes: r.data.prefixes || {}, company_bank: r.data.company_bank || {} }); }
+    try { const r = await api.get("/masters"); setM({ doc_terms: r.data.doc_terms || {}, payment_terms: r.data.payment_terms || [], prefixes: r.data.prefixes || {}, company_bank: r.data.company_bank || {}, doc_custom_fields: r.data.doc_custom_fields || [] }); }
     catch (e) { toast.error("Could not load masters"); }
     setLoading(false);
   };
@@ -40,6 +40,9 @@ export default function DocMasters() {
   const setPrefix = (k, v) => setM(p => ({ ...p, prefixes: { ...p.prefixes, [k]: v } }));
   const setBank = (k, v) => setM(p => ({ ...p, company_bank: { ...p.company_bank, [k]: v } }));
   const setPT = (i, k, v) => setM(p => ({ ...p, payment_terms: p.payment_terms.map((t, idx) => idx === i ? { ...t, [k]: v } : t) }));
+  const setCF = (i, k, v) => setM(p => ({ ...p, doc_custom_fields: p.doc_custom_fields.map((c, idx) => idx === i ? { ...c, [k]: v } : c) }));
+  const addCF = () => setM(p => ({ ...p, doc_custom_fields: [...(p.doc_custom_fields || []), { name: "New Field", enabled: true, type: "text" }] }));
+  const delCF = (i) => setM(p => ({ ...p, doc_custom_fields: p.doc_custom_fields.filter((_, idx) => idx !== i) }));
 
   if (loading) return <div className="text-slate-400 text-sm p-6">Loading…</div>;
 
@@ -96,6 +99,22 @@ export default function DocMasters() {
               <Input value={m.company_bank[k] || ""} onChange={e => setBank(k, e.target.value)} className="mt-1" />
             </div>
           ))}
+        </div>
+      </Section>
+
+      <Section title="Document Custom Fields (Transport / Vehicle / Delivery)" onSave={() => saveSection("doc_custom_fields", m.doc_custom_fields)}>
+        <div className="space-y-2">
+          {(m.doc_custom_fields || []).map((cf, i) => (
+            <div key={i} className="flex items-center gap-3">
+              <input type="checkbox" checked={!!cf.enabled} onChange={e => setCF(i, "enabled", e.target.checked)} className="accent-red-600" />
+              <Input value={cf.name} onChange={e => setCF(i, "name", e.target.value)} className="w-56" />
+              <select value={cf.type || "text"} onChange={e => setCF(i, "type", e.target.value)} className="h-9 text-sm border border-slate-200 rounded-sm px-2 bg-white">
+                <option value="text">Text</option><option value="date">Date</option>
+              </select>
+              <button onClick={() => delCF(i)} className="text-slate-300 hover:text-red-600 text-xs">remove</button>
+            </div>
+          ))}
+          <button onClick={addCF} className="text-xs text-red-600 hover:underline">+ Add custom field</button>
         </div>
       </Section>
     </div>

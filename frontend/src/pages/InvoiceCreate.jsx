@@ -28,10 +28,11 @@ export default function InvoiceCreate() {
     payment_mode: "Credit", godown: "", code: "", date: today, payment_terms: "30", due_date: addDays(today, 30),
     customer_id: "", customer_name: "", customer_gstin: "", place_of_supply: "", is_interstate: false,
     purchaser_name: "", po_number: "", po_date: "", eway_bill_no: "", eway_distance_km: 0,
-    terms_text: DEFAULT_TC, round_off: 0, tds: 0, tds_rate: 0, tds_section: "", tcs: 0, tcs_rate: 0, extra_charges: [], notes: "",
+    terms_text: DEFAULT_TC, round_off: 0, tds: 0, tds_rate: 0, tds_section: "", tcs: 0, tcs_rate: 0, extra_charges: [], custom_fields: {}, notes: "",
   });
   const [lines, setLines] = useState([blankLine()]);
   const [tdsSections, setTdsSections] = useState([]);
+  const [customFields, setCustomFields] = useState([]);
   const set = (k, v) => setF(p => ({ ...p, [k]: v }));
 
   useEffect(() => {
@@ -46,6 +47,7 @@ export default function InvoiceCreate() {
     })();
     api.get("/masters").then(r => {
       setTdsSections(r.data?.tds_sections || []);
+      setCustomFields(r.data?.doc_custom_fields || []);
       const t = r.data?.doc_terms?.["Sale Invoice"];
       if (t) setF(p => (p.terms_text === DEFAULT_TC || !p.terms_text ? { ...p, terms_text: t } : p));
     }).catch(() => {});
@@ -61,7 +63,7 @@ export default function InvoiceCreate() {
   const setLine = (i, k, v) => setLines(ls => ls.map((l, idx) => idx === i ? { ...l, [k]: v } : l));
   const pickItem = (i, name) => {
     const it = items.find(x => x.name === name);
-    setLines(ls => ls.map((l, idx) => idx === i ? { ...l, description: name, item_code: it?.sku || l.item_code, hsn: it?.hsn || l.hsn, gst_rate: it?.gst_rate ?? l.gst_rate, rate: it?.unit_cost || l.rate } : l));
+    setLines(ls => ls.map((l, idx) => idx === i ? { ...l, description: name, item_code: it?.sku || l.item_code, hsn: it?.hsn || l.hsn, gst_rate: it?.gst_rate ?? l.gst_rate, rate: it?.unit_cost || l.rate, unit: it?.uom || l.unit, _base: it?.uom || "", _secondary: it?.secondary_unit || "" } : l));
   };
   const addLine = () => setLines(ls => [...ls, blankLine()]);
   const delLine = (i) => setLines(ls => ls.length > 1 ? ls.filter((_, idx) => idx !== i) : ls);
@@ -180,6 +182,18 @@ export default function InvoiceCreate() {
         <Fld label="Customer GSTIN"><Input value={f.customer_gstin} onChange={e => set("customer_gstin", e.target.value)} /></Fld>
       </div>
 
+      {/* Configurable custom fields (Transport / Vehicle / Delivery) */}
+      {customFields.filter(cf => cf.enabled).length > 0 && (
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mb-4 border border-slate-200 rounded-md p-3">
+          <div className="md:col-span-4 text-[11px] uppercase tracking-wider text-slate-500">Dispatch / Transport</div>
+          {customFields.filter(cf => cf.enabled).map(cf => (
+            <Fld key={cf.name} label={cf.name}>
+              <Input type={cf.type === "date" ? "date" : "text"} value={f.custom_fields[cf.name] || ""} onChange={e => setF(p => ({ ...p, custom_fields: { ...p.custom_fields, [cf.name]: e.target.value } }))} />
+            </Fld>
+          ))}
+        </div>
+      )}
+
       {/* Line items */}
       <datalist id="item-names">{items.map(it => <option key={it.id} value={it.name} />)}</datalist>
       <div className="overflow-x-auto border border-slate-200 rounded-md mb-4">
@@ -194,7 +208,9 @@ export default function InvoiceCreate() {
                 <td className="p-2"><Input list="item-names" value={l.description} onChange={e => pickItem(i, e.target.value)} className="h-8 min-w-[180px]" placeholder="Item or description" /></td>
                 <td className="p-2"><Input value={l.hsn} onChange={e => setLine(i, "hsn", e.target.value)} className="h-8 w-20" /></td>
                 <td className="p-2"><Input type="number" value={l.qty} onChange={e => setLine(i, "qty", e.target.value)} className="h-8 w-16" /></td>
-                <td className="p-2"><Input value={l.unit} onChange={e => setLine(i, "unit", e.target.value)} className="h-8 w-16" /></td>
+                <td className="p-2">{l._secondary
+                  ? <select value={l.unit} onChange={e => setLine(i, "unit", e.target.value)} className="h-8 w-20 text-sm border border-slate-200 rounded-sm bg-white"><option value={l._base}>{l._base}</option><option value={l._secondary}>{l._secondary}</option></select>
+                  : <Input value={l.unit} onChange={e => setLine(i, "unit", e.target.value)} className="h-8 w-16" />}</td>
                 <td className="p-2"><Input type="number" value={l.rate} onChange={e => setLine(i, "rate", e.target.value)} className="h-8 w-24" /></td>
                 <td className="p-2"><Input type="number" value={l.discount_pct} onChange={e => setLine(i, "discount_pct", e.target.value)} className="h-8 w-16" /></td>
                 <td className="p-2"><Input type="number" value={l.discount_amount} onChange={e => setLine(i, "discount_amount", e.target.value)} className="h-8 w-20" /></td>

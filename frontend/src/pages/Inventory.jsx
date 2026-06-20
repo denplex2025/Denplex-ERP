@@ -241,7 +241,9 @@ export default function Inventory() {
                 </SelectContent>
               </Select>
             </Field>
-            <Field label="UOM"><Input value={form.uom || "pcs"} onChange={e=>setF("uom", e.target.value)} /></Field>
+            <Field label="UOM (base)"><Input value={form.uom || "pcs"} onChange={e=>setF("uom", e.target.value)} /></Field>
+            <Field label="Secondary Unit"><Input value={form.secondary_unit || ""} onChange={e=>setF("secondary_unit", e.target.value)} placeholder="e.g. Box" /></Field>
+            <Field label={`Conversion (1 ${form.secondary_unit || "sec"} = ? ${form.uom || "base"})`}><Input type="number" value={form.conversion_factor ?? 0} onChange={e=>setF("conversion_factor", Number(e.target.value))} /></Field>
             <Field label="Qty on Hand"><Input type="number" value={form.qty_on_hand ?? 0} onChange={e=>setF("qty_on_hand", Number(e.target.value))} /></Field>
             <Field label="Reorder Level"><Input type="number" value={form.reorder_level ?? 0} onChange={e=>setF("reorder_level", Number(e.target.value))} /></Field>
             <Field label="Unit Cost (₹)"><Input type="number" value={form.unit_cost ?? 0} onChange={e=>setF("unit_cost", Number(e.target.value))} /></Field>
