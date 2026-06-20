@@ -558,6 +558,58 @@ class PurchaseOrder(BaseModel):
     notes: Optional[str] = ""
     created_at: str = Field(default_factory=now_iso)
 
+class SaleOrder(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    code: Optional[str] = None
+    customer_id: str
+    customer_name: str
+    customer_gstin: Optional[str] = ""
+    date: str = Field(default_factory=now_iso)
+    due_date: Optional[str] = ""
+    delivery_date: Optional[str] = ""
+    po_number: Optional[str] = ""
+    reference: Optional[str] = ""
+    place_of_supply: Optional[str] = ""
+    is_interstate: bool = False
+    terms_text: Optional[str] = ""
+    round_off: float = 0
+    lines: List[POLine] = []
+    subtotal: float = 0
+    cgst: float = 0
+    sgst: float = 0
+    igst: float = 0
+    gst_total: float = 0
+    total: float = 0
+    status: Literal["draft", "sent", "confirmed", "cancelled"] = "draft"
+    notes: Optional[str] = ""
+    created_at: str = Field(default_factory=now_iso)
+
+class VendorBill(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    code: Optional[str] = None              # supplier's bill number (editable; else auto)
+    supplier_id: str
+    supplier_name: str
+    supplier_gstin: Optional[str] = ""
+    date: str = Field(default_factory=now_iso)
+    due_date: Optional[str] = ""
+    reference: Optional[str] = ""
+    place_of_supply: Optional[str] = ""
+    is_interstate: bool = False
+    terms_text: Optional[str] = ""
+    round_off: float = 0
+    lines: List[POLine] = []
+    subtotal: float = 0
+    cgst: float = 0
+    sgst: float = 0
+    igst: float = 0
+    gst_total: float = 0
+    total: float = 0
+    status: Literal["unpaid", "paid", "partial", "overdue"] = "unpaid"
+    notes: Optional[str] = ""
+    created_at: str = Field(default_factory=now_iso)
+
 class InvoiceLine(BaseModel):
     description: str
     item_code: Optional[str] = ""        # SKU / part number, shown as "Item Code" col
@@ -5720,6 +5772,27 @@ async def _generic_doc_pdf(coll, did: str, title: str, party_label: str, party_f
                          copy_label=copy_label)
     return Response(content=pdf, media_type="application/pdf",
                     headers={"Content-Disposition": f'inline; filename="{d.get("code",doc_type)}.pdf"'})
+
+def _doc_totals_with_gst(lines, interstate, round_off=0):
+    t = compute_invoice_totals(lines, interstate, round_off, 0)
+    t["gst_total"] = round(t.get("cgst", 0) + t.get("sgst", 0) + t.get("igst", 0), 2)
+    return t
+
+@api.post("/sale-orders")
+async def create_sale_order(so: SaleOrder, user=Depends(get_current_user)):
+    doc = so.model_dump()
+    doc["code"] = (so.code or "").strip() or await gen_code("SO", "sale_order")
+    doc.update(_doc_totals_with_gst(doc["lines"], doc.get("is_interstate", False), doc.get("round_off", 0)))
+    await db.sale_orders.insert_one(doc)
+    return serialize(doc)
+
+@api.post("/vendor-bills")
+async def create_vendor_bill(vb: VendorBill, user=Depends(get_current_user)):
+    doc = vb.model_dump()
+    doc["code"] = (vb.code or "").strip() or await gen_code("PB", "vendor_bill")
+    doc.update(_doc_totals_with_gst(doc["lines"], doc.get("is_interstate", False), doc.get("round_off", 0)))
+    await db.vendor_bills.insert_one(doc)
+    return serialize(doc)
 
 @api.get("/vendor-bills")
 async def list_vendor_bills(user=Depends(get_current_user)):
