@@ -7765,6 +7765,31 @@ async def vyapar_import(payload: VyaparImportIn, user=Depends(require_roles("adm
 # ---------------------------------------------------------------------------
 # AI Fixture Concept Generator — part drawing / 3D (STL) → jig & fixture brief
 # ---------------------------------------------------------------------------
+DENPLEX_FIXTURE_KB = (
+    "\n\nDENPLEX HOUSE STYLE (learned from real Denplex fixtures — follow this):\n"
+    "CONSTRUCTION: a flat BASE PLATE (MS or aluminium, ~12-20 mm) cut by LASER or WATERJET with "
+    "rectangular LIGHTENING CUTOUTS to keep weight low. Onto it dowel + bolt several VMC-machined "
+    "VERTICAL CRADLE POSTS (zinc-plated steel) whose tops have a V-groove or forked/slotted profile "
+    "that cradles the tube/part at each node or bend. Posts located by dowel pins, fixed with socket-head "
+    "cap screws into tapped holes. Add a stamped PART-NUMBER TAG.\n"
+    "IN-HOUSE PROCESSES (prefer these, keep it simple & cost-effective): laser cutting, waterjet, VMC "
+    "milling, lathe/turning, drilling, tapping, cutting, shaping, milling, zinc electroplating.\n"
+    "BRAZING-FIXTURE RULES (critical when the operation is brazing):\n"
+    "1) Support the tube only at straights/nodes with V-cradles — keep every BRAZE JOINT in free air so "
+    "the torch reaches all sides of the joint.\n"
+    "2) Present each joint TILTED/ANGLED so molten flux and excess filler RUN OFF and never pool/leave "
+    "residue at the joint.\n"
+    "3) Minimise contact and heat-sinking near a joint; where contact is unavoidable use STAINLESS STEEL "
+    "or coated contact so the fixture does not braze to the part or rob heat. Never clamp on a joint.\n"
+    "4) Allow thermal expansion — locate from one datum end and let the rest float; do not over-constrain "
+    "a part that will be heated.\n"
+    "5) Keep it LIGHT (lightening cutouts) and LOW-COST (few machined parts, standard fasteners).\n"
+    "BOM STYLE: base plate (laser/waterjet), set of V-cradle posts (VMC, zinc-plated, qty = number of "
+    "support nodes), dowel pins, SHCS, optional rest pads, part-number tag.\n"
+    "DRAWING STYLE: A3, dimensions in mm, ISO 2768 medium tolerance, title block (Checked: Neel), "
+    "part-number naming like 'A163833T2A - <part> - FX<n> - PR<nnn>'."
+)
+
 FIXTURE_SYSTEM = (
     "You are a senior jig & fixture design engineer at Denplex Engineering Company, a precision "
     "machining / jigs & fixtures manufacturer in Ahmedabad, India. From the part drawing/photo and "
@@ -7772,7 +7797,7 @@ FIXTURE_SYSTEM = (
     "Apply 3-2-1 locating principles. Prefer standard off-the-shelf components (toggle clamps, "
     "round + diamond locating pins, rest pads, dowel pins, hydraulic/pneumatic cylinders, "
     "support buttons, eye bolts). Be specific, realistic and cost-aware for an Indian SME shop. "
-    "Money in INR. Return ONLY JSON, no prose."
+    "Money in INR. Return ONLY JSON, no prose." + DENPLEX_FIXTURE_KB
 )
 FIXTURE_SCHEMA = (
     'Return ONLY this JSON: {"fixture_type":str, "summary":str, '
@@ -7889,6 +7914,20 @@ async def fixture_concept_pdf(body: dict, user=Depends(get_current_user)):
     el = [Paragraph("<b>Fixture Concept Brief</b>", ss["Title"]),
           Paragraph(f"Denplex Engineering Company &nbsp;·&nbsp; {meta.get('part_name','')} &nbsp;·&nbsp; {c.get('fixture_type','')}", ss["Normal"]),
           Spacer(1, 4 * mm)]
+    # Optional concept sketch (rasterized PNG passed from the browser)
+    spng = (body or {}).get("sketch_png_base64") or ""
+    if spng:
+        try:
+            from reportlab.platypus import Image as RLImage
+            import base64 as _b64
+            png = _b64.b64decode(spng.split(",")[-1])
+            img = RLImage(io.BytesIO(png));
+            maxw = 170 * mm
+            if img.drawWidth > maxw:
+                ratio = maxw / img.drawWidth; img.drawWidth = maxw; img.drawHeight *= ratio
+            el += [Paragraph("Concept sketch", h), img, Spacer(1, 4 * mm)]
+        except Exception:
+            pass
     if c.get("summary"):
         el += [Paragraph("Summary", h), Paragraph(str(c["summary"]), ss["Normal"])]
     def bullets(title, items):
@@ -7927,6 +7966,66 @@ async def fixture_concept_pdf(body: dict, user=Depends(get_current_user)):
     doc.build(el); buf.seek(0)
     return Response(content=buf.getvalue(), media_type="application/pdf",
                     headers={"Content-Disposition": f'attachment; filename="FixtureConcept_{meta.get("part_name","part")}.pdf"'})
+
+SKETCH_SYSTEM = (
+    "You are a jig & fixture designer. Produce a CLEAN, LABELLED 2D concept schematic of the proposed "
+    "fixture as a SINGLE self-contained SVG (no external refs, no scripts). Draw TWO views side by side: "
+    "TOP VIEW (left) and FRONT VIEW (right). Show the base plate, the part in place, locating elements "
+    "(V-blocks / locating pins / rest pads), clamps, and any process-specific elements (for brazing: the "
+    "nest and heat shield). Add short dimension hints, component labels with thin leader lines, and a small "
+    "title block (part name + fixture type). Use thin black strokes (#222), light grey fills (#eee/#ddd), "
+    "an accent red (#DC2626) for clamps, white background, NO photorealism. Use viewBox='0 0 900 580'. "
+    "For a DENPLEX BRAZING FIXTURE specifically: draw a long flat BASE PLATE with several rectangular "
+    "LIGHTENING CUTOUTS, and several VERTICAL CRADLE POSTS with V-grooved tops standing on it; show the "
+    "copper tube/header resting elevated in the V-cradles with its braze joints in free air and tilted, "
+    "and a couple of small arrows marked 'torch access' / 'flux run-off'. Label the base, V-cradle posts, "
+    "dowels and the part-number tag. "
+    "Return ONLY the SVG markup starting with <svg and ending with </svg> — no markdown, no commentary."
+)
+
+class FixtureSketchIn(BaseModel):
+    concept: dict = {}
+    part_name: str = ""
+    material: str = ""
+    dims: Optional[dict] = None
+    image_base64: str = ""
+    mime: str = "image/png"
+
+@api.post("/fixture/sketch")
+async def fixture_sketch(inp: FixtureSketchIn, user=Depends(get_current_user)):
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(503, "AI fixture generator is not configured. Set ANTHROPIC_API_KEY in the backend environment.")
+    c = inp.concept or {}
+    ctx = (f"Part: {inp.part_name or 'part'}; Material: {inp.material or 'n/a'}; "
+           f"Fixture type: {c.get('fixture_type', '')}.\n"
+           f"Locating scheme: {c.get('locating_scheme', '')}\n"
+           f"Locators: {c.get('locators')}\nClamping: {c.get('clamping')}\n"
+           f"Supports: {c.get('supports')}\nBase plate: {c.get('base_plate')}")
+    if inp.dims:
+        ctx += f"\nPart envelope (mm): {inp.dims}"
+    content = []
+    if inp.image_base64:
+        b64 = inp.image_base64.split(",")[-1]; mt = inp.mime or "image/png"
+        if mt == "application/pdf":
+            content.append({"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": b64}})
+        else:
+            content.append({"type": "image", "source": {"type": "base64", "media_type": mt, "data": b64}})
+    content.append({"type": "text", "text": "Draw the fixture concept schematic for:\n" + ctx})
+    body = {"model": QC_VISION_MODEL, "max_tokens": 4000, "system": SKETCH_SYSTEM, "messages": [{"role": "user", "content": content}]}
+    headers = {"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=120) as cx:
+            r = await cx.post(f"{ANTHROPIC_BASE_URL}/v1/messages", json=body, headers=headers)
+    except Exception as e:
+        raise HTTPException(502, f"Could not reach the AI API: {e}")
+    if r.status_code >= 400:
+        raise HTTPException(502, f"AI API error {r.status_code}: {r.text[:200]}")
+    text = "".join(b.get("text", "") for b in r.json().get("content", []) if b.get("type") == "text")
+    i = text.find("<svg"); j = text.rfind("</svg>")
+    svg = text[i:j + 6] if (i != -1 and j != -1) else ""
+    # strip any scripts defensively
+    svg = re.sub(r"<script.*?</script>", "", svg, flags=re.S | re.I)
+    return {"svg": svg, "ok": bool(svg)}
 
 # ---------------- Trial Signup ----------------
 @api.post("/trial/request")
