@@ -20,6 +20,8 @@ export default function FinancialStatements() {
   const [pnl, setPnl] = useState(null);
   const [bs, setBs] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [ob, setOb] = useState({ capital: 0, opening_stock: 0, as_of: "" });
+  const [obSaving, setObSaving] = useState(false);
 
   const loadPnl = async () => {
     setLoading(true);
@@ -35,6 +37,17 @@ export default function FinancialStatements() {
   };
   useEffect(() => { loadPnl(); /* eslint-disable-next-line */ }, []);
   useEffect(() => { if (tab === "bs" && !bs) loadBs(); /* eslint-disable-next-line */ }, [tab]);
+  useEffect(() => { api.get("/settings/opening-balances").then(r => setOb({ capital: r.data?.capital || 0, opening_stock: r.data?.opening_stock || 0, as_of: r.data?.as_of || "" })).catch(() => {}); }, []);
+
+  const saveOb = async () => {
+    setObSaving(true);
+    try {
+      await api.put("/settings/opening-balances", { capital: Number(ob.capital || 0), opening_stock: Number(ob.opening_stock || 0), as_of: ob.as_of });
+      toast.success("Opening balances saved");
+      await loadPnl(); if (bs) await loadBs();
+    } catch (e) { toast.error("Save failed (admin/manager/accountant only)"); }
+    setObSaving(false);
+  };
 
   const dl = async (kind, fmt) => {
     try {
@@ -61,6 +74,16 @@ export default function FinancialStatements() {
         <h1 className="text-xl font-bold font-display">Accounting Books</h1>
       </div>
       <p className="text-sm text-slate-500 mb-4">Profit &amp; Loss and Balance Sheet, computed live from your invoices, bills, expenses, payments, stock and bank balances.</p>
+
+      <div className="border border-slate-200 rounded-md p-3 mb-4 bg-slate-50/50">
+        <div className="flex flex-wrap items-end gap-3">
+          <div><Label className="text-[11px] uppercase tracking-wider text-slate-500">Opening Capital (₹)</Label><Input type="number" value={ob.capital} onChange={e => setOb(p => ({ ...p, capital: e.target.value }))} className="mt-1 w-40" /></div>
+          <div><Label className="text-[11px] uppercase tracking-wider text-slate-500">Opening Stock (₹)</Label><Input type="number" value={ob.opening_stock} onChange={e => setOb(p => ({ ...p, opening_stock: e.target.value }))} className="mt-1 w-40" /></div>
+          <div><Label className="text-[11px] uppercase tracking-wider text-slate-500">As of</Label><Input type="date" value={ob.as_of} onChange={e => setOb(p => ({ ...p, as_of: e.target.value }))} className="mt-1 w-40" /></div>
+          <Button onClick={saveOb} disabled={obSaving} variant="outline" className="rounded-sm">{obSaving ? "Saving…" : "Save Opening Balances"}</Button>
+        </div>
+        <div className="text-[11px] text-slate-400 mt-2">Opening capital shows real equity (removes the balancing figure); opening stock feeds Cost of Goods Sold.</div>
+      </div>
 
       <div className="flex gap-1 border-b border-slate-200 mb-4">
         {[["pnl", "Profit & Loss"], ["bs", "Balance Sheet"]].map(([k, l]) => (
@@ -105,8 +128,12 @@ function Pnl({ d }) {
   return (
     <div className="border border-slate-200 rounded-md p-4 text-sm">
       <Row label="Sales (net of returns)" val={d.sales} />
-      {d.sales_returns ? <Row label="— Sales returns" val={d.sales_returns} indent neg /> : null}
-      <Row label="Less: Purchases (net)" val={d.purchases} neg />
+      {d.sales_returns ? <Row label="Less: Sales returns" val={d.sales_returns} indent neg /> : null}
+      <div className="mt-2 mb-1 text-[11px] uppercase tracking-wider text-slate-400">Cost of goods sold</div>
+      <Row label="Opening Stock" val={d.opening_stock} indent />
+      <Row label="Add: Purchases (net)" val={d.purchases} indent />
+      <Row label="Less: Closing Stock" val={d.closing_stock} indent neg />
+      <Row label="Cost of Goods Sold" val={d.cogs} neg />
       {d.direct_expenses ? <Row label="Less: Direct expenses" val={d.direct_expenses} neg /> : null}
       <Row label="Gross Profit" val={d.gross_profit} bold />
       <div className="mt-2 mb-1 text-[11px] uppercase tracking-wider text-slate-400">Indirect / operating expenses</div>
@@ -140,12 +167,13 @@ function Bs({ d }) {
         {l.tds_payable ? <Row label="TDS Payable" val={l.tds_payable} /> : null}
         <Row label="Total Liabilities" val={l.total} bold />
         <div className="mt-3 font-semibold text-slate-700 mb-1">Equity</div>
+        <Row label="Owner's Capital (opening)" val={eq.opening_capital} indent />
         <Row label="Retained Earnings (net profit to date)" val={eq.retained_earnings} indent />
-        <Row label="Owner's Capital & Reserves" val={eq.capital_balancing} indent />
+        {eq.adjustment ? <Row label="Adjustment / Suspense" val={eq.adjustment} indent /> : null}
         <Row label="Total Equity" val={eq.total} bold />
         <Row label="Total Liabilities & Equity" val={l.total + eq.total} bold />
       </div>
-      <div className="md:col-span-2 text-[11px] text-slate-400">As of {d.as_of}. Owner's Capital & Reserves is the balancing figure (enter your opening capital under Cash & Bank / accounts for a precise split). Assets always equal Liabilities + Equity.</div>
+      <div className="md:col-span-2 text-[11px] text-slate-400">As of {d.as_of}. Set your Opening Capital above so equity is real; any remaining difference shows as Adjustment / Suspense. Assets always equal Liabilities + Equity.</div>
     </div>
   );
 }
