@@ -8009,6 +8009,8 @@ SKETCH_SYSTEM = (
     "copper tube/header resting elevated in the V-cradles with its braze joints in free air and tilted, "
     "and a couple of small arrows marked 'torch access' / 'flux run-off'. Label the base, V-cradle posts, "
     "dowels and the part-number tag. "
+    "Keep the SVG COMPACT — at most a few dozen shapes, plain <rect>/<line>/<path>/<text>, no gradients, "
+    "filters or embedded fonts — so the whole drawing fits in one response and is valid. "
     "Return ONLY the SVG markup starting with <svg and ending with </svg> — no markdown, no commentary."
 )
 
@@ -8040,21 +8042,24 @@ async def fixture_sketch(inp: FixtureSketchIn, user=Depends(get_current_user)):
         else:
             content.append({"type": "image", "source": {"type": "base64", "media_type": mt, "data": b64}})
     content.append({"type": "text", "text": "Draw the fixture concept schematic for:\n" + ctx})
-    body = {"model": QC_VISION_MODEL, "max_tokens": 4000, "system": SKETCH_SYSTEM, "messages": [{"role": "user", "content": content}]}
+    body = {"model": QC_VISION_MODEL, "max_tokens": 8000, "system": SKETCH_SYSTEM, "messages": [{"role": "user", "content": content}]}
     headers = {"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"}
     try:
-        async with httpx.AsyncClient(timeout=120) as cx:
+        async with httpx.AsyncClient(timeout=150) as cx:
             r = await cx.post(f"{ANTHROPIC_BASE_URL}/v1/messages", json=body, headers=headers)
     except Exception as e:
         raise HTTPException(502, f"Could not reach the AI API: {e}")
     if r.status_code >= 400:
         raise HTTPException(502, f"AI API error {r.status_code}: {r.text[:200]}")
     text = "".join(b.get("text", "") for b in r.json().get("content", []) if b.get("type") == "text")
-    i = text.find("<svg"); j = text.rfind("</svg>")
-    svg = text[i:j + 6] if (i != -1 and j != -1) else ""
-    # strip any scripts defensively
+    i = text.find("<svg")
+    if i == -1:
+        svg = ""
+    else:
+        j = text.rfind("</svg>")
+        svg = text[i:j + 6] if j != -1 else (text[i:].rstrip() + "</svg>")   # best-effort close if truncated
     svg = re.sub(r"<script.*?</script>", "", svg, flags=re.S | re.I)
-    return {"svg": svg, "ok": bool(svg)}
+    return {"svg": svg, "ok": bool(svg), "hint": ("" if svg else text[:300])}
 
 # ---------------- Trial Signup ----------------
 @api.post("/trial/request")
