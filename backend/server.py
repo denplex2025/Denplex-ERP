@@ -7996,6 +7996,26 @@ async def fixture_concept_pdf(body: dict, user=Depends(get_current_user)):
     return Response(content=buf.getvalue(), media_type="application/pdf",
                     headers={"Content-Disposition": f'attachment; filename="FixtureConcept_{meta.get("part_name","part")}.pdf"'})
 
+class CadGlbIn(BaseModel):
+    step_base64: str = ""
+
+@api.post("/cad/glb")
+async def cad_glb(inp: CadGlbIn, user=Depends(get_current_user)):
+    """Proxy a STEP to the CAD microservice and return a GLB mesh for the in-ERP 3D viewer."""
+    if not CAD_SERVICE_URL:
+        raise HTTPException(503, "CAD viewer not configured. Set CAD_SERVICE_URL in the backend environment.")
+    if not inp.step_base64:
+        raise HTTPException(400, "No STEP file provided")
+    try:
+        async with httpx.AsyncClient(timeout=180) as cx:
+            rr = await cx.post(f"{CAD_SERVICE_URL}/analyze", json={"step_base64": inp.step_base64, "views": 0})
+    except Exception as e:
+        raise HTTPException(502, f"Could not reach the CAD service: {e}")
+    if rr.status_code >= 400:
+        raise HTTPException(502, f"CAD service error {rr.status_code}: {rr.text[:200]}")
+    data = rr.json()
+    return {"glb_base64": data.get("glb_base64", ""), "geometry": data.get("geometry", {})}
+
 SKETCH_SYSTEM = (
     "You are a jig & fixture designer. Produce a CLEAN, LABELLED 2D concept schematic of the proposed "
     "fixture as a SINGLE self-contained SVG (no external refs, no scripts). Draw TWO views side by side: "
