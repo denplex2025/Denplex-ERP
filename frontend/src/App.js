@@ -64,6 +64,7 @@ import PartLibrary from "./pages/PartLibrary";
 import ResetData from "./pages/ResetData";
 import GSTReports from "./pages/GSTReports";
 import BankCash from "./pages/BankCash";
+import FinancialStatements from "./pages/FinancialStatements";
 import DocMasters from "./pages/DocMasters";
 import Assistant from "./pages/Assistant";
 
@@ -122,6 +123,7 @@ function App() {
               <Route path="reset-data" element={<ResetData />} />
               <Route path="gst-reports" element={<GSTReports />} />
               <Route path="bank-cash" element={<BankCash />} />
+              <Route path="financial-statements" element={<FinancialStatements />} />
               <Route path="doc-masters" element={<DocMasters />} />
               <Route path="assistant" element={<Assistant />} />
               <Route path="webhooks" element={<Webhooks />} />
