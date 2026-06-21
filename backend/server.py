@@ -8014,7 +8014,7 @@ async def cad_glb(inp: CadGlbIn, user=Depends(get_current_user)):
     if rr.status_code >= 400:
         raise HTTPException(502, f"CAD service error {rr.status_code}: {rr.text[:200]}")
     data = rr.json()
-    return {"glb_base64": data.get("glb_base64", ""), "geometry": data.get("geometry", {})}
+    return {"mesh_base64": data.get("mesh_base64", ""), "mesh_format": data.get("mesh_format", "stl"), "geometry": data.get("geometry", {})}
 
 SKETCH_SYSTEM = (
     "You are a jig & fixture designer. Produce a CLEAN, LABELLED 2D concept schematic of the proposed "
