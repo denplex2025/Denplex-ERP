@@ -80,16 +80,26 @@ def analyze(inp: AnalyzeIn):
     except Exception as e:
         geom["warning"] = f"geometry partial: {e}"
 
-    # GLB (lightweight 3D mesh) for the in-ERP viewer — no WASM needed in the browser
-    glb_b64 = ""
+    # Tessellate to STL mesh for the in-ERP viewer (most reliable CadQuery export; no WASM in browser)
+    mesh_b64 = ""
+    mesh_fmt = ""
     try:
-        asm = cq.Assembly(wp)
-        glbp = os.path.join(tmp, "model.glb")
-        asm.save(glbp)
-        with open(glbp, "rb") as fh:
-            glb_b64 = base64.b64encode(fh.read()).decode()
+        meshp = os.path.join(tmp, "model.stl")
+        cq.exporters.export(wp, meshp, tolerance=0.1, angularTolerance=0.2)
+        with open(meshp, "rb") as fh:
+            mesh_b64 = base64.b64encode(fh.read()).decode()
+        mesh_fmt = "stl"
     except Exception:
-        glb_b64 = ""
+        # fallback: try GLB
+        try:
+            asm = cq.Assembly(wp)
+            glbp = os.path.join(tmp, "model.glb")
+            asm.save(glbp)
+            with open(glbp, "rb") as fh:
+                mesh_b64 = base64.b64encode(fh.read()).decode()
+            mesh_fmt = "glb"
+        except Exception:
+            mesh_b64 = ""; mesh_fmt = ""
 
     views = []
     try:
@@ -108,4 +118,5 @@ def analyze(inp: AnalyzeIn):
     except Exception:
         pass
 
-    return {"ok": True, "geometry": geom, "views": views, "view_count": len(views), "glb_base64": glb_b64}
+    return {"ok": True, "geometry": geom, "views": views, "view_count": len(views),
+            "mesh_base64": mesh_b64, "mesh_format": mesh_fmt}
