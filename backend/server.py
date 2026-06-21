@@ -7925,7 +7925,7 @@ async def fixture_concept(inp: FixtureConceptIn, user=Depends(get_current_user))
     data = r.json()
     text = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
     concept = _loads_tolerant(text) or {}
-    return {"concept": concept, "dims": dims, "raw": text if not concept else ""}
+    return {"concept": concept, "dims": dims, "views": cad_views, "raw": text if not concept else ""}
 
 @api.post("/fixture/concept/pdf")
 async def fixture_concept_pdf(body: dict, user=Depends(get_current_user)):
@@ -8021,6 +8021,7 @@ class FixtureSketchIn(BaseModel):
     dims: Optional[dict] = None
     image_base64: str = ""
     mime: str = "image/png"
+    views: list = []   # rendered CAD view PNGs (base64) so the sketch matches the real part
 
 @api.post("/fixture/sketch")
 async def fixture_sketch(inp: FixtureSketchIn, user=Depends(get_current_user)):
@@ -8041,6 +8042,10 @@ async def fixture_sketch(inp: FixtureSketchIn, user=Depends(get_current_user)):
             content.append({"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": b64}})
         else:
             content.append({"type": "image", "source": {"type": "base64", "media_type": mt, "data": b64}})
+    for v in (inp.views or [])[:3]:
+        content.append({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": v}})
+    if inp.views:
+        ctx += "\n(Rendered views of the actual part are attached — trace the real part outline from them and build the fixture around that exact shape.)"
     content.append({"type": "text", "text": "Draw the fixture concept schematic for:\n" + ctx})
     body = {"model": QC_VISION_MODEL, "max_tokens": 8000, "system": SKETCH_SYSTEM, "messages": [{"role": "user", "content": content}]}
     headers = {"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"}
