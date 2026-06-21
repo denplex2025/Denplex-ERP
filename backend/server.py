@@ -1115,6 +1115,7 @@ def validate_inspection(doc):
 # --- Q.QC.2 config: AI drawing extraction (Claude vision) ---
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 ANTHROPIC_BASE_URL = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
+CAD_SERVICE_URL = os.environ.get("CAD_SERVICE_URL", "").rstrip("/")   # optional STEP geometry microservice
 QC_VISION_MODEL = os.environ.get("QC_VISION_MODEL", "claude-sonnet-4-5")
 
 QC_EXTRACT_PROMPT = (
@@ -7816,6 +7817,7 @@ class FixtureConceptIn(BaseModel):
     image_base64: str = ""
     mime: str = "image/png"
     stl_base64: str = ""
+    step_base64: str = ""
     part_name: str = ""
     material: str = ""
     fixture_type: str = ""
@@ -7863,18 +7865,43 @@ async def fixture_concept(inp: FixtureConceptIn, user=Depends(get_current_user))
     if not ANTHROPIC_API_KEY:
         raise HTTPException(503, "AI fixture generator is not configured. Set ANTHROPIC_API_KEY in the backend environment.")
     dims = None
+    cad_views = []
     if inp.stl_base64:
         try:
             dims = _stl_bbox(inp.stl_base64)
         except Exception:
             dims = None
+    # STEP file → real geometry + rendered views via the CAD microservice (if configured)
+    if inp.step_base64 and CAD_SERVICE_URL:
+        try:
+            async with httpx.AsyncClient(timeout=180) as cx:
+                rr = await cx.post(f"{CAD_SERVICE_URL}/analyze", json={"step_base64": inp.step_base64, "views": 3})
+            if rr.status_code < 400:
+                cad = rr.json()
+                g = cad.get("geometry") or {}
+                if g.get("bbox_mm"):
+                    bx = g["bbox_mm"]; dims = {"x": bx.get("x"), "y": bx.get("y"), "z": bx.get("z"),
+                                               "bbox_volume_cm3": g.get("volume_cm3")}
+                dims = dims or {}
+                if isinstance(dims, dict):
+                    dims["cad"] = g
+                cad_views = (cad.get("views") or [])[:3]
+        except Exception:
+            cad_views = []
     ctx = (f"Part name: {inp.part_name or 'unknown'}\nMaterial: {inp.material or 'unknown'}\n"
            f"Desired fixture type: {inp.fixture_type or '(recommend the best)'}\n"
            f"Machining/usage operation: {inp.operation or 'unknown'}\nMachine: {inp.machine or 'unknown'}\n"
            f"Batch quantity: {inp.qty}\nDatums / critical features: {inp.datums or 'not specified'}\n"
            f"Extra notes: {inp.notes or 'none'}")
     if dims:
-        ctx += f"\n3D model bounding box (mm): X={dims['x']}, Y={dims['y']}, Z={dims['z']} (approx envelope {dims['bbox_volume_cm3']} cc)"
+        ctx += f"\n3D model bounding box (mm): X={dims.get('x')}, Y={dims.get('y')}, Z={dims.get('z')} (approx envelope {dims.get('bbox_volume_cm3')} cc)"
+        cg = dims.get("cad") or {}
+        if cg.get("planar_faces") is not None:
+            ctx += f"\nCAD geometry: {cg.get('planar_faces')} planar faces, {cg.get('cylindrical_faces')} cylindrical faces"
+        if cg.get("hole_or_round_diameters_mm"):
+            ctx += f"; round/hole diameters (mm): {cg['hole_or_round_diameters_mm']}"
+        if cad_views:
+            ctx += f"\n({len(cad_views)} rendered CAD views of the part are attached.)"
     content = []
     if inp.image_base64:
         b64 = inp.image_base64.split(",")[-1]
@@ -7883,6 +7910,8 @@ async def fixture_concept(inp: FixtureConceptIn, user=Depends(get_current_user))
             content.append({"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": b64}})
         else:
             content.append({"type": "image", "source": {"type": "base64", "media_type": mt, "data": b64}})
+    for v in cad_views:
+        content.append({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": v}})
     content.append({"type": "text", "text": FIXTURE_SCHEMA + "\n\nINPUTS:\n" + ctx})
     body = {"model": QC_VISION_MODEL, "max_tokens": 2600, "system": FIXTURE_SYSTEM, "messages": [{"role": "user", "content": content}]}
     headers = {"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"}
