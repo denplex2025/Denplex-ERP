@@ -7762,6 +7762,172 @@ async def vyapar_import(payload: VyaparImportIn, user=Depends(require_roles("adm
 
 
 
+# ---------------------------------------------------------------------------
+# AI Fixture Concept Generator — part drawing / 3D (STL) → jig & fixture brief
+# ---------------------------------------------------------------------------
+FIXTURE_SYSTEM = (
+    "You are a senior jig & fixture design engineer at Denplex Engineering Company, a precision "
+    "machining / jigs & fixtures manufacturer in Ahmedabad, India. From the part drawing/photo and "
+    "the inputs given, propose a practical FIRST-DRAFT FIXTURE CONCEPT (a brief, not CAD). "
+    "Apply 3-2-1 locating principles. Prefer standard off-the-shelf components (toggle clamps, "
+    "round + diamond locating pins, rest pads, dowel pins, hydraulic/pneumatic cylinders, "
+    "support buttons, eye bolts). Be specific, realistic and cost-aware for an Indian SME shop. "
+    "Money in INR. Return ONLY JSON, no prose."
+)
+FIXTURE_SCHEMA = (
+    'Return ONLY this JSON: {"fixture_type":str, "summary":str, '
+    '"locating_scheme":str, "locators":[str], "clamping":[str], "supports":[str], '
+    '"base_plate":str, "actuation":str, '
+    '"standard_components":[{"item":str,"qty":str,"note":str}], '
+    '"access_and_clearance":[str], "distortion_risks":[str], "inspection_points":[str], '
+    '"estimated_build":{"cost_inr":number,"time_days":number}, "assumptions":str}. '
+    "fixture_type = the recommended type (e.g. Milling fixture, Drilling jig, Welding jig, "
+    "Hydraulic machining fixture, Leak-test fixture, Inspection fixture). "
+    "locating_scheme = how the 3-2-1 datums are established. standard_components = a BOM of "
+    "off-the-shelf parts with quantities."
+)
+
+class FixtureConceptIn(BaseModel):
+    image_base64: str = ""
+    mime: str = "image/png"
+    stl_base64: str = ""
+    part_name: str = ""
+    material: str = ""
+    fixture_type: str = ""
+    operation: str = ""
+    machine: str = ""
+    qty: int = 1
+    datums: str = ""
+    notes: str = ""
+
+def _stl_bbox(b64: str):
+    import base64 as _b64, struct
+    raw = _b64.b64decode((b64 or "").split(",")[-1])
+    xs = []; ys = []; zs = []
+    if len(raw) > 84:
+        try:
+            n = struct.unpack_from("<I", raw, 80)[0]
+            if 84 + 50 * n == len(raw) and n > 0:
+                off = 84
+                for _ in range(n):
+                    base = off + 12
+                    for v in range(3):
+                        x, y, z = struct.unpack_from("<fff", raw, base + v * 12)
+                        xs.append(x); ys.append(y); zs.append(z)
+                    off += 50
+        except Exception:
+            xs = []
+    if not xs:
+        txt = raw.decode("utf-8", "ignore")
+        for line in txt.splitlines():
+            line = line.strip()
+            if line.startswith("vertex"):
+                p = line.split()
+                if len(p) >= 4:
+                    try:
+                        xs.append(float(p[1])); ys.append(float(p[2])); zs.append(float(p[3]))
+                    except Exception:
+                        pass
+    if not xs:
+        raise ValueError("Could not read STL vertices")
+    dx = round(max(xs) - min(xs), 2); dy = round(max(ys) - min(ys), 2); dz = round(max(zs) - min(zs), 2)
+    return {"x": dx, "y": dy, "z": dz, "bbox_volume_cm3": round(dx * dy * dz / 1000.0, 1)}
+
+@api.post("/fixture/concept")
+async def fixture_concept(inp: FixtureConceptIn, user=Depends(get_current_user)):
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(503, "AI fixture generator is not configured. Set ANTHROPIC_API_KEY in the backend environment.")
+    dims = None
+    if inp.stl_base64:
+        try:
+            dims = _stl_bbox(inp.stl_base64)
+        except Exception:
+            dims = None
+    ctx = (f"Part name: {inp.part_name or 'unknown'}\nMaterial: {inp.material or 'unknown'}\n"
+           f"Desired fixture type: {inp.fixture_type or '(recommend the best)'}\n"
+           f"Machining/usage operation: {inp.operation or 'unknown'}\nMachine: {inp.machine or 'unknown'}\n"
+           f"Batch quantity: {inp.qty}\nDatums / critical features: {inp.datums or 'not specified'}\n"
+           f"Extra notes: {inp.notes or 'none'}")
+    if dims:
+        ctx += f"\n3D model bounding box (mm): X={dims['x']}, Y={dims['y']}, Z={dims['z']} (approx envelope {dims['bbox_volume_cm3']} cc)"
+    content = []
+    if inp.image_base64:
+        b64 = inp.image_base64.split(",")[-1]
+        mt = inp.mime or "image/png"
+        if mt == "application/pdf":
+            content.append({"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": b64}})
+        else:
+            content.append({"type": "image", "source": {"type": "base64", "media_type": mt, "data": b64}})
+    content.append({"type": "text", "text": FIXTURE_SCHEMA + "\n\nINPUTS:\n" + ctx})
+    body = {"model": QC_VISION_MODEL, "max_tokens": 2600, "system": FIXTURE_SYSTEM, "messages": [{"role": "user", "content": content}]}
+    headers = {"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=120) as cx:
+            r = await cx.post(f"{ANTHROPIC_BASE_URL}/v1/messages", json=body, headers=headers)
+    except Exception as e:
+        raise HTTPException(502, f"Could not reach the AI API: {e}")
+    if r.status_code >= 400:
+        raise HTTPException(502, f"AI API error {r.status_code}: {r.text[:200]}")
+    data = r.json()
+    text = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
+    concept = _loads_tolerant(text) or {}
+    return {"concept": concept, "dims": dims, "raw": text if not concept else ""}
+
+@api.post("/fixture/concept/pdf")
+async def fixture_concept_pdf(body: dict, user=Depends(get_current_user)):
+    from reportlab.lib.pagesizes import A4
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, ListFlowable, ListItem
+    from reportlab.lib import colors
+    from reportlab.lib.units import mm
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    c = (body or {}).get("concept") or {}
+    meta = (body or {}).get("meta") or {}
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=16 * mm, bottomMargin=16 * mm, leftMargin=18 * mm, rightMargin=18 * mm)
+    ss = getSampleStyleSheet()
+    h = ParagraphStyle("h", parent=ss["Heading2"], textColor=colors.HexColor("#DC2626"), spaceBefore=8, spaceAfter=3)
+    el = [Paragraph("<b>Fixture Concept Brief</b>", ss["Title"]),
+          Paragraph(f"Denplex Engineering Company &nbsp;·&nbsp; {meta.get('part_name','')} &nbsp;·&nbsp; {c.get('fixture_type','')}", ss["Normal"]),
+          Spacer(1, 4 * mm)]
+    if c.get("summary"):
+        el += [Paragraph("Summary", h), Paragraph(str(c["summary"]), ss["Normal"])]
+    def bullets(title, items):
+        items = [str(x) for x in (items or []) if str(x).strip()]
+        if not items:
+            return
+        el.append(Paragraph(title, h))
+        el.append(ListFlowable([ListItem(Paragraph(i, ss["Normal"])) for i in items], bulletType="bullet", leftIndent=10))
+    if c.get("locating_scheme"):
+        el += [Paragraph("Locating scheme (3-2-1)", h), Paragraph(str(c["locating_scheme"]), ss["Normal"])]
+    bullets("Locators", c.get("locators"))
+    bullets("Clamping", c.get("clamping"))
+    bullets("Supports", c.get("supports"))
+    if c.get("base_plate"):
+        el += [Paragraph("Base plate", h), Paragraph(str(c["base_plate"]), ss["Normal"])]
+    if c.get("actuation"):
+        el += [Paragraph("Actuation", h), Paragraph(str(c["actuation"]), ss["Normal"])]
+    sc = c.get("standard_components") or []
+    if sc:
+        el.append(Paragraph("Standard components (BOM)", h))
+        rows = [["Item", "Qty", "Note"]] + [[str(x.get("item", "")), str(x.get("qty", "")), str(x.get("note", ""))] for x in sc]
+        t = Table(rows, colWidths=[70 * mm, 20 * mm, 80 * mm])
+        t.setStyle(TableStyle([("FONTSIZE", (0, 0), (-1, -1), 8), ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#cbd5e1")),
+                               ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f2937")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                               ("VALIGN", (0, 0), (-1, -1), "TOP")]))
+        el.append(t)
+    bullets("Access & clearance", c.get("access_and_clearance"))
+    bullets("Distortion / risks", c.get("distortion_risks"))
+    bullets("Inspection points", c.get("inspection_points"))
+    eb = c.get("estimated_build") or {}
+    if eb:
+        el += [Paragraph("Estimated build", h), Paragraph(f"Approx cost ₹{eb.get('cost_inr','-')} &nbsp;·&nbsp; lead time {eb.get('time_days','-')} days", ss["Normal"])]
+    if c.get("assumptions"):
+        el += [Paragraph("Assumptions", h), Paragraph(str(c["assumptions"]), ss["Italic"])]
+    el += [Spacer(1, 6 * mm), Paragraph("AI-generated concept — engineer review required before design release.", ss["Italic"])]
+    doc.build(el); buf.seek(0)
+    return Response(content=buf.getvalue(), media_type="application/pdf",
+                    headers={"Content-Disposition": f'attachment; filename="FixtureConcept_{meta.get("part_name","part")}.pdf"'})
+
 # ---------------- Trial Signup ----------------
 @api.post("/trial/request")
 async def submit_trial_request(payload: TrialRequestIn):
