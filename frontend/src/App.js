@@ -66,6 +66,7 @@ import GSTReports from "./pages/GSTReports";
 import BankCash from "./pages/BankCash";
 import FinancialStatements from "./pages/FinancialStatements";
 import FixtureConcept from "./pages/FixtureConcept";
+import CADViewer from "./pages/CADViewer";
 import DocMasters from "./pages/DocMasters";
 import Assistant from "./pages/Assistant";
 
@@ -117,6 +118,7 @@ function App() {
               <Route path="parts" element={<Parts />} />
               <Route path="part-library" element={<PartLibrary />} />
               <Route path="fixture-concept" element={<FixtureConcept />} />
+              <Route path="cad-viewer" element={<CADViewer />} />
               <Route path="machines" element={<Machines />} />
               <Route path="planning" element={<Planning />} />
               <Route path="costing" element={<Costing />} />
