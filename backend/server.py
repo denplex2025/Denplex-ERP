@@ -8145,6 +8145,95 @@ async def ai_assistant(inp: AssistantIn, user=Depends(get_current_user)):
     return {"answer": text.strip() or "I couldn't generate an answer."}
 
 # ---------------------------------------------------------------------------
+# Accounting books — Profit & Loss + Balance Sheet (derived from transactions).
+# Computed live (not a posted journal); the Balance Sheet balances by treating
+# Owner's Capital & Reserves as the balancing figure.
+# ---------------------------------------------------------------------------
+def _in_period(d, frm, to):
+    d = str(d or "")[:10]
+    return bool(d) and frm <= d <= to
+
+async def _compute_pnl(frm, to):
+    invs = [i for i in await db.invoices.find({}, {"_id": 0}).to_list(50000) if _in_period(i.get("date"), frm, to)]
+    bills = [b for b in await db.vendor_bills.find({}, {"_id": 0}).to_list(50000) if _in_period(b.get("date"), frm, to)]
+    crns = [c for c in await db.credit_notes.find({}, {"_id": 0}).to_list(50000) if _in_period(c.get("date"), frm, to)]
+    drns = [d for d in await db.debit_notes.find({}, {"_id": 0}).to_list(50000) if _in_period(d.get("date"), frm, to)]
+    exps = [e for e in await db.expenses.find({}, {"_id": 0}).to_list(50000) if _in_period(e.get("date"), frm, to)]
+    sales = sum(float(i.get("subtotal", 0) or 0) for i in invs)
+    sales_ret = sum(float(c.get("subtotal", c.get("total", 0)) or 0) for c in crns)
+    purchases = sum(float(b.get("subtotal", 0) or 0) for b in bills)
+    purch_ret = sum(float(d.get("subtotal", d.get("total", 0)) or 0) for d in drns)
+    cats = {c.get("name"): c.get("classification", "indirect") for c in await db.expense_categories.find({}, {"_id": 0}).to_list(2000)}
+    direct = 0.0; indirect = 0.0; by_cat: Dict[str, float] = {}
+    for e in exps:
+        amt = float(e.get("amount", e.get("total", 0)) or 0)
+        cn = e.get("category", "Other") or "Other"
+        by_cat[cn] = by_cat.get(cn, 0) + amt
+        if cats.get(cn) == "direct":
+            direct += amt
+        else:
+            indirect += amt
+    net_sales = sales - sales_ret
+    net_purch = purchases - purch_ret
+    gross = net_sales - net_purch - direct
+    net = gross - indirect
+    return {
+        "range": {"from": frm, "to": to},
+        "sales": round(net_sales, 2), "sales_gross": round(sales, 2), "sales_returns": round(sales_ret, 2),
+        "purchases": round(net_purch, 2), "purchase_returns": round(purch_ret, 2),
+        "direct_expenses": round(direct, 2), "indirect_expenses": round(indirect, 2),
+        "expenses_by_category": [{"category": k, "amount": round(v, 2)} for k, v in sorted(by_cat.items(), key=lambda kv: -kv[1])],
+        "gross_profit": round(gross, 2), "net_profit": round(net, 2),
+    }
+
+@api.get("/reports/pnl")
+async def report_pnl(date_from: str = "", date_to: str = "", user=Depends(get_current_user)):
+    if not date_from or not date_to:
+        d1, d2 = _fy_default_range(); date_from = date_from or d1; date_to = date_to or d2
+    return await _compute_pnl(date_from, date_to)
+
+@api.get("/reports/balance-sheet")
+async def report_balance_sheet(as_of: str = "", user=Depends(get_current_user)):
+    as_of = as_of or now_iso()[:10]
+    await _ensure_accounts_seeded()
+    accts = await db.fin_accounts.find({}, {"_id": 0}).to_list(200)
+    cash_bank = 0.0; acc_list = []
+    for a in accts:
+        bal = await _account_balance(a); cash_bank += bal
+        acc_list.append({"name": a.get("name"), "balance": round(bal, 2)})
+    invs = await db.invoices.find({}, {"_id": 0}).to_list(50000)
+    sin = await _settled_per_invoice()
+    receivable = sum(max(float(i.get("total", 0)) - sin.get(i.get("id", ""), 0), 0) for i in invs if str(i.get("date", ""))[:10] <= as_of)
+    bills = await db.vendor_bills.find({}, {"_id": 0}).to_list(50000)
+    sbl = await _settled_per_bill()
+    payable = sum(max(float(b.get("total", 0)) - sbl.get(b.get("id", ""), 0), 0) for b in bills if str(b.get("date", ""))[:10] <= as_of)
+    items = await db.items.find({}, {"_id": 0}).to_list(50000)
+    inventory = sum(float(it.get("qty_on_hand", 0) or 0) * float(it.get("unit_cost", 0) or 0) for it in items)
+    out_gst = sum(float(i.get("cgst", 0)) + float(i.get("sgst", 0)) + float(i.get("igst", 0)) for i in invs if str(i.get("date", ""))[:10] <= as_of)
+    in_gst = sum(float(b.get("cgst", 0)) + float(b.get("sgst", 0)) + float(b.get("igst", 0)) for b in bills if str(b.get("date", ""))[:10] <= as_of)
+    gst_net = out_gst - in_gst
+    gst_payable = max(gst_net, 0); gst_credit = max(-gst_net, 0)
+    pin = await db.payments_in.find({}, {"_id": 0, "allocations": 1}).to_list(50000)
+    pout = await db.payments_out.find({}, {"_id": 0, "allocations": 1}).to_list(50000)
+    tds_recv = sum(float(a.get("tds_amount", 0) or 0) for p in pin for a in (p.get("allocations") or []))
+    tds_pay = sum(float(a.get("tds_amount", 0) or 0) for p in pout for a in (p.get("allocations") or []))
+    pnl_all = await _compute_pnl("0000-01-01", as_of)
+    retained = pnl_all["net_profit"]
+    total_assets = round(cash_bank + receivable + inventory + tds_recv + gst_credit, 2)
+    total_liab = round(payable + gst_payable + tds_pay, 2)
+    capital = round(total_assets - total_liab - retained, 2)
+    return {
+        "as_of": as_of,
+        "assets": {"cash_bank": round(cash_bank, 2), "accounts": acc_list, "receivable": round(receivable, 2),
+                   "inventory": round(inventory, 2), "tds_receivable": round(tds_recv, 2), "gst_credit": round(gst_credit, 2),
+                   "total": total_assets},
+        "liabilities": {"payable": round(payable, 2), "gst_payable": round(gst_payable, 2), "tds_payable": round(tds_pay, 2),
+                        "total": total_liab},
+        "equity": {"capital_balancing": capital, "retained_earnings": round(retained, 2), "total": round(capital + retained, 2)},
+        "net_profit_to_date": round(retained, 2),
+    }
+
+# ---------------------------------------------------------------------------
 # GST Reports — GSTR-1 (outward), GSTR-3B (summary), GSTR-2/Purchase register.
 # Computed directly from invoices + vendor_bills. Read-only.
 # ---------------------------------------------------------------------------
