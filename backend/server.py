@@ -8233,6 +8233,122 @@ async def report_balance_sheet(as_of: str = "", user=Depends(get_current_user)):
         "net_profit_to_date": round(retained, 2),
     }
 
+# ---- Statement exports (Excel + PDF) ----
+def _stmt_xlsx(title, rows, sub=""):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+    wb = Workbook(); ws = wb.active; ws.title = title[:31]
+    ws["A1"] = title; ws["A1"].font = Font(bold=True, size=14)
+    if sub:
+        ws["A2"] = sub; ws["A2"].font = Font(size=9, color="888888")
+    r = 4
+    for label, val, bold in rows:
+        ws.cell(r, 1, label)
+        if bold:
+            ws.cell(r, 1).font = Font(bold=True)
+        if val is not None and val != "":
+            c = ws.cell(r, 2, float(val)); c.number_format = '#,##0.00'
+            if bold:
+                c.font = Font(bold=True)
+        r += 1
+    ws.column_dimensions["A"].width = 44; ws.column_dimensions["B"].width = 18
+    buf = io.BytesIO(); wb.save(buf); buf.seek(0); return buf.getvalue()
+
+def _stmt_pdf(title, rows, sub=""):
+    from reportlab.lib.pagesizes import A4
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+    from reportlab.lib import colors
+    from reportlab.lib.units import mm
+    from reportlab.lib.styles import getSampleStyleSheet
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=18 * mm, bottomMargin=18 * mm, leftMargin=18 * mm, rightMargin=18 * mm)
+    ss = getSampleStyleSheet()
+    el = [Paragraph(f"<b>{title}</b>", ss["Title"])]
+    if sub:
+        el.append(Paragraph(sub, ss["Normal"]))
+    el.append(Spacer(1, 6 * mm))
+    data = [[label, ("" if val is None or val == "" else f"{float(val):,.2f}")] for label, val, bold in rows]
+    t = Table(data, colWidths=[115*mm, 50*mm])
+    style = [("FONTSIZE", (0, 0), (-1, -1), 10), ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+             ("LINEBELOW", (0, 0), (-1, -1), 0.25, colors.HexColor("#e2e8f0")),
+             ("TOPPADDING", (0, 0), (-1, -1), 5), ("BOTTOMPADDING", (0, 0), (-1, -1), 5)]
+    for i, (label, val, bold) in enumerate(rows):
+        if bold:
+            style.append(("FONTNAME", (0, i), (-1, i), "Helvetica-Bold"))
+            style.append(("TEXTCOLOR", (0, i), (0, i), colors.HexColor("#DC2626")))
+    t.setStyle(TableStyle(style))
+    el.append(t)
+    el.append(Spacer(1, 6 * mm))
+    el.append(Paragraph("Computed live from posted documents — Denplex Engineering Company", ss["Italic"]))
+    doc.build(el); buf.seek(0); return buf.getvalue()
+
+def _pnl_rows(d):
+    rows = [("Sales (net of returns)", d["sales"], False)]
+    if d["sales_returns"]:
+        rows.append(("Less: Sales returns", d["sales_returns"], False))
+    rows.append(("Less: Purchases (net)", d["purchases"], False))
+    if d["direct_expenses"]:
+        rows.append(("Less: Direct expenses", d["direct_expenses"], False))
+    rows.append(("Gross Profit", d["gross_profit"], True))
+    for e in d["expenses_by_category"]:
+        rows.append(("   " + e["category"], e["amount"], False))
+    rows.append(("Total indirect expenses", d["indirect_expenses"], False))
+    rows.append(("Net Profit", d["net_profit"], True))
+    return rows
+
+def _bs_rows(d):
+    a, l, eq = d["assets"], d["liabilities"], d["equity"]
+    rows = [("ASSETS", "", True), ("Cash & Bank", a["cash_bank"], False)]
+    for x in a.get("accounts", []):
+        rows.append(("   " + str(x.get("name", "")), x.get("balance", 0), False))
+    rows.append(("Accounts Receivable", a["receivable"], False))
+    rows.append(("Inventory (stock value)", a["inventory"], False))
+    if a.get("tds_receivable"):
+        rows.append(("TDS Receivable", a["tds_receivable"], False))
+    if a.get("gst_credit"):
+        rows.append(("GST Credit (ITC)", a["gst_credit"], False))
+    rows.append(("Total Assets", a["total"], True))
+    rows.append(("", "", False))
+    rows.append(("LIABILITIES", "", True))
+    rows.append(("Accounts Payable", l["payable"], False))
+    if l.get("gst_payable"):
+        rows.append(("GST Payable", l["gst_payable"], False))
+    if l.get("tds_payable"):
+        rows.append(("TDS Payable", l["tds_payable"], False))
+    rows.append(("Total Liabilities", l["total"], True))
+    rows.append(("EQUITY", "", True))
+    rows.append(("Retained Earnings (net profit to date)", eq["retained_earnings"], False))
+    rows.append(("Owner's Capital & Reserves", eq["capital_balancing"], False))
+    rows.append(("Total Equity", eq["total"], True))
+    rows.append(("Total Liabilities & Equity", round(l["total"] + eq["total"], 2), True))
+    return rows
+
+@api.get("/reports/pnl/export")
+async def pnl_export(date_from: str = "", date_to: str = "", fmt: str = "xlsx", user=Depends(get_current_user)):
+    if not date_from or not date_to:
+        d1, d2 = _fy_default_range(); date_from = date_from or d1; date_to = date_to or d2
+    d = await _compute_pnl(date_from, date_to)
+    rows = _pnl_rows(d); sub = f"Period: {date_from} to {date_to}"
+    fname = f"P&L_{date_from}_to_{date_to}"
+    if fmt == "pdf":
+        return Response(content=_stmt_pdf("Profit & Loss Statement", rows, sub), media_type="application/pdf",
+                        headers={"Content-Disposition": f'attachment; filename="{fname}.pdf"'})
+    return Response(content=_stmt_xlsx("Profit & Loss", rows, sub),
+                    media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": f'attachment; filename="{fname}.xlsx"'})
+
+@api.get("/reports/balance-sheet/export")
+async def bs_export(as_of: str = "", fmt: str = "xlsx", user=Depends(get_current_user)):
+    d = await report_balance_sheet(as_of=as_of, user=user)
+    rows = _bs_rows(d); sub = f"As of {d['as_of']}"
+    fname = f"BalanceSheet_{d['as_of']}"
+    if fmt == "pdf":
+        return Response(content=_stmt_pdf("Balance Sheet", rows, sub), media_type="application/pdf",
+                        headers={"Content-Disposition": f'attachment; filename="{fname}.pdf"'})
+    return Response(content=_stmt_xlsx("Balance Sheet", rows, sub),
+                    media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": f'attachment; filename="{fname}.xlsx"'})
+
 # ---------------------------------------------------------------------------
 # GST Reports — GSTR-1 (outward), GSTR-3B (summary), GSTR-2/Purchase register.
 # Computed directly from invoices + vendor_bills. Read-only.
