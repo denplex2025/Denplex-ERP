@@ -7798,7 +7798,15 @@ FIXTURE_SYSTEM = (
     "Apply 3-2-1 locating principles. Prefer standard off-the-shelf components (toggle clamps, "
     "round + diamond locating pins, rest pads, dowel pins, hydraulic/pneumatic cylinders, "
     "support buttons, eye bolts). Be specific, realistic and cost-aware for an Indian SME shop. "
-    "Money in INR. Return ONLY JSON, no prose." + DENPLEX_FIXTURE_KB
+    "Money in INR. Return ONLY JSON, no prose." + DENPLEX_FIXTURE_KB + (
+        "\n\nGROUND EVERYTHING IN THE ACTUAL PART. Study the attached rendered 3D views and the geometry "
+        "data (bounding box in mm, cylindrical faces, hole/round diameters). Count the real bends / branches / "
+        "tube ends of the part and provide ONE V-cradle support per node — so standard_components lists the "
+        "correct QUANTITY of cradle posts (e.g. '6'), not a vague number. Size the base plate about 30-50 mm "
+        "larger than the part's X-Y bounding box, and give approximate post heights from the Z extent. Quote the "
+        "real dimensions (mm) from the geometry inside locating_scheme, supports and base_plate. Be specific to "
+        "THIS part — never generic."
+    )
 )
 FIXTURE_SCHEMA = (
     'Return ONLY this JSON: {"fixture_type":str, "summary":str, '
@@ -8031,6 +8039,9 @@ SKETCH_SYSTEM = (
     "dowels and the part-number tag. "
     "Keep the SVG COMPACT — at most a few dozen shapes, plain <rect>/<line>/<path>/<text>, no gradients, "
     "filters or embedded fonts — so the whole drawing fits in one response and is valid. "
+    "MATCH THE REAL PART: from the attached rendered views, draw the part to its true proportions (use the "
+    "bounding-box aspect ratio), make the base-plate rectangle match the part's plan aspect ratio, and place a "
+    "V-cradle post under EACH visible node / bend / end of the part (same count as the brief). "
     "Return ONLY the SVG markup starting with <svg and ending with </svg> — no markdown, no commentary."
 )
 
