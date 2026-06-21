@@ -24,6 +24,7 @@ export default function FixtureConcept() {
   const [sketchSvg, setSketchSvg] = useState("");
   const [sketching, setSketching] = useState(false);
   const [lastImg, setLastImg] = useState({ b64: "", mime: "" });
+  const [cadViews, setCadViews] = useState([]);
   const imgRef = useRef(null);
   const stlRef = useRef(null);
   const set = (k, v) => setF(p => ({ ...p, [k]: v }));
@@ -45,6 +46,7 @@ export default function FixtureConcept() {
       const r = await api.post("/fixture/concept", payload);
       setConcept(r.data?.concept || null);
       setDims(r.data?.dims || null);
+      setCadViews(r.data?.views || []);
       if (!r.data?.concept) setRaw(r.data?.raw || "No structured result.");
       else toast.success("Concept ready");
     } catch (e) {
@@ -57,7 +59,7 @@ export default function FixtureConcept() {
     if (!concept) return;
     setSketching(true);
     try {
-      const r = await api.post("/fixture/sketch", { concept, part_name: f.part_name, material: f.material, dims, image_base64: lastImg.b64, mime: lastImg.mime });
+      const r = await api.post("/fixture/sketch", { concept, part_name: f.part_name, material: f.material, dims, image_base64: lastImg.b64, mime: lastImg.mime, views: cadViews });
       if (r.data?.svg) setSketchSvg(r.data.svg); else toast.error("Couldn't produce a sketch — try again.");
     } catch (e) { toast.error("Sketch failed"); }
     setSketching(false);
