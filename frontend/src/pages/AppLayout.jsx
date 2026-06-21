@@ -108,6 +108,7 @@ const NAV_GROUPS = [
       { to: "/app/parts", label: "Part Master", icon: Cog, testid: "nav-parts" },
       { to: "/app/part-library", label: "Parts Library", icon: Library, testid: "nav-part-library" },
       { to: "/app/fixture-concept", label: "AI Fixture Concept", icon: Wrench, testid: "nav-fixture-concept" },
+      { to: "/app/cad-viewer", label: "3D CAD Viewer", icon: FileBox, testid: "nav-cad-viewer" },
       { to: "/app/bom", label: "BOM", icon: Layers, testid: "nav-bom" },
       { to: "/app/work-orders", label: "Work Orders", icon: ClipboardList, testid: "nav-work-orders" },
       { to: "/app/machines", label: "Machines", icon: Cog, testid: "nav-machines" },
