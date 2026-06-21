@@ -21,6 +21,9 @@ export default function FixtureConcept() {
   const [concept, setConcept] = useState(null);
   const [dims, setDims] = useState(null);
   const [raw, setRaw] = useState("");
+  const [sketchSvg, setSketchSvg] = useState("");
+  const [sketching, setSketching] = useState(false);
+  const [lastImg, setLastImg] = useState({ b64: "", mime: "" });
   const imgRef = useRef(null);
   const stlRef = useRef(null);
   const set = (k, v) => setF(p => ({ ...p, [k]: v }));
@@ -29,11 +32,16 @@ export default function FixtureConcept() {
     const img = imgRef.current?.files?.[0];
     const stl = stlRef.current?.files?.[0];
     if (!img && !stl && !f.part_name) { toast.error("Upload a drawing/3D file or at least enter a part name"); return; }
-    setBusy(true); setConcept(null); setRaw("");
+    setBusy(true); setConcept(null); setRaw(""); setSketchSvg("");
     try {
       const payload = { ...f, qty: Number(f.qty) || 1, fixture_type: f.fixture_type.startsWith("(") ? "" : f.fixture_type };
       if (img) { payload.image_base64 = await fileToB64(img); payload.mime = img.type || "image/png"; }
-      if (stl) { payload.stl_base64 = await fileToB64(stl); }
+      if (stl) {
+        const b64 = await fileToB64(stl);
+        const nm = (stl.name || "").toLowerCase();
+        if (nm.endsWith(".step") || nm.endsWith(".stp")) payload.step_base64 = b64; else payload.stl_base64 = b64;
+      }
+      setLastImg({ b64: payload.image_base64 || "", mime: payload.mime || "image/png" });
       const r = await api.post("/fixture/concept", payload);
       setConcept(r.data?.concept || null);
       setDims(r.data?.dims || null);
@@ -45,10 +53,43 @@ export default function FixtureConcept() {
     setBusy(false);
   };
 
+  const genSketch = async () => {
+    if (!concept) return;
+    setSketching(true);
+    try {
+      const r = await api.post("/fixture/sketch", { concept, part_name: f.part_name, material: f.material, dims, image_base64: lastImg.b64, mime: lastImg.mime });
+      if (r.data?.svg) setSketchSvg(r.data.svg); else toast.error("Couldn't produce a sketch — try again.");
+    } catch (e) { toast.error("Sketch failed"); }
+    setSketching(false);
+  };
+
+  const svgToPng = (svg) => new Promise((resolve) => {
+    try {
+      const blob = new Blob([svg], { type: "image/svg+xml;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const im = new Image();
+      im.onload = () => {
+        const cv = document.createElement("canvas");
+        cv.width = im.width || 900; cv.height = im.height || 580;
+        const cx = cv.getContext("2d"); cx.fillStyle = "#fff"; cx.fillRect(0, 0, cv.width, cv.height); cx.drawImage(im, 0, 0);
+        URL.revokeObjectURL(url); resolve(cv.toDataURL("image/png"));
+      };
+      im.onerror = () => { URL.revokeObjectURL(url); resolve(""); };
+      im.src = url;
+    } catch (e) { resolve(""); }
+  });
+
+  const downloadSvg = () => {
+    if (!sketchSvg) return;
+    const url = URL.createObjectURL(new Blob([sketchSvg], { type: "image/svg+xml" }));
+    const a = document.createElement("a"); a.href = url; a.download = `FixtureSketch_${f.part_name || "part"}.svg`; a.click(); URL.revokeObjectURL(url);
+  };
+
   const downloadPdf = async () => {
     if (!concept) return;
     try {
-      const r = await api.post("/fixture/concept/pdf", { concept, meta: { part_name: f.part_name } }, { responseType: "blob" });
+      const sketch_png_base64 = sketchSvg ? await svgToPng(sketchSvg) : "";
+      const r = await api.post("/fixture/concept/pdf", { concept, meta: { part_name: f.part_name }, sketch_png_base64 }, { responseType: "blob" });
       const url = URL.createObjectURL(new Blob([r.data]));
       const a = document.createElement("a"); a.href = url; a.download = `FixtureConcept_${f.part_name || "part"}.pdf`; a.click(); URL.revokeObjectURL(url);
     } catch (e) { toast.error("PDF failed"); }
@@ -68,7 +109,7 @@ export default function FixtureConcept() {
         <div className="border border-slate-200 rounded-md p-4 space-y-3 h-fit">
           <div className="grid grid-cols-2 gap-3">
             <Fld label="Drawing / Photo (PDF or image)"><input ref={imgRef} type="file" accept=".pdf,image/*" className="text-xs block w-full" /></Fld>
-            <Fld label="3D model (STL)"><input ref={stlRef} type="file" accept=".stl" className="text-xs block w-full" /></Fld>
+            <Fld label="3D model (STL / STEP)"><input ref={stlRef} type="file" accept=".stl,.step,.stp" className="text-xs block w-full" /></Fld>
           </div>
           <div className="grid grid-cols-2 gap-3">
             <Fld label="Part name"><Input value={f.part_name} onChange={e => set("part_name", e.target.value)} /></Fld>
@@ -101,6 +142,20 @@ export default function FixtureConcept() {
           {!concept && !raw && <div className="text-slate-400 text-sm flex items-center justify-center h-full">The fixture concept brief will appear here.</div>}
           {raw && <pre className="text-xs whitespace-pre-wrap text-slate-600">{raw}</pre>}
           {concept && <Brief c={concept} onPdf={downloadPdf} />}
+          {concept && (
+            <div className="mt-4 border-t border-slate-200 pt-3">
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-[11px] uppercase tracking-wider text-slate-500">Concept sketch (schematic)</div>
+                <div className="flex gap-2">
+                  {sketchSvg && <Button onClick={downloadSvg} variant="outline" size="sm" className="rounded-sm"><Download className="h-4 w-4 mr-1" /> SVG</Button>}
+                  <Button onClick={genSketch} disabled={sketching} variant="outline" size="sm" className="rounded-sm">{sketching ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : <Wrench className="h-4 w-4 mr-1" />}{sketchSvg ? "Regenerate" : "Generate sketch"}</Button>
+                </div>
+              </div>
+              {sketchSvg
+                ? <div className="border border-slate-200 rounded bg-white overflow-auto [&_svg]:w-full [&_svg]:h-auto" dangerouslySetInnerHTML={{ __html: sketchSvg }} />
+                : <div className="text-xs text-slate-400">Click "Generate sketch" for a labelled top + front view concept (schematic, not a manufacturing drawing).</div>}
+            </div>
+          )}
         </div>
       </div>
     </div>
