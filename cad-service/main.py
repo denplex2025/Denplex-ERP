@@ -80,11 +80,22 @@ def analyze(inp: AnalyzeIn):
     except Exception as e:
         geom["warning"] = f"geometry partial: {e}"
 
+    # GLB (lightweight 3D mesh) for the in-ERP viewer — no WASM needed in the browser
+    glb_b64 = ""
+    try:
+        asm = cq.Assembly(wp)
+        glbp = os.path.join(tmp, "model.glb")
+        asm.save(glbp)
+        with open(glbp, "rb") as fh:
+            glb_b64 = base64.b64encode(fh.read()).decode()
+    except Exception:
+        glb_b64 = ""
+
     views = []
     try:
         import cairosvg
         plan = [((1, 1, 1), "iso"), ((0, 0, 1), "top"), ((1, 0, 0), "right")]
-        for d, name in plan[:max(1, min(int(inp.views or 1), 3))]:
+        for d, name in plan[:max(0, min(int(inp.views or 0), 3))]:
             svgp = os.path.join(tmp, f"{name}.svg")
             try:
                 exporters.export(wp, svgp, exportType="SVG",
@@ -97,4 +108,4 @@ def analyze(inp: AnalyzeIn):
     except Exception:
         pass
 
-    return {"ok": True, "geometry": geom, "views": views, "view_count": len(views)}
+    return {"ok": True, "geometry": geom, "views": views, "view_count": len(views), "glb_base64": glb_b64}
