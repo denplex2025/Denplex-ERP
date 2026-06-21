@@ -13,12 +13,16 @@ import { Plus, ArrowUpFromLine } from "lucide-react";
 import { toast } from "sonner";
 
 const PAYMENT_TYPES = ["Cash", "Bank Transfer", "UPI", "Cheque", "Card", "Other"];
+const n = (v) => Number(v || 0);
 
 export default function PaymentOut() {
   const [rows, setRows] = useState([]);
   const [suppliers, setSuppliers] = useState([]);
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({ payment_type: "Cash", date: new Date().toISOString().slice(0, 10) });
+  const [openBills, setOpenBills] = useState([]);
+  const [allocs, setAllocs] = useState({});   // billId -> { amount, tds }
+  const [advance, setAdvance] = useState("");
 
   const load = async () => {
     try {
@@ -28,32 +32,57 @@ export default function PaymentOut() {
   };
   useEffect(() => { load(); }, []);
 
+  const pickParty = async (party_id) => {
+    setForm(p => ({ ...p, party_id }));
+    setAllocs({}); setOpenBills([]); setAdvance("");
+    try { const r = await api.get(`/payments-out/open-bills/${party_id}`); setOpenBills(r.data || []); }
+    catch (e) { /* supplier may have no bills */ }
+  };
+
+  const setAlloc = (id, key, val) => setAllocs(a => ({ ...a, [id]: { ...(a[id] || {}), [key]: val } }));
+  const settleRow = (b) => setAlloc(b.id, "amount", b.outstanding);
+
+  const allocAmount = Object.values(allocs).reduce((s, a) => s + n(a.amount), 0);
+  const allocTds = Object.values(allocs).reduce((s, a) => s + n(a.tds), 0);
+  const totalPaid = allocAmount + n(advance);
+
+  const resetForm = () => { setForm({ payment_type: "Cash", date: new Date().toISOString().slice(0, 10) }); setAllocs({}); setOpenBills([]); setAdvance(""); };
+
   const save = async () => {
+    const sup = suppliers.find(c => c.id === form.party_id);
+    if (!form.party_id) { toast.error("Select a supplier"); return; }
+    const allocations = openBills
+      .filter(b => n(allocs[b.id]?.amount) > 0 || n(allocs[b.id]?.tds) > 0)
+      .map(b => ({ document_id: b.id, document_code: b.code, document_type: "vendor_bill", amount: n(allocs[b.id]?.amount), tds_amount: n(allocs[b.id]?.tds) }));
+    const amount = allocations.length ? totalPaid : n(form.amount);
+    if (!amount && !allocTds) { toast.error("Enter an amount or allocate to a bill"); return; }
+    for (const b of openBills) {
+      const a = allocs[b.id]; if (!a) continue;
+      if (n(a.amount) + n(a.tds) > b.outstanding + 0.01) { toast.error(`${b.code}: amount + TDS exceeds outstanding ${inr(b.outstanding)}`); return; }
+    }
     try {
-      const cust = suppliers.find(c => c.id === form.party_id);
-      const payload = { ...form, party_name: cust?.name || form.party_name || "", amount: Number(form.amount || 0) };
-      if (!payload.party_id || !payload.amount) { toast.error("Party + amount required"); return; }
+      const payload = { ...form, party_name: sup?.name || "", amount, allocations };
       await api.post("/payments-out", payload);
       toast.success("Payment recorded");
-      setOpen(false);
-      setForm({ payment_type: "Cash", date: new Date().toISOString().slice(0, 10) });
-      load();
+      setOpen(false); resetForm(); load();
     } catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
   };
 
-  const total = rows.reduce((s, r) => s + Number(r.amount || 0), 0);
-  const received_count = rows.length;
+  const total = rows.reduce((s, r) => s + n(r.amount), 0);
 
   return (
     <div data-testid="payments-out-page">
       <PageHeader
         overline="Purchase & Expense"
         title="Payment-Out"
-        subtitle="Money paid to suppliers — for purchase bills or as advance."
+        subtitle="Money paid to suppliers — settle bills and adjust TDS you deduct at source."
         actions={
-          <Button onClick={() => setOpen(true)} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="add-payment-in">
-            <Plus className="h-4 w-4 mr-1" /> Add Payment-Out
-          </Button>
+          <div className="flex items-center gap-2">
+            <ExportMenu collection="payments-out" />
+            <Button onClick={() => { resetForm(); setOpen(true); }} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="add-payment-out">
+              <Plus className="h-4 w-4 mr-1" /> Add Payment-Out
+            </Button>
+          </div>
         }
       />
 
@@ -61,7 +90,7 @@ export default function PaymentOut() {
         <Card className="p-5">
           <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Total Paid</div>
           <div className="font-display text-2xl font-bold mt-1 text-red-700">{inr(total)}</div>
-          <div className="text-xs text-slate-500 mt-1">{received_count} payment(s)</div>
+          <div className="text-xs text-slate-500 mt-1">{rows.length} payment(s)</div>
         </Card>
       </div>
 
@@ -69,7 +98,7 @@ export default function PaymentOut() {
         {rows.length === 0 ? <Empty label="No payments made yet." /> : (
           <table className="w-full">
             <thead>
-              <tr><Th>Date</Th><Th>Ref.</Th><Th>Party Name</Th><Th>Amount</Th><Th>Received via</Th><Th>Status</Th></tr>
+              <tr><Th>Date</Th><Th>Ref.</Th><Th>Party Name</Th><Th>Amount</Th><Th>Paid via</Th><Th>Status</Th></tr>
             </thead>
             <tbody>
               {rows.map(r => (
@@ -80,7 +109,7 @@ export default function PaymentOut() {
                   <Td className="font-medium">{inr(r.amount)}</Td>
                   <Td>{r.payment_type}{r.ref_no ? ` · ${r.ref_no}` : ""}</Td>
                   <Td>
-                    <Badge variant="outline" className={`rounded-sm uppercase text-[10px] ${r.status === "Used" ? "border-emerald-600 text-red-700" : r.status === "Partially Used" ? "border-amber-600 text-amber-700" : "border-slate-400 text-slate-600"}`}>
+                    <Badge variant="outline" className={`rounded-sm uppercase text-[10px] ${r.status === "Used" ? "border-emerald-600 text-emerald-700" : r.status === "Partially Used" ? "border-amber-600 text-amber-700" : "border-slate-400 text-slate-600"}`}>
                       {r.status}
                     </Badge>
                   </Td>
@@ -92,17 +121,16 @@ export default function PaymentOut() {
       </Card>
 
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="rounded-sm max-w-lg">
-          <DialogHeader><DialogTitle className="font-display flex items-center gap-2"><ArrowUpFromLine className="h-4 w-4 text-emerald-600" /> Add Payment-Out</DialogTitle></DialogHeader>
+        <DialogContent className="rounded-sm max-w-2xl">
+          <DialogHeader><DialogTitle className="font-display flex items-center gap-2"><ArrowUpFromLine className="h-4 w-4 text-red-600" /> Add Payment-Out</DialogTitle></DialogHeader>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             <Field label="Party *">
-              <Select value={form.party_id || ""} onValueChange={v => setForm(p => ({ ...p, party_id: v }))}>
+              <Select value={form.party_id || ""} onValueChange={pickParty}>
                 <SelectTrigger className="rounded-sm"><SelectValue placeholder="Select supplier" /></SelectTrigger>
                 <SelectContent>{suppliers.map(c => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}</SelectContent>
               </Select>
             </Field>
             <Field label="Date *"><Input type="date" value={form.date || ""} onChange={e => setForm(p => ({ ...p, date: e.target.value }))} className="rounded-sm" /></Field>
-            <Field label="Amount (₹) *"><Input type="number" step="0.01" value={form.amount || ""} onChange={e => setForm(p => ({ ...p, amount: e.target.value }))} className="rounded-sm font-mono-tech" /></Field>
             <Field label="Payment Type">
               <Select value={form.payment_type} onValueChange={v => setForm(p => ({ ...p, payment_type: v }))}>
                 <SelectTrigger className="rounded-sm"><SelectValue /></SelectTrigger>
@@ -110,9 +138,53 @@ export default function PaymentOut() {
               </Select>
             </Field>
             <Field label="Reference No (cheque/UPI/txn)"><Input value={form.ref_no || ""} onChange={e => setForm(p => ({ ...p, ref_no: e.target.value }))} className="rounded-sm" /></Field>
-            <Field label="Bank Name"><Input value={form.bank_name || ""} onChange={e => setForm(p => ({ ...p, bank_name: e.target.value }))} className="rounded-sm" /></Field>
-            <div className="md:col-span-2"><Field label="Notes"><Textarea rows={2} value={form.notes || ""} onChange={e => setForm(p => ({ ...p, notes: e.target.value }))} className="rounded-sm" /></Field></div>
           </div>
+
+          {form.party_id && (
+            <div className="mt-3">
+              <Label className="text-xs uppercase tracking-wider text-slate-600">Apply to purchase bills</Label>
+              {openBills.length === 0 ? (
+                <div className="text-sm text-slate-400 mt-1 border border-dashed border-slate-200 rounded-sm p-3">No open bills for this supplier — record as advance below.</div>
+              ) : (
+                <div className="mt-1 border border-slate-200 rounded-sm overflow-hidden">
+                  <table className="w-full text-sm">
+                    <thead><tr className="bg-slate-50 text-left text-[10px] uppercase tracking-wider text-slate-500">
+                      <th className="p-2">Bill</th><th className="p-2 text-right">Outstanding</th><th className="p-2 w-28">Amount Paid</th><th className="p-2 w-24">TDS Deducted</th><th className="p-2 w-14"></th>
+                    </tr></thead>
+                    <tbody>
+                      {openBills.map(b => {
+                        const a = allocs[b.id] || {};
+                        const left = b.outstanding - n(a.amount) - n(a.tds);
+                        return (
+                          <tr key={b.id} className="border-t border-slate-100">
+                            <td className="p-2"><div className="font-mono-tech text-xs">{b.code}</div><div className="text-[10px] text-slate-400">{fmtDate(b.date)}</div></td>
+                            <td className="p-2 text-right font-mono-tech">{inr(b.outstanding)}</td>
+                            <td className="p-2"><Input type="number" value={a.amount || ""} onChange={e => setAlloc(b.id, "amount", e.target.value)} className="h-8 rounded-sm text-right" placeholder="0" /></td>
+                            <td className="p-2"><Input type="number" value={a.tds || ""} onChange={e => setAlloc(b.id, "tds", e.target.value)} className="h-8 rounded-sm text-right" placeholder="0" /></td>
+                            <td className="p-2 text-center">
+                              <button onClick={() => settleRow(b)} className="text-[10px] text-red-600 hover:underline" title="Fill full outstanding as amount">full</button>
+                              {Math.abs(left) < 0.01 && (n(a.amount) || n(a.tds)) ? <div className="text-[10px] text-emerald-600">settled</div> : null}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-3">
+            <Field label="Advance / Unallocated (₹)"><Input type="number" value={advance} onChange={e => setAdvance(e.target.value)} className="rounded-sm font-mono-tech" placeholder="0" /></Field>
+            <Field label="Bank Name"><Input value={form.bank_name || ""} onChange={e => setForm(p => ({ ...p, bank_name: e.target.value }))} className="rounded-sm" /></Field>
+            <div className="flex flex-col justify-end">
+              <div className="text-xs text-slate-500">Amount paid <strong className="text-slate-900 font-mono-tech">{inr(totalPaid)}</strong></div>
+              {allocTds > 0 && <div className="text-xs text-slate-500">TDS adjusted <strong className="text-amber-700 font-mono-tech">{inr(allocTds)}</strong></div>}
+            </div>
+          </div>
+          <div className="mt-2"><Field label="Notes"><Textarea rows={2} value={form.notes || ""} onChange={e => setForm(p => ({ ...p, notes: e.target.value }))} className="rounded-sm" /></Field></div>
+
           <DialogFooter>
             <Button variant="outline" className="rounded-sm" onClick={() => setOpen(false)}>Cancel</Button>
             <Button onClick={save} className="rounded-sm bg-red-600 hover:bg-red-700">Save</Button>
