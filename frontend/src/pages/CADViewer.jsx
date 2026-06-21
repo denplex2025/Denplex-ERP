@@ -58,13 +58,14 @@ export default function CADViewer() {
       try {
         const b64 = await fileToB64(file);
         const r = await api.post("/cad/glb", { step_base64: b64 });
-        const glb = r.data?.glb_base64;
+        const mesh = r.data?.mesh_base64;
+        const fmt = r.data?.mesh_format || "stl";
         setGeom(r.data?.geometry || null);
-        if (!glb) { toast.error("Couldn't convert this STEP to 3D. The geometry summary may still be available."); setBusy(false); return; }
-        const bytes = Uint8Array.from(atob(glb), (c) => c.charCodeAt(0));
-        const glbFile = new File([bytes], "model.glb", { type: "model/gltf-binary" });
+        if (!mesh) { toast.error("Couldn't convert this STEP to 3D. The geometry summary may still be available below."); setBusy(false); return; }
+        const bytes = Uint8Array.from(atob(mesh), (c) => c.charCodeAt(0));
+        const meshFile = new File([bytes], `model.${fmt}`, { type: "application/octet-stream" });
         setInfo(`${file.name} (converted from STEP)`);
-        render([glbFile]);
+        render([meshFile]);
       } catch (err) {
         toast.error(err?.response?.status === 503 ? "CAD viewer not configured (set CAD_SERVICE_URL)." : "Could not convert STEP — check the CAD service.");
       }
