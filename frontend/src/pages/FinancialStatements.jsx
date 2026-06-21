@@ -3,7 +3,7 @@ import api from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { BookOpen } from "lucide-react";
+import { BookOpen, Download, FileText } from "lucide-react";
 import { toast } from "sonner";
 
 const inr = (v) => "₹" + Number(v || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -36,6 +36,24 @@ export default function FinancialStatements() {
   useEffect(() => { loadPnl(); /* eslint-disable-next-line */ }, []);
   useEffect(() => { if (tab === "bs" && !bs) loadBs(); /* eslint-disable-next-line */ }, [tab]);
 
+  const dl = async (kind, fmt) => {
+    try {
+      const url = kind === "pnl" ? "/reports/pnl/export" : "/reports/balance-sheet/export";
+      const params = kind === "pnl" ? { date_from: range.from, date_to: range.to, fmt } : { as_of: asOf, fmt };
+      const r = await api.get(url, { params, responseType: "blob" });
+      const blob = URL.createObjectURL(new Blob([r.data]));
+      const a = document.createElement("a");
+      a.href = blob; a.download = `${kind === "pnl" ? "P&L" : "BalanceSheet"}.${fmt === "pdf" ? "pdf" : "xlsx"}`; a.click();
+      URL.revokeObjectURL(blob);
+    } catch (e) { toast.error("Download failed"); }
+  };
+  const Exports = ({ kind }) => (
+    <div className="flex gap-2 ml-auto">
+      <Button onClick={() => dl(kind, "xlsx")} variant="outline" className="rounded-sm"><Download className="h-4 w-4 mr-1" /> Excel</Button>
+      <Button onClick={() => dl(kind, "pdf")} variant="outline" className="rounded-sm"><FileText className="h-4 w-4 mr-1" /> PDF</Button>
+    </div>
+  );
+
   return (
     <div className="pb-10 max-w-3xl">
       <div className="flex items-center gap-2 mb-1">
@@ -56,6 +74,7 @@ export default function FinancialStatements() {
             <div><Label className="text-[11px] uppercase tracking-wider text-slate-500">From</Label><Input type="date" value={range.from} onChange={e => setRange(r => ({ ...r, from: e.target.value }))} className="mt-1 w-40" /></div>
             <div><Label className="text-[11px] uppercase tracking-wider text-slate-500">To</Label><Input type="date" value={range.to} onChange={e => setRange(r => ({ ...r, to: e.target.value }))} className="mt-1 w-40" /></div>
             <Button onClick={loadPnl} disabled={loading} className="rounded-sm bg-red-600 hover:bg-red-700">{loading ? "Loading…" : "Run"}</Button>
+            <Exports kind="pnl" />
           </div>
           {pnl && <Pnl d={pnl} />}
         </>
@@ -66,6 +85,7 @@ export default function FinancialStatements() {
           <div className="flex flex-wrap items-end gap-3 mb-4 bg-slate-50 border border-slate-200 rounded-md p-3">
             <div><Label className="text-[11px] uppercase tracking-wider text-slate-500">As of</Label><Input type="date" value={asOf} onChange={e => setAsOf(e.target.value)} className="mt-1 w-40" /></div>
             <Button onClick={loadBs} disabled={loading} className="rounded-sm bg-red-600 hover:bg-red-700">{loading ? "Loading…" : "Run"}</Button>
+            <Exports kind="bs" />
           </div>
           {bs && <Bs d={bs} />}
         </>
