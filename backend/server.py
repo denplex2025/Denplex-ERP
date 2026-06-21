@@ -7336,6 +7336,28 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
         except Exception:
             pass
 
+    # --- Determine each party's role from how it's used in transactions ---
+    cust_ids = set(); supp_ids = set()
+    try:
+        cur.execute("SELECT txn_name_id, txn_type FROM kb_transactions WHERE txn_name_id IS NOT NULL")
+        for r in cur.fetchall():
+            nid = int(r["txn_name_id"]); tt = int(r["txn_type"] or 0)
+            if tt in (1, 7, 21, 23, 24, 28, 30, 3):
+                cust_ids.add(nid)
+            elif tt in (2, 27, 4):
+                supp_ids.add(nid)
+    except Exception:
+        pass
+
+    # --- Unit lookup (kb_item_units) for item UOM ---
+    unit_lookup: Dict[int, str] = {}
+    try:
+        cur.execute('SELECT unit_id, unit_short_name FROM "kb_item_units"')
+        for r in cur.fetchall():
+            unit_lookup[int(r["unit_id"])] = (r["unit_short_name"] or "").strip()
+    except Exception:
+        pass
+
     # --- Parties (kb_names) ---
     if opts.parties:
         # name_type: 1 = party (customer/supplier), 2 = other
@@ -7356,10 +7378,14 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
                 "source": "vyapar",
                 "created_at": str(r["date_created"] or now_iso()),
             }
+            nid = int(r["name_id"])
+            is_supp = nid in supp_ids
+            is_cust = (nid in cust_ids) or (not is_supp)   # default unknown parties to customer
             if not opts.dry_run:
-                # Vyapar doesn't distinguish C/S until used in txns; we'll route them by usage below.
-                await db.customers.update_one({"name": doc["name"]}, {"$setOnInsert": doc}, upsert=True)
-                await db.suppliers.update_one({"name": doc["name"]}, {"$setOnInsert": doc}, upsert=True)
+                if is_cust:
+                    await db.customers.update_one({"name": doc["name"]}, {"$setOnInsert": doc}, upsert=True)
+                if is_supp:
+                    await db.suppliers.update_one({"name": doc["name"]}, {"$setOnInsert": doc}, upsert=True)
             res["parties"] += 1
 
     # Build name_id -> party_name map for txn rows
@@ -7385,13 +7411,15 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
                 "sku": sku_raw,
                 "name": name[:200],
                 "category": "raw",
-                "uom": "pcs",
+                "uom": unit_lookup.get(int(r["base_unit_id"]), "Nos") if r["base_unit_id"] is not None else "Nos",
+                "secondary_unit": unit_lookup.get(int(r["secondary_unit_id"]), "") if r["secondary_unit_id"] is not None else "",
+                "conversion_factor": 0,
                 "qty_on_hand": float(r["item_stock_quantity"] or 0),
                 "qty_in_process": 0.0,
                 "reorder_level": float(r["item_min_stock_quantity"] or 0),
                 "unit_cost": float(r["item_purchase_unit_price"] or 0) or float(r["item_sale_unit_price"] or 0),
                 "hsn": str(r["item_hsn_sac_code"] or "").strip(),
-                "gst_rate": 18.0,
+                "gst_rate": (tax_rate.get(int(r["item_tax_id"]), 18.0) if r["item_tax_id"] is not None else 18.0),
                 "location": "",
                 "sale_price": float(r["item_sale_unit_price"] or 0),
                 "description": str(r["item_description"] or "").strip(),
@@ -7456,6 +7484,7 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
         28: ("sale_orders", "sale_orders", "customer", "Sale Order"),
         30: ("job_work_out", "job_work_out", "customer", "Job Work Out Challan"),
     }
+    txn_to_doc: Dict[int, Dict[str, Any]] = {}
     cur.execute("SELECT * FROM kb_transactions")
     for r in cur.fetchall():
         t = int(r["txn_type"]) if r["txn_type"] is not None else 0
@@ -7516,6 +7545,8 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
             target = getattr(db, collection_name)
             await target.update_one({"code": doc["code"], "vyapar_id": doc["vyapar_id"]},
                                     {"$setOnInsert": doc}, upsert=True)
+        if t in (1, 2):
+            txn_to_doc[int(r["txn_id"])] = {"id": doc["id"], "code": doc["code"], "dtype": "invoice" if t == 1 else "vendor_bill"}
         # Increment counter
         if t == 1: res["sales"] += 1
         elif t == 2: res["purchases"] += 1
@@ -7525,6 +7556,69 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
         elif t == 27: res["purchase_orders"] += 1
         elif t == 28: res["sale_orders"] += 1
         elif t == 30: res["job_work_out"] += 1
+
+    # --- Payments In/Out (kb_transactions type 3/4) + bill-to-bill allocations (kb_txn_links) ---
+    ptype_name: Dict[int, str] = {}
+    try:
+        cur.execute('SELECT paymentType_id, paymentType_name FROM "kb_paymentTypes"')
+        for r in cur.fetchall():
+            ptype_name[int(r["paymentType_id"])] = (r["paymentType_name"] or "")
+    except Exception:
+        pass
+
+    def _map_ptype(pid):
+        nm = (ptype_name.get(int(pid)) if pid is not None else "") or ""
+        nmu = nm.upper()
+        if "CASH" in nmu: return "Cash"
+        if "CHEQUE" in nmu: return "Cheque"
+        if "UPI" in nmu: return "UPI"
+        if "CARD" in nmu: return "Card"
+        return "Bank Transfer" if nm else "Cash"
+
+    pay_allocs: Dict[int, List] = {}
+    try:
+        cur.execute('SELECT txn_links_txn_1_id, txn_links_txn_2_id, txn_links_amount FROM "kb_txn_links" WHERE txn_links_txn_1_type IN (3,4)')
+        for r in cur.fetchall():
+            pay_allocs.setdefault(int(r["txn_links_txn_1_id"]), []).append((int(r["txn_links_txn_2_id"]), float(r["txn_links_amount"] or 0)))
+    except Exception:
+        pass
+
+    res["payments_in"] = 0; res["payments_out"] = 0
+    cur.execute("SELECT * FROM kb_transactions WHERE txn_type IN (3,4)")
+    for r in cur.fetchall():
+        t = int(r["txn_type"]); is_in = (t == 3)
+        if is_in and not opts.sales: continue
+        if (not is_in) and not opts.purchases: continue
+        party = name_lookup.get(int(r["txn_name_id"]) if r["txn_name_id"] is not None else -1, "Unknown")
+        amt = float(r["txn_cash_amount"] or 0) + float(r["txn_balance_amount"] or 0)
+        allocs = []
+        for (doc_txn, a) in pay_allocs.get(int(r["txn_id"]), []):
+            m = txn_to_doc.get(doc_txn)
+            if m and a > 0:
+                allocs.append({"document_id": m["id"], "document_code": m["code"],
+                               "document_type": ("invoice" if is_in else "vendor_bill"), "amount": round(a, 2), "tds_amount": 0})
+        allocated = round(sum(x["amount"] for x in allocs), 2)
+        code = (f"PMT-IN-VY-{r['txn_id']}" if is_in else f"PMT-OUT-VY-{r['txn_id']}")
+        pdoc = {"id": new_id(), "code": code, "party_id": "", "party_name": party,
+                "date": str(r["txn_date"] or "")[:10] or now_iso()[:10], "amount": round(amt, 2),
+                "allocated_amount": allocated, "payment_type": _map_ptype(r["txn_payment_type_id"]),
+                "ref_no": (r["txn_ref_number_char"] or "").strip(), "bank_name": "", "allocations": allocs,
+                "notes": (r["txn_description"] or "").strip(), "vyapar_id": str(r["txn_id"]), "source": "vyapar",
+                "created_at": str(r["txn_date_created"] or now_iso())}
+        pdoc["status"] = "Used" if (allocated >= amt - 0.01 and allocated > 0) else ("Partially Used" if allocated > 0 else "Unused")
+        if not opts.dry_run:
+            await (db.payments_in if is_in else db.payments_out).update_one(
+                {"vyapar_id": pdoc["vyapar_id"], "code": pdoc["code"]}, {"$setOnInsert": pdoc}, upsert=True)
+        if is_in: res["payments_in"] += 1
+        else: res["payments_out"] += 1
+
+    # Refresh paid/unpaid status now that allocations exist
+    if not opts.dry_run:
+        try:
+            await _refresh_invoice_paid_status([m["id"] for m in txn_to_doc.values() if m["dtype"] == "invoice"])
+            await _refresh_bill_paid_status([m["id"] for m in txn_to_doc.values() if m["dtype"] == "vendor_bill"])
+        except Exception:
+            pass
 
     con.close()
     return res
@@ -7658,7 +7752,7 @@ async def vyapar_import(payload: VyaparImportIn, user=Depends(require_roles("adm
     await write_audit(user["name"], "vyapar_import", "import", payload.token,
                       {**details, "dry_run": payload.dry_run})
     bits = [f"{details.get(k,0)} {k.replace('_',' ')}" for k in
-            ("parties","items","sales","purchases","quotations","sale_orders","purchase_orders","delivery_challans","job_work_out","sale_returns")
+            ("parties","items","sales","purchases","payments_in","payments_out","quotations","sale_orders","purchase_orders","delivery_challans","job_work_out","sale_returns")
             if details.get(k)]
     summary = " · ".join(bits) or "nothing matched"
     if payload.dry_run: summary += " (dry run)"
