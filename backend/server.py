@@ -7826,12 +7826,52 @@ async def del_payment_in(pid: str, user=Depends(require_roles("admin", "accounta
     await db.payments_in.delete_one({"id": pid})
     return {"ok": True}
 
+async def _settled_per_bill(bill_ids=None):
+    """Map vendor_bill id -> total settled (cash + TDS deducted) across all payments-out."""
+    q = {"allocations.document_id": {"$in": list(bill_ids)}} if bill_ids else {}
+    pays = await db.payments_out.find(q, {"_id": 0, "allocations": 1}).to_list(20000)
+    settled: Dict[str, float] = {}
+    for p in pays:
+        for a in (p.get("allocations") or []):
+            if a.get("document_type") == "vendor_bill":
+                settled[a["document_id"]] = settled.get(a["document_id"], 0) + float(a.get("amount") or 0) + float(a.get("tds_amount") or 0)
+    return settled
+
+async def _refresh_bill_paid_status(bill_ids):
+    bill_ids = [i for i in (bill_ids or []) if i]
+    if not bill_ids:
+        return
+    settled = await _settled_per_bill(bill_ids)
+    for bid in bill_ids:
+        b = await db.vendor_bills.find_one({"id": bid}, {"_id": 0, "total": 1})
+        if not b:
+            continue
+        if settled.get(bid, 0) >= float(b.get("total", 0)) - 0.01:
+            await db.vendor_bills.update_one({"id": bid}, {"$set": {"status": "paid"}})
+        else:
+            await db.vendor_bills.update_one({"id": bid, "status": "paid"}, {"$set": {"status": "unpaid"}})
+
+@api.get("/payments-out/open-bills/{party_id}")
+async def open_bills_for_party(party_id: str, user=Depends(get_current_user)):
+    """A supplier's purchase bills with a remaining balance — for allocating a payment (with optional TDS adjustment)."""
+    bills = await db.vendor_bills.find({"supplier_id": party_id}, {"_id": 0}).to_list(10000)
+    settled = await _settled_per_bill()
+    out = []
+    for b in bills:
+        bal = float(b.get("total", 0)) - settled.get(b.get("id", ""), 0)
+        if bal > 0.01:
+            out.append({"id": b.get("id"), "code": b.get("code"), "date": str(b.get("date", ""))[:10],
+                        "total": round(float(b.get("total", 0)), 2), "outstanding": round(bal, 2)})
+    out.sort(key=lambda r: r["date"])
+    return out
+
 @api.post("/payments-out")
 async def create_payment_out(p: PaymentOut, user=Depends(get_current_user)):
     doc = p.model_dump()
     doc["code"] = doc.get("code") or await gen_code("PMT-OUT", "payment_out")
     _recalc_payment_status(doc)
     await db.payments_out.insert_one(doc)
+    await _refresh_bill_paid_status([a.get("document_id") for a in (doc.get("allocations") or []) if a.get("document_type") == "vendor_bill"])
     await write_audit(user.get("name", ""), "payment_out_created", "payment_out", doc["id"], {"amount": doc["amount"], "party": doc["party_name"]})
     return doc
 
@@ -7844,6 +7884,7 @@ async def update_payment_out(pid: str, p: PaymentOut, user=Depends(get_current_u
     data = p.model_dump(); data.pop("id", None); data.pop("created_at", None)
     _recalc_payment_status(data)
     await db.payments_out.update_one({"id": pid}, {"$set": data})
+    await _refresh_bill_paid_status([a.get("document_id") for a in (data.get("allocations") or []) if a.get("document_type") == "vendor_bill"])
     return {"ok": True}
 
 @api.delete("/payments-out/{pid}")
