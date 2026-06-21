@@ -2375,6 +2375,20 @@ async def put_masters(section: str, body: dict, user=Depends(get_current_user)):
     await _put_setting(MASTER_KEYS[section], (body or {}).get("value"))
     return {"ok": True}
 
+@api.get("/settings/opening-balances")
+async def get_opening_balances(user=Depends(get_current_user)):
+    return await _get_setting("opening_balances", {"capital": 0, "opening_stock": 0, "as_of": ""})
+
+@api.put("/settings/opening-balances")
+async def put_opening_balances(body: dict, user=Depends(require_roles("admin", "manager", "accountant", "ca"))):
+    b = body or {}
+    await _put_setting("opening_balances", {
+        "capital": float(b.get("capital", 0) or 0),
+        "opening_stock": float(b.get("opening_stock", 0) or 0),
+        "as_of": b.get("as_of", "") or "",
+    })
+    return {"ok": True}
+
 @api.post("/admin/seed-masters")
 async def seed_masters(user=Depends(require_roles("admin", "manager"))):
     """Load Denplex's real Vyapar masters (T&C library, FY prefixes, payment terms, bank) as ERP defaults."""
@@ -8175,12 +8189,19 @@ async def _compute_pnl(frm, to):
             indirect += amt
     net_sales = sales - sales_ret
     net_purch = purchases - purch_ret
-    gross = net_sales - net_purch - direct
+    # COGS = Opening Stock + Purchases - Closing Stock
+    ob = await _get_setting("opening_balances", {}) or {}
+    opening_stock = float(ob.get("opening_stock", 0) or 0)
+    items = await db.items.find({}, {"_id": 0, "qty_on_hand": 1, "unit_cost": 1}).to_list(50000)
+    closing_stock = sum(float(it.get("qty_on_hand", 0) or 0) * float(it.get("unit_cost", 0) or 0) for it in items)
+    cogs = opening_stock + net_purch - closing_stock
+    gross = net_sales - cogs - direct
     net = gross - indirect
     return {
         "range": {"from": frm, "to": to},
         "sales": round(net_sales, 2), "sales_gross": round(sales, 2), "sales_returns": round(sales_ret, 2),
         "purchases": round(net_purch, 2), "purchase_returns": round(purch_ret, 2),
+        "opening_stock": round(opening_stock, 2), "closing_stock": round(closing_stock, 2), "cogs": round(cogs, 2),
         "direct_expenses": round(direct, 2), "indirect_expenses": round(indirect, 2),
         "expenses_by_category": [{"category": k, "amount": round(v, 2)} for k, v in sorted(by_cat.items(), key=lambda kv: -kv[1])],
         "gross_profit": round(gross, 2), "net_profit": round(net, 2),
@@ -8219,9 +8240,12 @@ async def report_balance_sheet(as_of: str = "", user=Depends(get_current_user)):
     tds_pay = sum(float(a.get("tds_amount", 0) or 0) for p in pout for a in (p.get("allocations") or []))
     pnl_all = await _compute_pnl("0000-01-01", as_of)
     retained = pnl_all["net_profit"]
+    ob = await _get_setting("opening_balances", {}) or {}
+    opening_capital = float(ob.get("capital", 0) or 0)
     total_assets = round(cash_bank + receivable + inventory + tds_recv + gst_credit, 2)
     total_liab = round(payable + gst_payable + tds_pay, 2)
-    capital = round(total_assets - total_liab - retained, 2)
+    # Adjustment is the residual once opening capital + retained earnings are accounted for.
+    adjustment = round(total_assets - total_liab - opening_capital - retained, 2)
     return {
         "as_of": as_of,
         "assets": {"cash_bank": round(cash_bank, 2), "accounts": acc_list, "receivable": round(receivable, 2),
@@ -8229,7 +8253,9 @@ async def report_balance_sheet(as_of: str = "", user=Depends(get_current_user)):
                    "total": total_assets},
         "liabilities": {"payable": round(payable, 2), "gst_payable": round(gst_payable, 2), "tds_payable": round(tds_pay, 2),
                         "total": total_liab},
-        "equity": {"capital_balancing": capital, "retained_earnings": round(retained, 2), "total": round(capital + retained, 2)},
+        "equity": {"opening_capital": round(opening_capital, 2), "retained_earnings": round(retained, 2),
+                   "adjustment": adjustment, "capital_balancing": adjustment,
+                   "total": round(opening_capital + retained + adjustment, 2)},
         "net_profit_to_date": round(retained, 2),
     }
 
@@ -8286,7 +8312,10 @@ def _pnl_rows(d):
     rows = [("Sales (net of returns)", d["sales"], False)]
     if d["sales_returns"]:
         rows.append(("Less: Sales returns", d["sales_returns"], False))
-    rows.append(("Less: Purchases (net)", d["purchases"], False))
+    rows.append(("Opening Stock", d.get("opening_stock", 0), False))
+    rows.append(("Add: Purchases (net)", d["purchases"], False))
+    rows.append(("Less: Closing Stock", d.get("closing_stock", 0), False))
+    rows.append(("Cost of Goods Sold", d.get("cogs", d["purchases"]), False))
     if d["direct_expenses"]:
         rows.append(("Less: Direct expenses", d["direct_expenses"], False))
     rows.append(("Gross Profit", d["gross_profit"], True))
@@ -8317,8 +8346,10 @@ def _bs_rows(d):
         rows.append(("TDS Payable", l["tds_payable"], False))
     rows.append(("Total Liabilities", l["total"], True))
     rows.append(("EQUITY", "", True))
+    rows.append(("Owner's Capital (opening)", eq.get("opening_capital", 0), False))
     rows.append(("Retained Earnings (net profit to date)", eq["retained_earnings"], False))
-    rows.append(("Owner's Capital & Reserves", eq["capital_balancing"], False))
+    if eq.get("adjustment"):
+        rows.append(("Adjustment / Suspense", eq["adjustment"], False))
     rows.append(("Total Equity", eq["total"], True))
     rows.append(("Total Liabilities & Equity", round(l["total"] + eq["total"], 2), True))
     return rows
