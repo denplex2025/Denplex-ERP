@@ -67,6 +67,10 @@ import BankCash from "./pages/BankCash";
 import FinancialStatements from "./pages/FinancialStatements";
 import FixtureConcept from "./pages/FixtureConcept";
 import CADViewer from "./pages/CADViewer";
+import WorkerLayout from "./pages/worker/WorkerLayout";
+import WorkerHome from "./pages/worker/WorkerHome";
+import WorkerProduction from "./pages/worker/WorkerProduction";
+import WorkerQC from "./pages/worker/WorkerQC";
 import DocMasters from "./pages/DocMasters";
 import Assistant from "./pages/Assistant";
 
@@ -134,6 +138,11 @@ function App() {
               <Route path="bulk-items" element={<BulkItems />} />
               <Route path="reminders" element={<Reminders />} />
               <Route path="scan/:entity/:id" element={<Scan />} />
+            </Route>
+            <Route path="/worker" element={<Protected><WorkerLayout /></Protected>}>
+              <Route index element={<WorkerHome />} />
+              <Route path="production" element={<WorkerProduction />} />
+              <Route path="qc" element={<WorkerQC />} />
             </Route>
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
