@@ -72,6 +72,7 @@ const NAV_GROUPS = [
   },
   {
     head: "Sales",
+    roles: ["manager", "sales"],
     items: [
       { to: "/app/leads", label: "Leads", icon: UserPlus, testid: "nav-leads" },
       { to: "/app/customers", label: "Customers", icon: Users, testid: "nav-customers" },
@@ -86,6 +87,7 @@ const NAV_GROUPS = [
   },
   {
     head: "Accounts",
+    roles: ["manager", "accountant", "ca"],
     items: [
       { to: "/app/invoices", label: "Sale Invoices", icon: Receipt, testid: "nav-invoices" },
       { to: "/app/invoices/new", label: "New Sale Invoice", icon: Receipt, testid: "nav-invoice-new", end: true },
@@ -104,6 +106,7 @@ const NAV_GROUPS = [
   },
   {
     head: "Production",
+    roles: ["manager", "production", "design"],
     items: [
       { to: "/app/parts", label: "Part Master", icon: Cog, testid: "nav-parts" },
       { to: "/app/part-library", label: "Parts Library", icon: Library, testid: "nav-part-library" },
@@ -121,6 +124,7 @@ const NAV_GROUPS = [
   },
   {
     head: "Purchase & Expense",
+    roles: ["manager", "accountant", "ca", "production"],
     items: [
       { to: "/app/suppliers", label: "Suppliers", icon: Truck, testid: "nav-suppliers" },
       { to: "/app/purchase-orders", label: "Purchase Orders", icon: ShoppingCart, testid: "nav-purchase-orders" },
@@ -132,6 +136,7 @@ const NAV_GROUPS = [
   },
   {
     head: "Quality",
+    roles: ["manager", "qc", "production"],
     items: [
       { to: "/app/qc", label: "QC Reports", icon: ShieldCheck, testid: "nav-qc" },
       { to: "/app/documents", label: "Documents (ISO)", icon: FileBox, testid: "nav-documents" },
@@ -140,12 +145,14 @@ const NAV_GROUPS = [
   },
   {
     head: "Marketing",
+    roles: ["manager", "sales"],
     items: [
       { to: "/app/marketing", label: "Marketing", icon: Megaphone, testid: "nav-marketing" },
     ],
   },
   {
     head: "HR",
+    roles: ["manager"],
     items: [
       { to: "/app/hr", label: "HR", icon: UsersRound, testid: "nav-hr" },
     ],
@@ -177,7 +184,14 @@ export default function AppLayout() {
     return null;
   }
 
-  const visibleGroups = NAV_GROUPS.filter(g => !g.adminOnly || user.role === "admin");
+  const _role = user.role || "admin";
+  const visibleGroups = NAV_GROUPS.filter(g => {
+    if (_role === "admin") return true;       // admin sees everything
+    if (g.adminOnly) return false;            // admin-only groups hidden from others
+    if (_role === "trial") return true;       // trial evaluates the full product
+    if (!g.roles) return true;                // ungated groups (e.g. Dashboard) visible to all
+    return g.roles.includes(_role);           // department groups gated by role
+  });
 
   const handleLogout = () => { logout(); nav("/"); };
 
