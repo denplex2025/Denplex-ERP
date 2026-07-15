@@ -756,8 +756,20 @@ function InvoiceTemplatePanel() {
 function VyaparImportPanel() {
   const [busy, setBusy] = useState(false);
   const [analysis, setAnalysis] = useState(null);
-  const [opts, setOpts] = useState({ parties: true, items: true, sales: true, purchases: true, dry_run: false });
+  const [opts, setOpts] = useState({ parties: true, items: true, sales: true, purchases: true, expenses: true, dry_run: false });
   const [results, setResults] = useState(null);
+  const [recon, setRecon] = useState(null);
+
+  const runReconcile = async () => {
+    if (!analysis?.token) { toast.error("Upload a .vyb backup first"); return; }
+    setBusy(true); setRecon(null);
+    try {
+      const r = await api.post("/integrations/vyapar/reconcile", { token: analysis.token });
+      setRecon(r.data);
+      toast[r.data.all_ok ? "success" : "warning"](r.data.all_ok ? "All rows reconcile — safe to cut over" : "Some rows differ — review below");
+    } catch (e) { toast.error(e?.response?.data?.detail || "Reconcile failed"); }
+    finally { setBusy(false); }
+  };
 
   const onPick = async (e) => {
     const f = e.target.files?.[0]; if (!f) return;
@@ -820,18 +832,22 @@ function VyaparImportPanel() {
 
             {analysis.kind !== "unsupported" && (
               <>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 pt-2">
+                <div className="grid grid-cols-2 md:grid-cols-5 gap-3 pt-2">
                   <Toggle label="Parties (customers/suppliers)" checked={opts.parties} onChange={(v)=>setOpts({...opts, parties: v})} />
                   <Toggle label="Items / Inventory" checked={opts.items} onChange={(v)=>setOpts({...opts, items: v})} />
                   <Toggle label="Sale Invoices" checked={opts.sales} onChange={(v)=>setOpts({...opts, sales: v})} />
                   <Toggle label="Purchase Invoices" checked={opts.purchases} onChange={(v)=>setOpts({...opts, purchases: v})} />
+                  <Toggle label="Expenses" checked={opts.expenses} onChange={(v)=>setOpts({...opts, expenses: v})} />
                 </div>
-                <div className="flex items-center gap-3 pt-2">
+                <div className="flex items-center gap-3 pt-2 flex-wrap">
                   <label className="flex items-center gap-2 text-xs text-slate-600">
                     <Switch checked={opts.dry_run} onCheckedChange={(v)=>setOpts({...opts, dry_run: v})} /> Dry run (preview without writing)
                   </label>
                   <Button onClick={runImport} disabled={busy} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="run-vyapar-import">
                     <Database className="h-4 w-4 mr-1" /> {busy ? "Importing…" : (opts.dry_run ? "Run dry import" : "Import into ERP")}
+                  </Button>
+                  <Button onClick={runReconcile} disabled={busy} variant="outline" className="rounded-sm" data-testid="run-vyapar-reconcile">
+                    {busy ? "Working…" : "Reconcile ERP vs backup"}
                   </Button>
                 </div>
               </>
@@ -855,6 +871,41 @@ function VyaparImportPanel() {
           <div className="mt-4 border border-emerald-200 p-4 bg-emerald-50 rounded-sm text-sm" data-testid="vyapar-results">
             <div className="font-semibold text-emerald-800 mb-2">Import complete</div>
             <pre className="text-xs whitespace-pre-wrap text-slate-700">{JSON.stringify(results.details || results, null, 2)}</pre>
+          </div>
+        )}
+
+        {recon && (
+          <div className={`mt-4 border p-4 rounded-sm text-sm ${recon.all_ok ? "border-emerald-200 bg-emerald-50" : "border-amber-200 bg-amber-50"}`} data-testid="vyapar-reconcile">
+            <div className={`font-semibold mb-2 ${recon.all_ok ? "text-emerald-800" : "text-amber-800"}`}>
+              {recon.all_ok ? "✓ Everything reconciles — nothing lost. Safe to cut over from Vyapar." : "Some rows differ — review before cutting over."}
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="text-left text-slate-500 uppercase tracking-wider text-[10px] border-b border-slate-200">
+                    <th className="py-1.5 pr-2">Metric</th>
+                    <th className="py-1.5 pr-2 text-right">Vyapar count</th>
+                    <th className="py-1.5 pr-2 text-right">ERP count</th>
+                    <th className="py-1.5 pr-2 text-right">Vyapar ₹</th>
+                    <th className="py-1.5 pr-2 text-right">ERP ₹</th>
+                    <th className="py-1.5 text-center">OK</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {recon.rows.map((r, i) => (
+                    <tr key={i} className={`border-b border-slate-100 ${r.ok ? "" : "bg-red-50"}`}>
+                      <td className="py-1.5 pr-2 font-medium text-slate-800">{r.metric}</td>
+                      <td className="py-1.5 pr-2 text-right font-mono-tech">{r.vyapar_count ?? "—"}</td>
+                      <td className="py-1.5 pr-2 text-right font-mono-tech">{r.erp_count ?? "—"}</td>
+                      <td className="py-1.5 pr-2 text-right font-mono-tech">{r.vyapar_total != null ? r.vyapar_total.toLocaleString("en-IN") : "—"}</td>
+                      <td className="py-1.5 pr-2 text-right font-mono-tech">{r.erp_total != null ? r.erp_total.toLocaleString("en-IN") : "—"}</td>
+                      <td className="py-1.5 text-center">{r.ok ? "✅" : "❌"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="text-[11px] text-slate-500 mt-2">{recon.note}</p>
           </div>
         )}
       </Card>

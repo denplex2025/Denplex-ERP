@@ -27,15 +27,43 @@ export default function Inventory() {
   const [locFilter, setLocFilter] = useState("All");
   const [transferOpen, setTransferOpen] = useState(false);
   const [transferForm, setTransferForm] = useState({ item_id: "", item_name: "", from_location: "", to_location: "", qty: 0, notes: "" });
+  const [adjOpen, setAdjOpen] = useState(false);
+  const [adjForm, setAdjForm] = useState({ item_id: "", item_name: "", adj_type: "add", qty: 0, reason: "Physical Count Correction", at_price: 0, location: "", notes: "" });
+  const [adjustments, setAdjustments] = useState([]);
+  const [adjReasons, setAdjReasons] = useState([]);
   const [scanOpen, setScanOpen] = useState(false);
   const [scanLoading, setScanLoading] = useState(false);
   const [scanResult, setScanResult] = useState(null);
 
   const load = async () => {
-    const [a, b, l] = await Promise.all([api.get("/inventory/items"), api.get("/inventory/movements"), api.get("/inventory/locations").catch(() => ({ data: { locations: [] } }))]);
+    const [a, b, l, adj, rs] = await Promise.all([
+      api.get("/inventory/items"), api.get("/inventory/movements"),
+      api.get("/inventory/locations").catch(() => ({ data: { locations: [] } })),
+      api.get("/inventory/adjustments").catch(() => ({ data: [] })),
+      api.get("/inventory/adjustment-reasons").catch(() => ({ data: { reasons: [] } })),
+    ]);
     setItems(a.data); setMoves(b.data); setLocations(l.data?.locations || []);
+    setAdjustments(Array.isArray(adj.data) ? adj.data : []);
+    setAdjReasons(rs.data?.reasons || []);
   };
   useEffect(() => { load(); }, []);
+
+  const openAdj = (it) => {
+    setAdjForm({ item_id: it.id, item_name: it.name, adj_type: "add", qty: 0,
+                 reason: "Physical Count Correction", at_price: it.unit_cost || 0, location: "", notes: "" });
+    setAdjOpen(true);
+  };
+  const saveAdj = async () => {
+    try {
+      await api.post("/inventory/adjustments", { ...adjForm, qty: Number(adjForm.qty), at_price: Number(adjForm.at_price) });
+      toast.success("Stock adjusted"); setAdjOpen(false); await load();
+    } catch (e) { toast.error(e?.response?.data?.detail || "Adjustment failed"); }
+  };
+  const delAdj = async (a) => {
+    if (!window.confirm(`Delete adjustment ${a.code}? Stock will be restored (undo).`)) return;
+    try { await api.delete(`/inventory/adjustments/${a.id}`); toast.success("Adjustment reversed"); await load(); }
+    catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
+  };
 
   const openTransfer = (it) => {
     const byLoc = it.qty_by_location || {};
@@ -141,6 +169,7 @@ export default function Inventory() {
        <TabsList className="rounded-sm bg-slate-100 mb-4">
           <TabsTrigger value="items" className="rounded-sm" data-testid="tab-items">Items</TabsTrigger>
           <TabsTrigger value="moves" className="rounded-sm" data-testid="tab-movements">Movements</TabsTrigger>
+          <TabsTrigger value="adjustments" className="rounded-sm" data-testid="tab-adjustments">Adjustments</TabsTrigger>
           <TabsTrigger value="material_states" className="rounded-sm" data-testid="tab-material-states">Material States</TabsTrigger>
         </TabsList>
 
@@ -180,7 +209,7 @@ export default function Inventory() {
                           <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => openMove(it, "in")} title="Stock In" data-testid={`stock-in-${it.id}`}><ArrowDownToLine className="h-4 w-4 text-emerald-700" /></Button>
                           <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => openMove(it, "out")} title="Stock Out" data-testid={`stock-out-${it.id}`}><ArrowUpFromLine className="h-4 w-4 text-red-700" /></Button>
                           <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => openTransfer(it)} title="Transfer between locations" disabled={locations.length < 2}><ArrowLeftRight className="h-4 w-4 text-blue-600" /></Button>
-                          <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => openMove(it, "adjust")} title="Adjust"><RefreshCw className="h-4 w-4 text-red-600" /></Button>
+                          <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => openAdj(it)} title="Adjust stock (with reason)"><RefreshCw className="h-4 w-4 text-red-600" /></Button>
                           <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => setQrItem({ entity: "inventory", id: it.id, code: it.sku, label: it.name })} title="QR code"><QrCode className="h-4 w-4 text-slate-600" /></Button>
                           <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => { setEditing(it); setForm(it); setOpen(true); }}><Edit className="h-4 w-4" /></Button>
                           <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => del(it)}><Trash2 className="h-4 w-4 text-red-600" /></Button>
@@ -217,10 +246,87 @@ export default function Inventory() {
             )}
           </Card>
         </TabsContent>
+        <TabsContent value="adjustments">
+          <Card>
+            {adjustments.length === 0 ? <Empty label="No stock adjustments yet. Use the adjust (↻) action on an item." /> : (
+              <div className="overflow-x-auto">
+                <table className="w-full">
+                  <thead><tr><Th>Code</Th><Th>Date</Th><Th>Item</Th><Th>Type</Th><Th>Qty</Th><Th>Reason</Th><Th>Value</Th><Th>Before → After</Th><Th>By</Th><Th className="text-right">Actions</Th></tr></thead>
+                  <tbody>
+                    {adjustments.map(a => (
+                      <tr key={a.id} className="hover:bg-slate-50">
+                        <Td><span className="font-mono-tech text-xs">{a.code}</span></Td>
+                        <Td>{a.date}</Td>
+                        <Td>{a.item_name} <span className="text-xs text-slate-500 font-mono-tech">({a.item_sku})</span></Td>
+                        <Td><span className={`uppercase text-xs font-semibold ${a.adj_type === "add" ? "text-emerald-700" : "text-red-700"}`}>{a.adj_type === "add" ? "+ Add" : "− Reduce"}</span></Td>
+                        <Td><span className="font-mono-tech">{a.qty}</span></Td>
+                        <Td className="text-xs">{a.reason}</Td>
+                        <Td className="font-mono-tech text-xs">{a.value ? `₹${a.value}` : "—"}</Td>
+                        <Td className="font-mono-tech text-xs">{a.qty_before} → {a.qty_after}</Td>
+                        <Td>{a.by_user}</Td>
+                        <Td className="text-right">
+                          <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => delAdj(a)} title="Delete (reverses stock)"><Trash2 className="h-4 w-4 text-red-600" /></Button>
+                        </Td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Card>
+        </TabsContent>
         <TabsContent value="material_states">
           <MaterialStates />
         </TabsContent>
       </Tabs>
+
+      {/* Stock adjustment dialog */}
+      <Dialog open={adjOpen} onOpenChange={setAdjOpen}>
+        <DialogContent className="rounded-sm max-w-md">
+          <DialogHeader><DialogTitle className="font-display">Adjust Stock — {adjForm.item_name}</DialogTitle></DialogHeader>
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Type">
+                <Select value={adjForm.adj_type} onValueChange={v => setAdjForm({ ...adjForm, adj_type: v })}>
+                  <SelectTrigger className="rounded-sm"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="add">Add stock (+)</SelectItem>
+                    <SelectItem value="reduce">Reduce stock (−)</SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
+              <Field label="Quantity *"><Input type="number" value={adjForm.qty} onChange={e => setAdjForm({ ...adjForm, qty: e.target.value })} data-testid="adj-qty" /></Field>
+            </div>
+            <Field label="Reason *">
+              <Select value={adjForm.reason} onValueChange={v => setAdjForm({ ...adjForm, reason: v })}>
+                <SelectTrigger className="rounded-sm"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {(adjReasons.length ? adjReasons : ["Opening Stock", "Physical Count Correction", "Damaged", "Other"]).map(r => (
+                    <SelectItem key={r} value={r}>{r}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </Field>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="At price (₹/unit)"><Input type="number" value={adjForm.at_price} onChange={e => setAdjForm({ ...adjForm, at_price: e.target.value })} /></Field>
+              <Field label="Location">
+                <Select value={adjForm.location || "none"} onValueChange={v => setAdjForm({ ...adjForm, location: v === "none" ? "" : v })}>
+                  <SelectTrigger className="rounded-sm"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">— (overall)</SelectItem>
+                    {locations.map(l => <SelectItem key={l} value={l}>{l}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </Field>
+            </div>
+            <Field label="Notes"><Textarea rows={2} value={adjForm.notes} onChange={e => setAdjForm({ ...adjForm, notes: e.target.value })} className="rounded-sm" /></Field>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" className="rounded-sm" onClick={() => setAdjOpen(false)}>Cancel</Button>
+            <Button onClick={saveAdj} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="save-adjustment">Adjust</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Item dialog */}
       <Dialog open={open} onOpenChange={setOpen}>
