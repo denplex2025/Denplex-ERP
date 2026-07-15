@@ -7251,6 +7251,7 @@ class VyaparImportIn(BaseModel):
     items: bool = True
     sales: bool = True
     purchases: bool = True
+    expenses: bool = True
     dry_run: bool = False
 
 @api.post("/integrations/vyapar/inspect")
@@ -7343,9 +7344,10 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
         cur.execute("SELECT txn_name_id, txn_type FROM kb_transactions WHERE txn_name_id IS NOT NULL")
         for r in cur.fetchall():
             nid = int(r["txn_name_id"]); tt = int(r["txn_type"] or 0)
-            if tt in (1, 7, 21, 23, 24, 28, 30, 3):
+            # Verified vs real Denplex .vyb: customer-side types 1,3,21,24,27,30,65; supplier-side 2,4,23,28
+            if tt in (1, 3, 21, 24, 27, 30, 65):
                 cust_ids.add(nid)
-            elif tt in (2, 27, 4):
+            elif tt in (2, 4, 23, 28):
                 supp_ids.add(nid)
     except Exception:
         pass
@@ -7361,8 +7363,8 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
 
     # --- Parties (kb_names) ---
     if opts.parties:
-        # name_type: 1 = party (customer/supplier), 2 = other
-        cur.execute('SELECT * FROM "kb_names" WHERE name_type IN (1,2)')
+        # name_type: 1 = party (customer/supplier); 2 = EXPENSE CATEGORY (imported separately below)
+        cur.execute('SELECT * FROM "kb_names" WHERE name_type = 1')
         for r in cur.fetchall():
             full_name = (r["full_name"] or "").strip()
             if not full_name:
@@ -7472,38 +7474,58 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
         pass
 
     # --- Transactions: route by txn_type ---
-    # Vyapar txn_type: 1=Sale, 2=Purchase, 7=Sale Return, 21=Estimate/Quotation,
-    # 23=Delivery Challan, 27=Purchase Order, 28=Sale Order, 30=Job Work Out
+    # Map VERIFIED against the real Denplex .vyb (July 2026 backup):
+    # 1=Sale, 2=Purchase, 3=Payment-In, 4=Payment-Out, 7=EXPENSE (not sale return!),
+    # 21=Sale Return (Credit Note), 23=Purchase Return, 24=Sale Order,
+    # 27=Quotation/Estimate, 28=Purchase Order, 30=Delivery Challan, 65=Proforma Invoice
     TYPE_ROUTES = {
         1:  ("invoices", "sales", "customer", "Tax Invoice"),
         2:  ("vendor_bills", "purchases", "supplier", "Purchase Bill"),
-        7:  ("credit_notes", "sale_returns", "customer", "Credit Note"),
-        21: ("quotations", "quotations", "customer", "Estimate"),
-        23: ("delivery_challans", "delivery_challans", "customer", "Delivery Challan"),
-        24: ("delivery_challans", "delivery_challans", "customer", "Delivery Challan"),
-        27: ("purchase_orders", "purchase_orders", "supplier", "Purchase Order"),
-        28: ("sale_orders", "sale_orders", "customer", "Sale Order"),
-        30: ("job_work_out", "job_work_out", "customer", "Job Work Out Challan"),
+        21: ("credit_notes", "sale_returns", "customer", "Credit Note"),
+        23: ("purchase_returns", "purchase_returns", "supplier", "Purchase Return"),
+        24: ("sale_orders", "sale_orders", "customer", "Sale Order"),
+        27: ("quotations", "quotations", "customer", "Quotation"),
+        28: ("purchase_orders", "purchase_orders", "supplier", "Purchase Order"),
+        30: ("delivery_challans", "delivery_challans", "customer", "Delivery Challan"),
+        65: ("proforma_invoices", "proformas", "customer", "Proforma Invoice"),
     }
+    # TDS section/rate lookup (tds_tax_rates)
+    tds_lookup: Dict[int, Dict[str, Any]] = {}
+    try:
+        cur.execute('SELECT id, name, percentage FROM "tds_tax_rates"')
+        for r in cur.fetchall():
+            tds_lookup[int(r["id"])] = {"name": (r["name"] or ""), "rate": float(r["percentage"] or 0)}
+    except Exception:
+        pass
+
+    res.update({"expenses": 0, "purchase_returns": 0, "proformas": 0,
+                "cash_on_doc_payments": 0, "opening_balances": 0, "skipped_unknown": []})
     txn_to_doc: Dict[int, Dict[str, Any]] = {}
+    cash_on_doc: List[Dict[str, Any]] = []            # cash received/paid on the doc itself -> synthetic payment below
+    inv_open: Dict[int, List[Any]] = {}               # txn_id -> [party_kind, party_name, ERP-derived outstanding]
     cur.execute("SELECT * FROM kb_transactions")
     for r in cur.fetchall():
         t = int(r["txn_type"]) if r["txn_type"] is not None else 0
+        if t in (3, 4, 7):
+            continue                                   # payments + expenses are handled in their own passes
         route = TYPE_ROUTES.get(t)
         if not route:
+            res["skipped_unknown"].append({"txn_id": r["txn_id"], "txn_type": t,
+                                           "ref": (r["txn_ref_number_char"] or "").strip(),
+                                           "amount": round(float(r["txn_cash_amount"] or 0) + float(r["txn_balance_amount"] or 0), 2)})
             continue
         collection_name, counter_key, party_kind, _title = route
         # Honour user toggles
-        if party_kind == "customer" and (counter_key == "sales") and not opts.sales: continue
-        if party_kind == "supplier" and (counter_key == "purchases") and not opts.purchases: continue
-        if counter_key not in ("sales", "purchases") and not opts.sales and party_kind == "customer": continue
+        if party_kind == "customer" and not opts.sales: continue
+        if party_kind == "supplier" and not opts.purchases: continue
 
         party_name = name_lookup.get(int(r["txn_name_id"]) if r["txn_name_id"] is not None else -1, "Unknown")
         ref = (r["txn_ref_number_char"] or "").strip()
         prefix = (r["txn_invoice_prefix"] or "").strip()
         code = (f"{prefix}{ref}" if ref else f"VY-{r['txn_id']}").strip()
         cash = float(r["txn_cash_amount"] or 0)
-        bal = float(r["txn_balance_amount"] or 0)
+        bal = float(r["txn_balance_amount"] or 0)      # balance AT CREATION
+        cur_bal = float(r["txn_current_balance"] or 0) # LIVE balance (net of later linked payments)
         total = cash + bal
         sub = max(total - float(r["txn_tax_amount"] or 0), 0)
         ln = lines_by_txn.get(int(r["txn_id"]), [])
@@ -7513,6 +7535,8 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
         cgst = 0.0; sgst = 0.0; igst = 0.0
         if is_interstate: igst = tax_total
         else: cgst = sgst = tax_total / 2
+        tds_amt = float(r["txn_tds_tax_amount"] or 0)
+        tds_info = tds_lookup.get(int(r["txn_tds_tax_id"])) if r["txn_tds_tax_id"] is not None else None
 
         doc: Dict[str, Any] = {
             "id": new_id(),
@@ -7522,6 +7546,7 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
             "lines": ln,
             "subtotal": sub,
             "total": total,
+            "round_off": float(r["txn_round_off_amount"] or 0),
             "notes": (r["txn_description"] or "").strip(),
             "place_of_supply": (r["txn_place_of_supply"] or "").strip(),
             "is_interstate": is_interstate,
@@ -7530,17 +7555,22 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
             "source": "vyapar",
             "created_at": str(r["txn_date_created"] or now_iso()),
         }
+        if tds_amt:
+            doc["tds"] = round(tds_amt, 2)
+            if tds_info:
+                doc["tds_rate"] = tds_info["rate"]
+                doc["tds_section"] = tds_info["name"]
         if party_kind == "customer":
             doc["customer_id"] = ""
             doc["customer_name"] = party_name
             doc["cgst"] = cgst; doc["sgst"] = sgst; doc["igst"] = igst
             doc["gst_total"] = tax_total
-            doc["status"] = "paid" if bal == 0 else "sent"
+            doc["status"] = "paid" if cur_bal <= 0.01 else "sent"
         else:
             doc["supplier_id"] = ""
             doc["supplier_name"] = party_name
             doc["gst_total"] = tax_total
-            doc["status"] = "received" if bal == 0 else "open"
+            doc["status"] = "received" if cur_bal <= 0.01 else "open"
 
         if not opts.dry_run:
             target = getattr(db, collection_name)
@@ -7548,15 +7578,25 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
                                     {"$setOnInsert": doc}, upsert=True)
         if t in (1, 2):
             txn_to_doc[int(r["txn_id"])] = {"id": doc["id"], "code": doc["code"], "dtype": "invoice" if t == 1 else "vendor_bill"}
+            if cur_bal > 0.01:
+                # ERP will show: total - (cash-on-doc payment) - later allocations = starts at bal
+                inv_open[int(r["txn_id"])] = [party_kind, party_name, bal]
+            if cash > 0.01 and bal > 0.01:
+                # Cash taken on the doc itself must become a payment record, else ERP overstates outstanding
+                cash_on_doc.append({"is_in": t == 1, "party": party_name,
+                                    "date": str(r["txn_date"] or "")[:10] or now_iso()[:10],
+                                    "amount": round(cash, 2), "ptype_id": r["txn_payment_type_id"],
+                                    "doc_id": doc["id"], "doc_code": doc["code"], "txn_id": int(r["txn_id"])})
         # Increment counter
         if t == 1: res["sales"] += 1
         elif t == 2: res["purchases"] += 1
-        elif t == 7: res["sale_returns"] += 1
-        elif t == 21: res["quotations"] += 1
-        elif t in (23, 24): res["delivery_challans"] += 1
-        elif t == 27: res["purchase_orders"] += 1
-        elif t == 28: res["sale_orders"] += 1
-        elif t == 30: res["job_work_out"] += 1
+        elif t == 21: res["sale_returns"] += 1
+        elif t == 23: res["purchase_returns"] += 1
+        elif t == 24: res["sale_orders"] += 1
+        elif t == 27: res["quotations"] += 1
+        elif t == 28: res["purchase_orders"] += 1
+        elif t == 30: res["delivery_challans"] += 1
+        elif t == 65: res["proformas"] += 1
 
     # --- Payments In/Out (kb_transactions type 3/4) + bill-to-bill allocations (kb_txn_links) ---
     ptype_name: Dict[int, str] = {}
@@ -7598,6 +7638,8 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
             if m and a > 0:
                 allocs.append({"document_id": m["id"], "document_code": m["code"],
                                "document_type": ("invoice" if is_in else "vendor_bill"), "amount": round(a, 2), "tds_amount": 0})
+                if doc_txn in inv_open:
+                    inv_open[doc_txn][2] -= a
         allocated = round(sum(x["amount"] for x in allocs), 2)
         code = (f"PMT-IN-VY-{r['txn_id']}" if is_in else f"PMT-OUT-VY-{r['txn_id']}")
         pdoc = {"id": new_id(), "code": code, "party_id": "", "party_name": party,
@@ -7612,6 +7654,101 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
                 {"vyapar_id": pdoc["vyapar_id"], "code": pdoc["code"]}, {"$setOnInsert": pdoc}, upsert=True)
         if is_in: res["payments_in"] += 1
         else: res["payments_out"] += 1
+
+    # --- Cash taken on the doc itself -> synthetic payment with allocation (keeps outstanding exact) ---
+    for cp in cash_on_doc:
+        pdoc = {"id": new_id(),
+                "code": ("PMT-IN-VYCASH-" if cp["is_in"] else "PMT-OUT-VYCASH-") + str(cp["txn_id"]),
+                "party_id": "", "party_name": cp["party"], "date": cp["date"], "amount": cp["amount"],
+                "allocated_amount": cp["amount"], "payment_type": _map_ptype(cp["ptype_id"]),
+                "ref_no": "", "bank_name": "",
+                "allocations": [{"document_id": cp["doc_id"], "document_code": cp["doc_code"],
+                                 "document_type": "invoice" if cp["is_in"] else "vendor_bill",
+                                 "amount": cp["amount"], "tds_amount": 0}],
+                "notes": "Cash on document (Vyapar import)", "status": "Used",
+                "vyapar_id": f"cash-{cp['txn_id']}", "source": "vyapar", "created_at": now_iso()}
+        if not opts.dry_run:
+            await (db.payments_in if cp["is_in"] else db.payments_out).update_one(
+                {"vyapar_id": pdoc["vyapar_id"]}, {"$setOnInsert": pdoc}, upsert=True)
+        res["cash_on_doc_payments"] += 1
+
+    # --- Expenses (txn_type 7; category via txn_category_id -> kb_names name_type=2) ---
+    if getattr(opts, "expenses", True):
+        cat_map: Dict[int, Dict[str, str]] = {}
+        try:
+            cur.execute('SELECT name_id, full_name FROM "kb_names" WHERE name_type = 2')
+            for r in cur.fetchall():
+                nm = (r["full_name"] or "").strip()
+                if not nm:
+                    continue
+                existing = await db.expense_categories.find_one({"name": nm}, {"_id": 0, "id": 1})
+                if existing:
+                    cid = existing["id"]
+                else:
+                    cid = new_id()
+                    if not opts.dry_run:
+                        await db.expense_categories.insert_one(
+                            {"id": cid, "name": nm, "classification": "indirect", "created_at": now_iso()})
+                cat_map[int(r["name_id"])] = {"id": cid, "name": nm}
+        except Exception:
+            pass
+        cur.execute("SELECT * FROM kb_transactions WHERE txn_type = 7")
+        for r in cur.fetchall():
+            e_cash = float(r["txn_cash_amount"] or 0); e_bal = float(r["txn_balance_amount"] or 0)
+            cat_id = int(r["txn_category_id"]) if r["txn_category_id"] is not None else -1
+            cat = cat_map.get(cat_id, {"id": "", "name": "Other"})
+            edoc = {"id": new_id(), "code": f"EXP-VY-{r['txn_id']}",
+                    "category_id": cat["id"], "category_name": cat["name"],
+                    "party_id": "", "party_name": "",
+                    "date": str(r["txn_date"] or "")[:19] or now_iso(),
+                    "amount": round(e_cash + e_bal, 2), "paid_amount": round(e_cash, 2),
+                    "payment_type": _map_ptype(r["txn_payment_type_id"]),
+                    "ref_no": (r["txn_ref_number_char"] or "").strip(),
+                    "notes": (r["txn_description"] or "").strip(),
+                    "status": "Paid" if e_bal <= 0.01 else ("Partial" if e_cash > 0.01 else "Unpaid"),
+                    "vyapar_id": str(r["txn_id"]), "source": "vyapar",
+                    "created_at": str(r["txn_date_created"] or now_iso())}
+            if not opts.dry_run:
+                await db.expenses.update_one({"vyapar_id": edoc["vyapar_id"]}, {"$setOnInsert": edoc}, upsert=True)
+            res["expenses"] += 1
+
+    # --- Party opening balances: gap between Vyapar's live party balance and ERP-derived outstanding ---
+    # (covers pre-history opening balances, advances, unlinked payments, credit-note effects)
+    derived_open: Dict[str, Dict[str, float]] = {"customer": {}, "supplier": {}}
+    for v in inv_open.values():
+        if v[2] > 0.01:
+            derived_open[v[0]][v[1]] = derived_open[v[0]].get(v[1], 0.0) + v[2]
+    if opts.parties:
+        try:
+            cur.execute('SELECT full_name, amount FROM "kb_names" WHERE name_type = 1')
+            for r in cur.fetchall():
+                nm = (r["full_name"] or "").strip()
+                if not nm:
+                    continue
+                vy = float(r["amount"] or 0)
+                # Handle BOTH sides for every party (dual-role parties + zero-balance parties with open
+                # docs + advances held with the "other" side, e.g. a supplier we overpaid = receivable).
+                # Upsert so the record is created on whichever side must carry the balance.
+                cust_diff = round(max(vy, 0.0) - derived_open["customer"].get(nm, 0.0), 2)
+                if abs(cust_diff) > 0.01:
+                    if not opts.dry_run:
+                        await db.customers.update_one(
+                            {"name": nm},
+                            {"$set": {"opening_balance": cust_diff, "vyapar_balance": vy},
+                             "$setOnInsert": {"id": new_id(), "source": "vyapar", "created_at": now_iso()}},
+                            upsert=True)
+                    res["opening_balances"] += 1
+                supp_diff = round(max(-vy, 0.0) - derived_open["supplier"].get(nm, 0.0), 2)
+                if abs(supp_diff) > 0.01:
+                    if not opts.dry_run:
+                        await db.suppliers.update_one(
+                            {"name": nm},
+                            {"$set": {"opening_balance": supp_diff, "vyapar_balance": vy},
+                             "$setOnInsert": {"id": new_id(), "source": "vyapar", "created_at": now_iso()}},
+                            upsert=True)
+                    res["opening_balances"] += 1
+        except Exception:
+            pass
 
     # Refresh paid/unpaid status now that allocations exist
     if not opts.dry_run:
@@ -8447,11 +8584,25 @@ async def dashboard_receivable_payable(user=Depends(get_current_user)):
             if b.get("supplier_id"):
                 payable_parties.add(b["supplier_id"])
 
+    # Party opening balances carried from Vyapar import (not represented by open documents)
+    opening_recv = 0.0
+    for d in await db.customers.find({"opening_balance": {"$exists": True, "$ne": 0}},
+                                     {"_id": 0, "opening_balance": 1}).to_list(5000):
+        opening_recv += float(d.get("opening_balance") or 0)
+    opening_pay = 0.0
+    for d in await db.suppliers.find({"opening_balance": {"$exists": True, "$ne": 0}},
+                                     {"_id": 0, "opening_balance": 1}).to_list(5000):
+        opening_pay += float(d.get("opening_balance") or 0)
+    receivable_total += opening_recv
+    payable_total += opening_pay
+
     return {
         "receivable_total": round(receivable_total, 2),
         "receivable_parties_count": len(receivable_parties),
         "payable_total": round(payable_total, 2),
         "payable_parties_count": len(payable_parties),
+        "opening_receivable": round(opening_recv, 2),
+        "opening_payable": round(opening_pay, 2),
     }
 
 @api.get("/reports/overdue")
@@ -8654,9 +8805,13 @@ async def report_balance_sheet(as_of: str = "", user=Depends(get_current_user)):
     invs = await db.invoices.find({}, {"_id": 0}).to_list(50000)
     sin = await _settled_per_invoice()
     receivable = sum(max(float(i.get("total", 0)) - sin.get(i.get("id", ""), 0), 0) for i in invs if str(i.get("date", ""))[:10] <= as_of)
+    receivable += sum(float(d.get("opening_balance") or 0) for d in await db.customers.find(
+        {"opening_balance": {"$exists": True, "$ne": 0}}, {"_id": 0, "opening_balance": 1}).to_list(5000))
     bills = await db.vendor_bills.find({}, {"_id": 0}).to_list(50000)
     sbl = await _settled_per_bill()
     payable = sum(max(float(b.get("total", 0)) - sbl.get(b.get("id", ""), 0), 0) for b in bills if str(b.get("date", ""))[:10] <= as_of)
+    payable += sum(float(d.get("opening_balance") or 0) for d in await db.suppliers.find(
+        {"opening_balance": {"$exists": True, "$ne": 0}}, {"_id": 0, "opening_balance": 1}).to_list(5000))
     items = await db.items.find({}, {"_id": 0}).to_list(50000)
     inventory = sum(float(it.get("qty_on_hand", 0) or 0) * float(it.get("unit_cost", 0) or 0) for it in items)
     out_gst = sum(float(i.get("cgst", 0)) + float(i.get("sgst", 0)) + float(i.get("igst", 0)) for i in invs if str(i.get("date", ""))[:10] <= as_of)
