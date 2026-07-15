@@ -2540,6 +2540,91 @@ async def transfer_stock(t: StockTransfer, user=Depends(get_current_user)):
     await db.movements.insert_one(doc)
     return {"ok": True, "qty_by_location": by_loc}
 
+# ---------------------------------------------------------------------------
+# Stock Adjustments — add/reduce stock WITH A REASON (Vyapar parity: opening
+# stock, damage, correction, scrap...). Auditable register + movement trail.
+# ---------------------------------------------------------------------------
+STOCK_ADJ_REASONS = ["Opening Stock", "Physical Count Correction", "Damaged", "Lost / Theft",
+                     "Scrap", "Sample / Testing", "Internal Use", "Other"]
+
+class StockAdjustmentIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    item_id: str
+    adj_type: Literal["add", "reduce"]
+    qty: float
+    reason: str = "Other"
+    at_price: float = 0            # optional value per unit for the adjustment
+    location: Optional[str] = ""
+    date: Optional[str] = ""
+    notes: Optional[str] = ""
+
+@api.get("/inventory/adjustment-reasons")
+async def get_adjustment_reasons(user=Depends(get_current_user)):
+    return {"reasons": STOCK_ADJ_REASONS}
+
+@api.post("/inventory/adjustments")
+async def create_stock_adjustment(a: StockAdjustmentIn, user=Depends(get_current_user)):
+    item = await db.items.find_one({"id": a.item_id}, {"_id": 0})
+    if not item:
+        raise HTTPException(404, "Item not found")
+    qty = float(a.qty)
+    if qty <= 0:
+        raise HTTPException(400, "Quantity must be greater than zero")
+    signed = qty if a.adj_type == "add" else -qty
+    new_oh = float(item.get("qty_on_hand") or 0) + signed
+    by_loc = dict(item.get("qty_by_location") or {})
+    loc = (a.location or "").strip()
+    if loc:
+        by_loc[loc] = float(by_loc.get(loc, 0)) + signed
+    code = await gen_code("ADJ", "stock_adjustment")
+    doc = {"id": new_id(), "code": code, "item_id": a.item_id, "item_sku": item["sku"],
+           "item_name": item["name"], "adj_type": a.adj_type, "qty": qty,
+           "reason": (a.reason or "Other").strip(), "at_price": float(a.at_price or 0),
+           "value": round(qty * float(a.at_price or 0), 2), "location": loc,
+           "date": (a.date or now_iso()[:10]), "notes": (a.notes or "").strip(),
+           "qty_before": float(item.get("qty_on_hand") or 0), "qty_after": new_oh,
+           "by_user": user.get("name", ""), "created_at": now_iso()}
+    await db.items.update_one({"id": a.item_id}, {"$set": {"qty_on_hand": new_oh, "qty_by_location": by_loc}})
+    await db.stock_adjustments.insert_one(doc)
+    # movement trail entry
+    mv = StockMovement(item_id=a.item_id, item_sku=item["sku"], item_name=item["name"],
+                       type=("in" if a.adj_type == "add" else "out"), qty=qty, location=loc,
+                       ref=code, notes=f"Stock adjustment: {doc['reason']}",
+                       by_user=user.get("name", "")).model_dump()
+    await db.movements.insert_one(mv)
+    await write_audit(user.get("name", ""), "stock_adjustment", "inventory", doc["id"],
+                      {"item": item["name"], "type": a.adj_type, "qty": qty, "reason": doc["reason"]})
+    return serialize(doc)
+
+@api.get("/inventory/adjustments")
+async def list_stock_adjustments(q: Optional[str] = None, user=Depends(get_current_user)):
+    docs = await db.stock_adjustments.find({}, {"_id": 0}).sort("created_at", -1).to_list(5000)
+    if q:
+        ql = q.lower()
+        docs = [d for d in docs if ql in (d.get("item_name", "") + d.get("item_sku", "") + d.get("reason", "") + d.get("code", "")).lower()]
+    return docs
+
+@api.delete("/inventory/adjustments/{aid}")
+async def delete_stock_adjustment(aid: str, user=Depends(require_roles("admin", "manager"))):
+    doc = await db.stock_adjustments.find_one({"id": aid}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Adjustment not found")
+    # reverse the stock effect so delete = undo
+    item = await db.items.find_one({"id": doc["item_id"]}, {"_id": 0})
+    if item:
+        signed = -float(doc["qty"]) if doc["adj_type"] == "add" else float(doc["qty"])
+        by_loc = dict(item.get("qty_by_location") or {})
+        if doc.get("location"):
+            by_loc[doc["location"]] = float(by_loc.get(doc["location"], 0)) + signed
+        await db.items.update_one({"id": doc["item_id"]},
+                                  {"$set": {"qty_on_hand": float(item.get("qty_on_hand") or 0) + signed,
+                                            "qty_by_location": by_loc}})
+    _ = await _recycle("stock_adjustments", "Stock Adjustment", doc, user) if "_recycle" in globals() else None
+    await db.stock_adjustments.delete_one({"id": aid})
+    await write_audit(user.get("name", ""), "stock_adjustment_deleted", "inventory", aid,
+                      {"item": doc.get("item_name"), "qty": doc.get("qty"), "reversed": True})
+    return {"ok": True, "reversed": True}
+
 BILL_EXTRACT_PROMPT = (
     "You are an accounts clerk for a precision-machining company. Read this purchase bill / "
     "tax invoice and extract its data. Return ONLY a JSON object, no prose: "
@@ -7896,6 +7981,109 @@ async def vyapar_import(payload: VyaparImportIn, user=Depends(require_roles("adm
     if payload.dry_run: summary += " (dry run)"
     if details.get("company_seeded"): summary += " · company details auto-filled"
     return {"ok": True, "summary": summary, "details": details, "dry_run": payload.dry_run}
+
+
+class VyaparReconcileIn(BaseModel):
+    token: str
+
+@api.post("/integrations/vyapar/reconcile")
+async def vyapar_reconcile(payload: VyaparReconcileIn, user=Depends(require_roles("admin"))):
+    """Compare live ERP data against an uploaded Vyapar backup — the cutover safety check.
+    Every row shows Vyapar value vs ERP value; all-green means nothing was lost in import."""
+    import sqlite3
+    meta = await db.vyapar_uploads.find_one({"id": payload.token, "user_id": user["id"]}, {"_id": 0})
+    if not meta:
+        raise HTTPException(404, "Upload not found. Re-upload the file.")
+    path = Path(meta["path"])
+    if not path.exists():
+        raise HTTPException(404, "Uploaded file is no longer on disk. Please re-upload.")
+    kind = meta.get("kind")
+    if kind in ("zip", "zip_sqlite"):
+        import zipfile, tempfile
+        with zipfile.ZipFile(path) as z:
+            inner = [n for n in z.namelist() if n.endswith(".db") or n.endswith(".sqlite") or n.endswith(".vyp")]
+            if not inner:
+                raise HTTPException(400, "Archive doesn't contain a SQLite database.")
+            tmpd = Path(tempfile.mkdtemp())
+            z.extract(inner[0], tmpd)
+            path = tmpd / inner[0]
+            kind = "sqlite"
+    if kind != "sqlite":
+        raise HTTPException(400, "Reconciliation needs a .vyb backup (SQLite), not an Excel export.")
+
+    con = sqlite3.connect(str(path)); con.row_factory = sqlite3.Row
+    cur = con.cursor()
+
+    def vy_count_total(ttypes):
+        q = ",".join(str(t) for t in ttypes)
+        cur.execute(f"SELECT COUNT(*) n, ROUND(SUM(COALESCE(txn_cash_amount,0)+COALESCE(txn_balance_amount,0)),2) s FROM kb_transactions WHERE txn_type IN ({q})")
+        r = cur.fetchone()
+        return int(r["n"] or 0), float(r["s"] or 0)
+
+    async def erp_count_total(coll):
+        docs = await coll.find({"source": "vyapar"}, {"_id": 0, "total": 1, "amount": 1}).to_list(50000)
+        return len(docs), round(sum(float(d.get("total", d.get("amount", 0)) or 0) for d in docs), 2)
+
+    rows: List[Dict[str, Any]] = []
+    async def add_row(metric, vy_n, vy_s, coll):
+        n, s = await erp_count_total(coll)
+        rows.append({"metric": metric, "vyapar_count": vy_n, "erp_count": n,
+                     "vyapar_total": round(vy_s, 2), "erp_total": s,
+                     "ok": (vy_n == n) and abs(vy_s - s) < 1.0})
+
+    await add_row("Sale Invoices", *vy_count_total([1]), db.invoices)
+    await add_row("Purchase Bills", *vy_count_total([2]), db.vendor_bills)
+    await add_row("Credit Notes (Sale Returns)", *vy_count_total([21]), db.credit_notes)
+    await add_row("Purchase Returns", *vy_count_total([23]), db.purchase_returns)
+    await add_row("Quotations", *vy_count_total([27]), db.quotations)
+    await add_row("Sale Orders", *vy_count_total([24]), db.sale_orders)
+    await add_row("Purchase Orders", *vy_count_total([28]), db.purchase_orders)
+    await add_row("Delivery Challans", *vy_count_total([30]), db.delivery_challans)
+    await add_row("Proforma Invoices", *vy_count_total([65]), db.proforma_invoices)
+    await add_row("Expenses", *vy_count_total([7]), db.expenses)
+
+    # Payments: ERP side excludes synthetic cash-on-doc records (vyapar_id starts with "cash-")
+    for label, tt, coll in (("Payments In", 3, db.payments_in), ("Payments Out", 4, db.payments_out)):
+        vy_n, vy_s = vy_count_total([tt])
+        docs = await coll.find({"source": "vyapar", "vyapar_id": {"$not": {"$regex": "^cash-"}}},
+                               {"_id": 0, "amount": 1}).to_list(50000)
+        s = round(sum(float(d.get("amount") or 0) for d in docs), 2)
+        rows.append({"metric": label, "vyapar_count": vy_n, "erp_count": len(docs),
+                     "vyapar_total": round(vy_s, 2), "erp_total": s,
+                     "ok": (vy_n == len(docs)) and abs(vy_s - s) < 1.0})
+
+    # Parties + items + stock
+    cur.execute("SELECT COUNT(*) FROM kb_names WHERE name_type = 1")
+    vy_parties = int(cur.fetchone()[0] or 0)
+    erp_cust = await db.customers.count_documents({"source": "vyapar"})
+    erp_supp = await db.suppliers.count_documents({"source": "vyapar"})
+    rows.append({"metric": "Parties (ERP: customers + suppliers, dual-role counted twice)",
+                 "vyapar_count": vy_parties, "erp_count": erp_cust + erp_supp,
+                 "vyapar_total": None, "erp_total": None, "ok": (erp_cust + erp_supp) >= vy_parties})
+    cur.execute("SELECT COUNT(*) n, ROUND(SUM(COALESCE(item_stock_quantity,0)),2) q FROM kb_items WHERE item_is_active IS NULL OR item_is_active != 0")
+    r = cur.fetchone(); vy_items, vy_qty = int(r["n"] or 0), float(r["q"] or 0)
+    idocs = await db.items.find({"source": "vyapar"}, {"_id": 0, "qty_on_hand": 1}).to_list(50000)
+    erp_qty = round(sum(float(d.get("qty_on_hand") or 0) for d in idocs), 2)
+    rows.append({"metric": "Items / total stock qty", "vyapar_count": vy_items, "erp_count": len(idocs),
+                 "vyapar_total": round(vy_qty, 2), "erp_total": erp_qty,
+                 "ok": abs(vy_items - len(idocs)) <= 1 and abs(vy_qty - erp_qty) < 1.0})
+
+    # THE money check: receivable/payable (ERP calc incl. opening balances) vs Vyapar live party balances
+    cur.execute("SELECT SUM(CASE WHEN amount>0 THEN amount ELSE 0 END) r, SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END) p FROM kb_names WHERE name_type = 1")
+    r = cur.fetchone(); vy_recv, vy_pay = float(r["r"] or 0), float(r["p"] or 0)
+    rp = await dashboard_receivable_payable(user)  # reuse the live calc
+    rows.append({"metric": "RECEIVABLE (outstanding)", "vyapar_count": None, "erp_count": None,
+                 "vyapar_total": round(vy_recv, 2), "erp_total": rp["receivable_total"],
+                 "ok": abs(vy_recv - rp["receivable_total"]) < 1.0})
+    rows.append({"metric": "PAYABLE (outstanding)", "vyapar_count": None, "erp_count": None,
+                 "vyapar_total": round(vy_pay, 2), "erp_total": rp["payable_total"],
+                 "ok": abs(vy_pay - rp["payable_total"]) < 1.0})
+
+    con.close()
+    all_ok = all(x["ok"] for x in rows)
+    await write_audit(user["name"], "vyapar_reconcile", "import", payload.token, {"all_ok": all_ok})
+    return {"all_ok": all_ok, "rows": rows,
+            "note": "Counts compare ERP records imported from Vyapar (source=vyapar). Money rows compare full ERP outstanding (incl. opening balances) to Vyapar's live party balances."}
 
 
 
