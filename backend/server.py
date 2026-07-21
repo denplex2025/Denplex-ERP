@@ -8498,7 +8498,30 @@ async def fixture_concept_pdf(body: dict, user=Depends(get_current_user)):
     el = [Paragraph("<b>Fixture Concept Brief</b>", ss["Title"]),
           Paragraph(f"Denplex Engineering Company &nbsp;·&nbsp; {meta.get('part_name','')} &nbsp;·&nbsp; {c.get('fixture_type','')}", ss["Normal"]),
           Spacer(1, 4 * mm)]
-    # Optional concept sketch (rasterized PNG passed from the browser)
+    # Real rendered views of the actual uploaded part (from the STEP/CAD service) — genuine geometry,
+    # not an AI guess. Shown first since it's the most trustworthy picture in the document.
+    cad_views_b64 = (body or {}).get("cad_views_base64") or []
+    if cad_views_b64:
+        try:
+            from reportlab.platypus import Image as RLImage
+            import base64 as _b64
+            labels = ["Isometric", "Top", "Right"]
+            thumbs = []
+            for i, v in enumerate(cad_views_b64[:3]):
+                png = _b64.b64decode((v or "").split(",")[-1])
+                img = RLImage(io.BytesIO(png))
+                maxw = 54 * mm
+                if img.drawWidth > maxw:
+                    ratio = maxw / img.drawWidth; img.drawWidth = maxw; img.drawHeight *= ratio
+                thumbs.append([img, Paragraph(labels[i] if i < len(labels) else f"View {i+1}", ss["Normal"])])
+            if thumbs:
+                trow = [[t[0] for t in thumbs], [t[1] for t in thumbs]]
+                t = Table(trow, colWidths=[58 * mm] * len(thumbs))
+                t.setStyle(TableStyle([("ALIGN", (0, 0), (-1, -1), "CENTER"), ("VALIGN", (0, 0), (-1, -1), "MIDDLE")]))
+                el += [Paragraph("Actual part — rendered from the uploaded 3D file", h), t, Spacer(1, 4 * mm)]
+        except Exception:
+            pass
+    # Optional concept sketch (rasterized PNG passed from the browser) — AI-drawn schematic of the fixture
     spng = (body or {}).get("sketch_png_base64") or ""
     if spng:
         try:
@@ -8509,7 +8532,7 @@ async def fixture_concept_pdf(body: dict, user=Depends(get_current_user)):
             maxw = 170 * mm
             if img.drawWidth > maxw:
                 ratio = maxw / img.drawWidth; img.drawWidth = maxw; img.drawHeight *= ratio
-            el += [Paragraph("Concept sketch", h), img, Spacer(1, 4 * mm)]
+            el += [Paragraph("Concept sketch (AI schematic — not to scale)", h), img, Spacer(1, 4 * mm)]
         except Exception:
             pass
     if c.get("summary"):
