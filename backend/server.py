@@ -8207,8 +8207,11 @@ async def vyapar_import_job_status(job_id: str, user=Depends(require_roles("admi
     return job
 
 
+class _VyaparBackfillIn(BaseModel):
+    token: str
+
 @api.post("/integrations/vyapar/backfill-outstanding")
-async def vyapar_backfill_outstanding(payload: VyaparReconcileIn, user=Depends(require_roles("admin"))):
+async def vyapar_backfill_outstanding(payload: _VyaparBackfillIn, user=Depends(require_roles("admin"))):
     """One-off migration for invoices/bills imported before the 'outstanding' field existed:
     sets outstanding = Vyapar's own live txn_current_balance (ground truth) via $set, matched
     by vyapar_id. Safe to re-run. Does not touch anything else (no re-insert, no duplication)."""
