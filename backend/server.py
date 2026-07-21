@@ -3519,36 +3519,72 @@ async def get_invoice(iid: str, user=Depends(get_current_user)):
         raise HTTPException(404, "Invoice not found")
     return inv
 
-# ---------------- E-way bill — GSP auto-filing scaffold ----------------
-# Files e-way bills to the government NIC system via a GST Suvidha Provider (GSP).
-# SECRETS are read from Railway env vars (preferred) so keys never live in code/db:
-#   EWAY_GSP_BASE_URL, EWAY_GSP_CLIENT_ID, EWAY_GSP_CLIENT_SECRET,
-#   EWAY_GSP_USERNAME, EWAY_GSP_PASSWORD   (GSTIN comes from company settings / COMPANY_GSTIN)
-# Non-secret routing (auth/generate paths, provider name) may be tuned in db.settings id="eway_gsp"
-# once the chosen GSP's API docs are known. The payload below follows the standard NIC EWB
-# "generate" JSON; a specific GSP may rename a couple of keys — adjust here when wiring the real one.
+# ---------------- E-way bill / e-Invoice — Adaequare GSP (Enriched APIs) ----------------
+# Adaequare Info Pvt Ltd is our chosen GSP (confirmed July 2026). Enriched APIs handle NIC/IRP
+# encryption+session management for us — we call Adaequare's own gateway with plain JSON.
+# SECRETS are read from Railway env vars (never stored in code/db):
+#   EWAY_GSP_CLIENT_ID      -> Adaequare "gspappid"      (from the App created on gsp.adaequare.com)
+#   EWAY_GSP_CLIENT_SECRET  -> Adaequare "gspappsecret"
+#   EWAY_GSP_USERNAME       -> the API username created on einvoice1.gst.gov.in / ewaybillgst.gov.in
+#                              (Registration -> For GSP -> select "Adaequare Info Private Limited")
+#   EWAY_GSP_PASSWORD       -> that API user's password
+#   EWAY_GSP_ENV            -> "staging" (default, sandbox) or "live" (production)
+#   COMPANY_GSTIN           -> falls back to Settings > company_gstin if unset
+# Non-secret overrides (rarely needed) may be tuned in db.settings id="eway_gsp".
+ADQ_BASE_URL = "https://gsp.adaequare.com"
+
 async def _eway_gsp_config() -> Dict[str, Any]:
     s = await get_setting("eway_gsp") or {}
     company = await get_setting("integrations") or {}
+    env = os.getenv("EWAY_GSP_ENV", s.get("env", "staging")).strip().lower()
     return {
-        "base_url": os.getenv("EWAY_GSP_BASE_URL", s.get("base_url", "")),
-        "auth_path": os.getenv("EWAY_GSP_AUTH_PATH", s.get("auth_path", "/eway/authenticate")),
-        "generate_path": os.getenv("EWAY_GSP_GENERATE_PATH", s.get("generate_path", "/eway/generate")),
-        "client_id": os.getenv("EWAY_GSP_CLIENT_ID", s.get("client_id", "")),
-        "client_secret": os.getenv("EWAY_GSP_CLIENT_SECRET", s.get("client_secret", "")),
-        "username": os.getenv("EWAY_GSP_USERNAME", s.get("username", "")),
+        "base_url": os.getenv("EWAY_GSP_BASE_URL", s.get("base_url", ADQ_BASE_URL)).rstrip("/"),
+        "env": "live" if env == "live" else "staging",
+        "prefix": "/enriched" if env == "live" else "/test/enriched",
+        "client_id": os.getenv("EWAY_GSP_CLIENT_ID", s.get("client_id", "")),        # gspappid
+        "client_secret": os.getenv("EWAY_GSP_CLIENT_SECRET", s.get("client_secret", "")),  # gspappsecret
+        "username": os.getenv("EWAY_GSP_USERNAME", s.get("username", "")),           # API username on govt portal
         "password": os.getenv("EWAY_GSP_PASSWORD", s.get("password", "")),
         "gstin": os.getenv("COMPANY_GSTIN", company.get("company_gstin", "")),
-        "provider": s.get("provider", os.getenv("EWAY_GSP_PROVIDER", "")),
+        "provider": "Adaequare",
     }
 
 def _gsp_ready(c: Dict[str, Any]) -> bool:
-    return bool(c.get("base_url") and c.get("client_id") and c.get("username") and c.get("gstin"))
+    return bool(c.get("base_url") and c.get("client_id") and c.get("client_secret")
+                and c.get("username") and c.get("password") and c.get("gstin"))
 
 @api.get("/eway/gsp-status")
 async def eway_gsp_status(user=Depends(get_current_user)):
     c = await _eway_gsp_config()
-    return {"configured": _gsp_ready(c), "provider": c.get("provider", ""), "gstin": c.get("gstin", "")}
+    return {"configured": _gsp_ready(c), "provider": c.get("provider", ""), "gstin": c.get("gstin", ""), "env": c.get("env", "")}
+
+async def _adq_token(c: Dict[str, Any]) -> str:
+    """Get an Adaequare GSP access token, cached in db.settings until near expiry.
+    Per their docs the token is valid ~6h for Enriched API calls; we refresh 5 min early."""
+    cached = await get_setting("eway_gsp_token") or {}
+    if cached.get("token") and cached.get("expires_at", "") > now_iso():
+        return cached["token"]
+    async with httpx.AsyncClient(timeout=30) as cl:
+        r = await cl.post(f"{c['base_url']}/gsp/authenticate?action=GSP&grant_type=token",
+                          headers={"gspappid": c["client_id"], "gspappsecret": c["client_secret"]})
+        r.raise_for_status()
+        j = r.json()
+    token = j.get("access_token", "")
+    if not token:
+        raise HTTPException(502, f"Adaequare auth did not return a token: {str(j)[:300]}")
+    expires_in = int(j.get("expires_in") or 21600)  # default 6h
+    expires_at = (datetime.utcnow() + timedelta(seconds=max(expires_in - 300, 60))).isoformat()
+    await set_setting("eway_gsp_token", {"token": token, "expires_at": expires_at})
+    return token
+
+def _adq_ewb_headers(c: Dict[str, Any], token: str) -> Dict[str, str]:
+    return {"Content-Type": "application/json", "username": c["username"], "password": c["password"],
+            "gstin": c["gstin"], "requestid": new_id(), "Authorization": f"Bearer {token}"}
+
+def _adq_ei_headers(c: Dict[str, Any], token: str) -> Dict[str, str]:
+    # E-Invoice APIs use "user_name" (underscore) per Adaequare docs, unlike EWB's "username"
+    return {"Content-Type": "application/json", "user_name": c["username"], "password": c["password"],
+            "gstin": c["gstin"], "requestid": new_id(), "Authorization": f"Bearer {token}"}
 
 def _ddmmyyyy(s: str) -> str:
     try:
@@ -3556,28 +3592,46 @@ def _ddmmyyyy(s: str) -> str:
     except Exception:
         return datetime.utcnow().strftime("%d/%m/%Y")
 
+def _gstin_state_code(gstin: str) -> int:
+    """First 2 digits of a GSTIN are the numeric state code (e.g. 24 = Gujarat)."""
+    g = (gstin or "").strip()
+    try:
+        return int(g[:2])
+    except Exception:
+        return 0
+
 def _build_nic_ewb_payload(inv: Dict[str, Any], d: Dict[str, Any], company: Dict[str, Any]) -> Dict[str, Any]:
-    """Standard NIC EWB 'generate' JSON, assembled from the invoice + e-way form."""
+    """Adaequare enRiched EWB 'GENEWAYBILL' JSON — field names verified against their API doc sample."""
     inter = bool(inv.get("is_interstate"))
+    from_gstin = company.get("company_gstin", "")
+    to_gstin = inv.get("customer_gstin", "") or d.get("ship_gstin", "")
+    from_state = _gstin_state_code(from_gstin)
+    to_state = _gstin_state_code(to_gstin) or from_state
     items = [{
-        "productName": l.get("description", ""), "hsnCode": l.get("hsn", "") or "",
-        "quantity": l.get("qty", 0), "qtyUnit": (l.get("unit", "NOS") or "NOS").upper()[:3],
+        "productName": (l.get("description", "") or "")[:100], "productDesc": (l.get("description", "") or "")[:100],
+        "hsnCode": int(re.sub(r"\D", "", str(l.get("hsn", "") or "0")) or 0),
+        "quantity": float(l.get("qty", 0)), "qtyUnit": (l.get("unit", "NOS") or "NOS").upper()[:3],
         "taxableAmount": round(float(l.get("qty", 0)) * float(l.get("rate", 0)), 2),
         "sgstRate": (0 if inter else float(l.get("gst_rate", 0)) / 2),
         "cgstRate": (0 if inter else float(l.get("gst_rate", 0)) / 2),
         "igstRate": (float(l.get("gst_rate", 0)) if inter else 0),
+        "cessRate": 0, "cessAdvol": 0,
     } for l in (inv.get("lines", []) or [])]
     return {
-        "supplyType": "O", "subSupplyType": "1", "docType": "INV",
-        "docNo": inv.get("code", ""), "docDate": _ddmmyyyy(inv.get("date", "")),
-        "fromGstin": company.get("company_gstin", ""), "fromTrdName": company.get("company_name", ""),
-        "fromAddr1": d.get("dispatch_address", ""), "fromPlace": d.get("dispatch_state", ""),
-        "fromPincode": d.get("dispatch_pin", ""), "fromStateCode": d.get("dispatch_state", ""),
-        "toGstin": inv.get("customer_gstin", "") or d.get("ship_gstin", ""), "toTrdName": inv.get("customer_name", ""),
-        "toAddr1": d.get("ship_address", ""), "toPlace": d.get("ship_state", ""),
-        "toPincode": d.get("ship_pin", ""), "toStateCode": d.get("ship_state", ""),
+        "supplyType": "O", "subSupplyType": "1", "subSupplyDesc": "",
+        "docType": "INV", "docNo": inv.get("code", ""), "docDate": _ddmmyyyy(inv.get("date", "")),
+        "fromGstin": from_gstin, "fromTrdName": company.get("company_name", ""),
+        "fromAddr1": (d.get("dispatch_address", "") or company.get("company_address", ""))[:120], "fromAddr2": "",
+        "fromPlace": d.get("dispatch_place", "") or d.get("dispatch_state", ""),
+        "fromPincode": int(re.sub(r"\D", "", str(d.get("dispatch_pin", "") or "0")) or 0),
+        "actFromStateCode": from_state, "fromStateCode": from_state,
+        "toGstin": to_gstin, "toTrdName": inv.get("customer_name", ""),
+        "toAddr1": (d.get("ship_address", "") or "")[:120], "toAddr2": "",
+        "toPlace": d.get("ship_place", "") or d.get("ship_state", ""),
+        "toPincode": int(re.sub(r"\D", "", str(d.get("ship_pin", "") or "0")) or 0),
+        "actToStateCode": to_state, "toStateCode": to_state,
         "totalValue": inv.get("subtotal", 0), "cgstValue": inv.get("cgst", 0), "sgstValue": inv.get("sgst", 0),
-        "igstValue": inv.get("igst", 0), "totInvValue": inv.get("total", 0),
+        "igstValue": inv.get("igst", 0), "cessValue": 0, "totInvValue": inv.get("total", 0),
         "transporterId": d.get("transporter_id", ""), "transporterName": d.get("transporter_name", ""),
         "transMode": {"Road": "1", "Rail": "2", "Air": "3", "Ship": "4"}.get(d.get("mode", "Road"), "1"),
         "transDistance": str(int(float(d.get("distance_km", 0) or 0))),
@@ -3590,74 +3644,117 @@ def _build_nic_ewb_payload(inv: Dict[str, Any], d: Dict[str, Any], company: Dict
 
 @api.post("/invoices/{iid}/eway-bill/file")
 async def file_eway_to_nic(iid: str, user=Depends(require_roles("admin", "manager", "accountant", "ca"))):
-    """One-click file an e-way bill to NIC via the configured GSP. Needs GSP credentials in the server config."""
+    """One-click file an e-way bill via Adaequare GSP (enRiched EWB API, action=GENEWAYBILL)."""
     c = await _eway_gsp_config()
     if not _gsp_ready(c):
-        raise HTTPException(400, "E-way GSP not configured. Add your GSP API credentials (base URL + client id/secret + "
-                                 "API username/password) to the server config, then retry. Until then, record the number manually.")
+        raise HTTPException(400, "GSP not configured. Add Adaequare credentials (client id/secret + API "
+                                 "username/password + GSTIN) in Railway env vars, then retry.")
     inv = await db.invoices.find_one({"id": iid}, {"_id": 0})
     if not inv:
         raise HTTPException(404, "Invoice not found")
+    if inv.get("eway_bill_no"):
+        raise HTTPException(400, "This invoice already has an e-way bill number. Cancel it first to regenerate.")
     company = await get_setting("integrations") or {}
     details = inv.get("eway_details", {}) or {}
     payload = _build_nic_ewb_payload(inv, details, company)
     try:
+        token = await _adq_token(c)
         async with httpx.AsyncClient(timeout=30) as cl:
-            auth = await cl.post(c["base_url"].rstrip("/") + c["auth_path"], json={
-                "client_id": c["client_id"], "client_secret": c["client_secret"],
-                "username": c["username"], "password": c["password"], "gstin": c["gstin"]})
-            auth.raise_for_status()
-            ad = auth.json()
-            token = ad.get("access_token") or ad.get("authtoken") or ad.get("token") or ""
-            headers = {"Authorization": f"Bearer {token}", "gstin": c["gstin"], "Content-Type": "application/json"}
-            gen = await cl.post(c["base_url"].rstrip("/") + c["generate_path"], headers=headers, json=payload)
+            gen = await cl.post(f"{c['base_url']}{c['prefix']}/ewb/ewayapi?action=GENEWAYBILL",
+                                headers=_adq_ewb_headers(c, token), json=payload)
+            gd = gen.json() if gen.content else {}
             gen.raise_for_status()
-            gd = gen.json()
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(502, f"GSP call failed: {e}. Check your GSP credentials and endpoint paths.")
-    gdata = gd.get("data") if isinstance(gd.get("data"), dict) else {}
-    ewb_no = str(gd.get("ewayBillNo") or gd.get("ewbNo") or gdata.get("ewayBillNo") or "")
-    valid_upto = str(gd.get("validUpto") or gdata.get("validUpto") or "")
+        raise HTTPException(502, f"Adaequare EWB call failed: {e}. Response: {str(locals().get('gd', ''))[:300]}")
+    if not gd.get("success"):
+        raise HTTPException(502, f"Adaequare rejected the e-way bill: {gd.get('message') or gd}")
+    result = gd.get("result") or {}
+    ewb_no = str(result.get("ewayBillNo") or "")
+    valid_upto = str(result.get("validUpto") or "")
     if not ewb_no:
         raise HTTPException(502, f"GSP did not return an e-way bill number. Response: {str(gd)[:300]}")
     upd = {"eway_bill_no": ewb_no, "eway_generated_at": datetime.utcnow().date().isoformat(),
            "eway_valid_until": valid_upto[:10] if valid_upto else "", "eway_details": {**details, "gsp_response": gd}}
     await db.invoices.update_one({"id": iid}, {"$set": upd})
-    return {"ok": True, "eway_bill_no": ewb_no, "valid_upto": valid_upto, "filed_via": c.get("provider") or "GSP"}
+    await write_audit(user.get("name", ""), "eway_bill_filed", "invoice", iid, {"eway_bill_no": ewb_no, "via": "Adaequare"})
+    return {"ok": True, "eway_bill_no": ewb_no, "valid_upto": valid_upto, "filed_via": "Adaequare"}
+
+class EwayCancelIn(BaseModel):
+    reason_code: str = "1"   # 1=Duplicate, 2=Data Entry Mistake, 3=Order Cancelled, 4=Other
+    reason_remark: str = ""
+
+@api.post("/invoices/{iid}/eway-bill/cancel")
+async def cancel_eway_via_gsp(iid: str, body: EwayCancelIn, user=Depends(require_roles("admin", "manager", "accountant", "ca"))):
+    """Cancel an already-filed e-way bill via Adaequare GSP (action=CANEWB). NIC only allows
+    cancellation within 24 hours of generation and only if not yet verified in transit."""
+    c = await _eway_gsp_config()
+    if not _gsp_ready(c):
+        raise HTTPException(400, "GSP not configured.")
+    inv = await db.invoices.find_one({"id": iid}, {"_id": 0})
+    if not inv or not inv.get("eway_bill_no"):
+        raise HTTPException(404, "No e-way bill on file for this invoice.")
+    try:
+        token = await _adq_token(c)
+        async with httpx.AsyncClient(timeout=30) as cl:
+            r = await cl.post(f"{c['base_url']}{c['prefix']}/ewb/ewayapi?action=CANEWB",
+                              headers=_adq_ewb_headers(c, token),
+                              json={"ewbNo": int(inv["eway_bill_no"]), "cancelRsnCode": int(body.reason_code),
+                                    "cancelRmrk": body.reason_remark or "Cancelled via ERP"})
+            gd = r.json() if r.content else {}
+            r.raise_for_status()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"Adaequare cancel call failed: {e}")
+    if not gd.get("success"):
+        raise HTTPException(502, f"Adaequare rejected the cancellation: {gd.get('message') or gd}")
+    await db.invoices.update_one({"id": iid}, {"$set": {"eway_bill_no": "", "eway_valid_until": "",
+                                                        "eway_details": {**(inv.get("eway_details") or {}), "cancel_response": gd}}})
+    await write_audit(user.get("name", ""), "eway_bill_cancelled", "invoice", iid, {"via": "Adaequare"})
+    return {"ok": True}
 
 # ---------------- e-Invoice (IRN + signed QR) ----------------
 def _gstin_state(gstin: str) -> str:
     return (gstin or "")[:2] if gstin else ""
 
 def _build_irp_einvoice_payload(inv: Dict[str, Any], company: Dict[str, Any], d: Dict[str, Any]) -> Dict[str, Any]:
-    """Standard IRP e-invoice (schema 1.1) JSON, assembled from the invoice."""
+    """IRP e-invoice schema 1.1 JSON for Adaequare's 'EI - Generate IRN' API — field names/casing
+    verified against their sample request (SlNo/PrdDesc/HsnCd/Qty/UnitPrice/AssAmt/GstRt.. camel-caps)."""
     inter = bool(inv.get("is_interstate"))
     seller_gstin = company.get("company_gstin", ""); buyer_gstin = inv.get("customer_gstin", "")
     items = []
     for i, l in enumerate(inv.get("lines", []) or [], 1):
-        qty = float(l.get("qty", 0)); rate = float(l.get("rate", 0)); gross = qty * rate
+        qty = float(l.get("qty", 0)); rate = float(l.get("rate", 0)); gross = round(qty * rate, 2)
         ass = round(gross - (gross * float(l.get("discount_pct", 0) or 0) / 100) - float(l.get("discount_amount", 0) or 0), 2)
         if ass < 0: ass = 0.0
         gstrt = float(l.get("gst_rate", 0)); gst = round(ass * gstrt / 100, 2)
-        items.append({"SlNo": str(i), "PrdDesc": l.get("description", ""), "IsServc": "N",
+        items.append({"SlNo": str(i), "PrdDesc": (l.get("description", "") or "")[:300], "IsServc": "N",
             "HsnCd": str(l.get("hsn", "") or ""), "Qty": qty, "Unit": (l.get("unit", "NOS") or "NOS").upper()[:3],
-            "UnitPrice": rate, "TotAmt": round(gross, 2), "AssAmt": ass, "GstRt": gstrt,
+            "UnitPrice": rate, "TotAmt": gross, "Discount": 0, "AssAmt": ass, "GstRt": gstrt,
             "IgstAmt": (gst if inter else 0), "CgstAmt": (0 if inter else round(gst / 2, 2)),
-            "SgstAmt": (0 if inter else round(gst / 2, 2)), "TotItemVal": round(ass + gst, 2)})
+            "SgstAmt": (0 if inter else round(gst / 2, 2)), "CesRt": 0, "CesAmt": 0, "CesNonAdvlAmt": 0,
+            "StateCesRt": 0, "StateCesAmt": 0, "OthChrg": 0, "TotItemVal": round(ass + gst, 2)})
+    pin = lambda v: int(re.sub(r"\D", "", str(v or "0")) or 0)
     return {
         "Version": "1.1",
-        "TranDtls": {"TaxSch": "GST", "SupTyp": "B2B", "RegRev": "N", "IgstOnIntra": "N"},
+        "TranDtls": {"TaxSch": "GST", "SupTyp": "B2B", "RegRev": "N", "EcmGstin": None, "IgstOnIntra": "N"},
         "DocDtls": {"Typ": "INV", "No": inv.get("code", ""), "Dt": _ddmmyyyy(inv.get("date", ""))},
-        "SellerDtls": {"Gstin": seller_gstin, "LglNm": company.get("company_name", ""),
-            "Addr1": d.get("dispatch_address", "") or company.get("company_address", ""),
-            "Loc": d.get("dispatch_state", "") or "", "Pin": d.get("dispatch_pin", "") or "", "Stcd": _gstin_state(seller_gstin)},
-        "BuyerDtls": {"Gstin": buyer_gstin, "LglNm": inv.get("customer_name", ""),
+        "SellerDtls": {"Gstin": seller_gstin, "LglNm": company.get("company_name", ""), "TrdNm": company.get("company_name", ""),
+            "Addr1": (d.get("dispatch_address", "") or company.get("company_address", ""))[:100],
+            "Loc": d.get("dispatch_place", "") or d.get("dispatch_state", "") or "",
+            "Pin": pin(d.get("dispatch_pin")), "Stcd": _gstin_state(seller_gstin),
+            "Ph": (company.get("company_phone", "") or "")[:12], "Em": company.get("company_email", "")},
+        "BuyerDtls": {"Gstin": buyer_gstin, "LglNm": inv.get("customer_name", ""), "TrdNm": inv.get("customer_name", ""),
             "Pos": _gstin_state(buyer_gstin) or _gstin_state(seller_gstin),
-            "Addr1": d.get("ship_address", "") or "", "Loc": d.get("ship_state", "") or "",
-            "Pin": d.get("ship_pin", "") or "", "Stcd": _gstin_state(buyer_gstin)},
+            "Addr1": (d.get("ship_address", "") or "")[:100],
+            "Loc": d.get("ship_place", "") or d.get("ship_state", "") or "",
+            "Pin": pin(d.get("ship_pin")), "Stcd": _gstin_state(buyer_gstin)},
         "ItemList": items,
         "ValDtls": {"AssVal": inv.get("subtotal", 0), "CgstVal": inv.get("cgst", 0), "SgstVal": inv.get("sgst", 0),
-            "IgstVal": inv.get("igst", 0), "TotInvVal": inv.get("total", 0)},
+            "IgstVal": inv.get("igst", 0), "CesVal": 0, "StCesVal": 0, "Discount": 0, "OthChrg": 0,
+            "RndOffAmt": inv.get("round_off", 0) or 0, "TotInvVal": inv.get("total", 0)},
     }
 
 class EInvoiceRecordIn(BaseModel):
@@ -3680,41 +3777,80 @@ async def record_einvoice(iid: str, body: EInvoiceRecordIn, user=Depends(get_cur
 
 @api.post("/invoices/{iid}/e-invoice/file")
 async def file_einvoice(iid: str, user=Depends(require_roles("admin", "manager", "accountant", "ca"))):
-    """One-click generate an e-invoice IRN via the configured GSP/IRP. Needs GSP credentials in server config."""
+    """One-click generate an e-invoice IRN via Adaequare GSP (EI - Generate IRN API)."""
     c = await _eway_gsp_config()
-    s = await get_setting("eway_gsp") or {}
-    einv_path = os.getenv("EINV_GSP_GENERATE_PATH", s.get("einvoice_path", "/einvoice/generate"))
     if not _gsp_ready(c):
-        raise HTTPException(400, "GSP not configured. Add your GSP API credentials in the server config to enable e-invoice filing.")
+        raise HTTPException(400, "GSP not configured. Add Adaequare credentials in Railway env vars to enable e-invoice filing.")
     inv = await db.invoices.find_one({"id": iid}, {"_id": 0})
     if not inv:
         raise HTTPException(404, "Invoice not found")
     if inv.get("invoice_type", "gst") != "gst":
         raise HTTPException(400, "e-Invoice applies to GST invoices only.")
+    if inv.get("irn"):
+        raise HTTPException(400, "This invoice already has an IRN. Cancel it first to regenerate.")
     company = await get_setting("integrations") or {}
     payload = _build_irp_einvoice_payload(inv, company, inv.get("eway_details", {}) or {})
     try:
+        token = await _adq_token(c)
         async with httpx.AsyncClient(timeout=30) as cl:
-            auth = await cl.post(c["base_url"].rstrip("/") + c["auth_path"], json={
-                "client_id": c["client_id"], "client_secret": c["client_secret"],
-                "username": c["username"], "password": c["password"], "gstin": c["gstin"]})
-            auth.raise_for_status(); ad = auth.json()
-            token = ad.get("access_token") or ad.get("authtoken") or ad.get("token") or ""
-            headers = {"Authorization": f"Bearer {token}", "gstin": c["gstin"], "Content-Type": "application/json"}
-            gen = await cl.post(c["base_url"].rstrip("/") + einv_path, headers=headers, json=payload)
-            gen.raise_for_status(); gd = gen.json()
+            gen = await cl.post(f"{c['base_url']}{c['prefix']}/ei/api/invoice",
+                                headers=_adq_ei_headers(c, token), json=payload)
+            gd = gen.json() if gen.content else {}
+            gen.raise_for_status()
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(502, f"IRP/GSP call failed: {e}. Check your GSP credentials and endpoint paths.")
-    data = gd.get("data") if isinstance(gd.get("data"), dict) else gd
-    irn = str(data.get("Irn") or data.get("irn") or "")
+        raise HTTPException(502, f"Adaequare e-invoice call failed: {e}. Response: {str(locals().get('gd', ''))[:300]}")
+    if not gd.get("success"):
+        raise HTTPException(502, f"Adaequare rejected the e-invoice: {gd.get('message') or gd}")
+    result = gd.get("result") or {}
+    irn = str(result.get("Irn") or "")
     if not irn:
         raise HTTPException(502, f"IRP did not return an IRN. Response: {str(gd)[:300]}")
-    upd = {"irn": irn, "ack_no": str(data.get("AckNo") or data.get("ackNo") or ""),
-           "ack_date": str(data.get("AckDt") or data.get("ackDt") or ""),
-           "signed_qr": str(data.get("SignedQRCode") or data.get("signedQRCode") or ""),
+    upd = {"irn": irn, "ack_no": str(result.get("AckNo") or ""), "ack_date": str(result.get("AckDt") or ""),
+           "signed_qr": str(result.get("SignedQRCode") or ""),
            "einvoice_status": "generated", "einvoice_details": gd}
+    # If NIC also returned an e-way bill as part of IRN generation (EwbDtls was supplied), capture it
+    if result.get("EwbNo"):
+        upd["eway_bill_no"] = str(result.get("EwbNo"))
+        upd["eway_valid_until"] = str(result.get("EwbValidTill") or "")[:10]
     await db.invoices.update_one({"id": iid}, {"$set": upd})
+    await write_audit(user.get("name", ""), "einvoice_filed", "invoice", iid, {"irn": irn, "via": "Adaequare"})
     return {"ok": True, "irn": irn, "ack_no": upd["ack_no"], "ack_date": upd["ack_date"]}
+
+class EInvoiceCancelIn(BaseModel):
+    reason_code: str = "1"   # 1=Duplicate, 2=Data Entry Mistake, 3=Order Cancelled, 4=Other
+    reason_remark: str = ""
+
+@api.post("/invoices/{iid}/e-invoice/cancel")
+async def cancel_einvoice_via_gsp(iid: str, body: EInvoiceCancelIn, user=Depends(require_roles("admin", "manager", "accountant", "ca"))):
+    """Cancel an IRN via Adaequare GSP. NIC only allows cancellation within 24 hours of generation."""
+    c = await _eway_gsp_config()
+    if not _gsp_ready(c):
+        raise HTTPException(400, "GSP not configured.")
+    inv = await db.invoices.find_one({"id": iid}, {"_id": 0})
+    if not inv or not inv.get("irn"):
+        raise HTTPException(404, "No IRN on file for this invoice.")
+    try:
+        token = await _adq_token(c)
+        async with httpx.AsyncClient(timeout=30) as cl:
+            r = await cl.post(f"{c['base_url']}{c['prefix']}/ei/api/invoice/cancel",
+                              headers=_adq_ei_headers(c, token),
+                              json={"irn": inv["irn"], "cnlrsn": body.reason_code,
+                                    "cnlrem": body.reason_remark or "Cancelled via ERP"})
+            gd = r.json() if r.content else {}
+            r.raise_for_status()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"Adaequare cancel call failed: {e}")
+    if not gd.get("success"):
+        raise HTTPException(502, f"Adaequare rejected the cancellation: {gd.get('message') or gd}")
+    await db.invoices.update_one({"id": iid}, {"$set": {"irn": "", "ack_no": "", "ack_date": "", "signed_qr": "",
+                                                        "einvoice_status": "cancelled",
+                                                        "einvoice_details": {**(inv.get("einvoice_details") or {}), "cancel_response": gd}}})
+    await write_audit(user.get("name", ""), "einvoice_cancelled", "invoice", iid, {"via": "Adaequare"})
+    return {"ok": True}
 
 # ---------------- Inbound webhooks (HR/attendance e.g. Mewurk) ----------------
 WEBHOOK_BASE = os.getenv("API_PUBLIC_URL", "https://denplex-erp-production.up.railway.app")
