@@ -8981,7 +8981,7 @@ async def del_expense_v2(eid: str, user=Depends(require_roles("admin", "accounta
 async def dashboard_receivable_payable(user=Depends(get_current_user)):
     """Computes total receivable (from open invoices) and payable (from open vendor bills)."""
     # Receivable: invoices where status != 'paid'
-    open_invoices = await db.invoices.find({"status": {"$ne": "paid"}}, {"_id": 0, "total": 1, "customer_id": 1}).to_list(10000)
+    open_invoices = await db.invoices.find({"status": {"$ne": "paid"}}, {"_id": 0, "id": 1, "total": 1, "customer_id": 1}).to_list(10000)
     # Subtract allocated payments
     payments_in = await db.payments_in.find({}, {"_id": 0, "allocations": 1}).to_list(10000)
     allocated_per_inv: Dict[str, float] = {}
