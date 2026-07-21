@@ -4266,6 +4266,61 @@ async def get_setting(key: str) -> Dict[str, Any]:
 async def set_setting(key: str, data: Dict[str, Any]):
     await db.settings.replace_one({"_id": key}, {"_id": key, **data}, upsert=True)
 
+# ---------------------------------------------------------------------------
+# Public marketing site config — makes the Landing page (pre-login homepage)
+# config-driven instead of hardcoded, so the SAME codebase can be redeployed
+# for a future client by editing this settings doc (company name/tagline/
+# features/modules/branding), and Denplex can turn the "Free Trial / sandbox"
+# sales pitch off (trial_enabled=false) while using the ERP internally.
+# PUBLIC endpoint — never put secrets (GSTIN, bank, API keys) in this doc.
+# ---------------------------------------------------------------------------
+DEFAULT_SITE_CONFIG: Dict[str, Any] = {
+    "brand_name": "DENPLEX ERP",
+    "logo_url": "/denplex-logo.png",
+    "overline": "Denplex Engineering Company · Jig & Fixtures · Precision Job Work",
+    "heading_prefix": "Run your workshop with",
+    "heading_highlight": "±0.001 mm",
+    "heading_suffix": "cut.",
+    "subheading": "One operating system for your inventory, BOM, work orders, job cards, QC, quotations, GST invoices, leads, and customer portal — built for small-scale precision engineering businesses.",
+    "hero_image": "https://static.prod-images.emergentagent.com/jobs/7f514505-bc8d-48ed-954b-5815c5f6170a/images/0475821f5ac9696210216b4d7b8fd14a0f3b01c44be9da7e3b33a4e81d154066.png",
+    "feature_image": "https://images.unsplash.com/photo-1666634157070-6fd830fb5672?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1OTN8MHwxfHNlYXJjaHwxfHxwcmVjaXNpb24lMjBjbmMlMjBtYWNoaW5pbmclMjBtZXRhbHxlbnwwfHx8fDE3NzkxMjY0NDR8MA&ixlib=rb-4.1.0&q=85",
+    "hero_badge_line1": "Live · Workshop floor",
+    "hero_badge_line2": "Open WO #WO-26-0042",
+    "hero_badge_line3": "SS-316 Drill Jig · Qty 24 · Stage: Milling",
+    "stats": [{"k": "16+", "v": "Modules"}, {"k": "ISO", "v": "9001 ready"}, {"k": "GST", "v": "CGST/SGST/IGST"}],
+    "features": [
+        {"icon": "Boxes", "title": "Inventory & AI bill scan", "desc": "Stock in/out, in-process tracking, adjustments. Scan a paper or digital bill and Claude reads it into your system."},
+        {"icon": "Layers", "title": "Work Orders & Job Cards", "desc": "Plan production, assign machines and operators, track progress in real time."},
+        {"icon": "ShieldCheck", "title": "QC reports with photos", "desc": "Capture parameters, measurements, pass/fail. Link to work orders & customers forever."},
+        {"icon": "BarChart3", "title": "GST invoices & quotations", "desc": "CGST / SGST / IGST automatically. Quotations, POs, invoices in one place."},
+        {"icon": "Users", "title": "CRM + WhatsApp", "desc": "Leads, repeat vs one-time customers, click-to-WhatsApp to send POs, quotes, and follow-ups."},
+        {"icon": "Cog", "title": "Customer portal", "desc": "Customers track their order with a PO or reference number. Public, branded, mobile-friendly."},
+    ],
+    "modules": ["Inventory", "BOM", "Work Orders", "Job Cards", "Quotations", "Purchase Orders", "Invoices",
+                "QC Reports", "CRM / Leads", "Suppliers", "Customers", "Documents", "Dashboard",
+                "Customer Portal", "User Roles", "GST"],
+    "footer_cta_heading": "Ready to run a tighter shop?",
+    "footer_copyright": "© 2026 Denplex Engineering Company",
+    "footer_version": "Denplex ERP v0.3 · Built for MSMEs",
+    # --- Trial/sales pitch toggle: OFF by default while Denplex is the only user of its own ERP.
+    # Flip to true (via PUT /settings/marketing-site, admin only) when onboarding an external client.
+    "trial_enabled": False,
+    "footer_cta_sub": "Start a 30-day free trial — no card needed. We verify and email you in 24 hours.",
+    "sandbox_note": "",   # e.g. "Or try the sandbox: admin@erp.com · Admin@123" — leave blank in production
+}
+
+@api.get("/public/site-config")
+async def get_public_site_config():
+    """Unauthenticated — powers the pre-login marketing Landing page. Never returns secrets."""
+    s = await get_setting("marketing_site")
+    return {**DEFAULT_SITE_CONFIG, **s}
+
+@api.put("/settings/marketing-site")
+async def update_marketing_site(body: dict, user=Depends(require_roles("admin"))):
+    clean = {k: v for k, v in (body or {}).items() if k in DEFAULT_SITE_CONFIG}
+    await set_setting("marketing_site", clean)
+    return {**DEFAULT_SITE_CONFIG, **clean}
+
 class IntegrationSettingsIn(BaseModel):
     twilio_account_sid: Optional[str] = ""
     twilio_auth_token: Optional[str] = ""
