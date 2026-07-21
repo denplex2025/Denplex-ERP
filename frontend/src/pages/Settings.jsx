@@ -20,6 +20,7 @@ export default function Settings() {
   const [code, setCode] = useState("");
   const [gdrive, setGdrive] = useState({ connected: false, configured: false, email: "", last_backup: "" });
   const [gdBusy, setGdBusy] = useState("");
+  const [mkt, setMkt] = useState({});
 
   const load = async () => {
     try {
@@ -27,7 +28,11 @@ export default function Settings() {
       const t = await api.get("/auth/2fa/status"); setTwoFa(t.data);
     } catch (e) { toast.error("Admin only"); }
   };
-  useEffect(() => { load(); }, []);
+  const loadMkt = async () => {
+    try { const r = await api.get("/public/site-config"); setMkt(r.data || {}); }
+    catch (e) { toast.error("Could not load marketing site config"); }
+  };
+  useEffect(() => { load(); loadMkt(); }, []);
 
   useEffect(() => {
     const refreshGd = () => api.get("/google/status", { silent: true }).then((r) => setGdrive(r.data)).catch(() => {});
@@ -69,6 +74,11 @@ export default function Settings() {
     catch (e) { toast.error("Failed"); }
   };
   const setF = (k, v) => setS(p => ({ ...p, [k]: v }));
+  const setMF = (k, v) => setMkt(p => ({ ...p, [k]: v }));
+  const saveMkt = async () => {
+    try { const r = await api.put("/settings/marketing-site", mkt); setMkt(r.data || mkt); toast.success("Marketing site updated"); }
+    catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
+  };
 
   const setup2fa = async () => {
     try { const r = await api.post("/auth/2fa/setup"); setSetup(r.data); setSetupOpen(true); }
@@ -93,6 +103,7 @@ export default function Settings() {
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList className="rounded-sm bg-slate-100 mb-4 flex-wrap h-auto">
           <TabsTrigger value="company" className="rounded-sm" data-testid="tab-company">Company</TabsTrigger>
+          <TabsTrigger value="marketing" className="rounded-sm" data-testid="tab-marketing">Marketing Site</TabsTrigger>
           <TabsTrigger value="gdrive" className="rounded-sm" data-testid="tab-gdrive">Google Drive</TabsTrigger>
           <TabsTrigger value="template" className="rounded-sm" data-testid="tab-template">Invoice Template</TabsTrigger>
           <TabsTrigger value="email" className="rounded-sm" data-testid="tab-email">Email Accounts</TabsTrigger>
@@ -138,6 +149,59 @@ export default function Settings() {
               <Fld label="Default Sale Description"><Textarea rows={3} value={s.invoice_description || ""} onChange={e=>setF("invoice_description", e.target.value)} className="rounded-sm" /></Fld>
             </div>
             <div className="mt-6"><Button onClick={save} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="save-company"><Save className="h-4 w-4 mr-1" /> Save</Button></div>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="marketing">
+          <Card className="p-6 mb-4">
+            <h3 className="font-display text-lg font-semibold mb-1">Public homepage</h3>
+            <p className="text-sm text-slate-600 mb-4">Controls the pre-login marketing page at erp.denplex.co. Changes here go live immediately without a code deploy.</p>
+            <label className="flex items-center gap-2 mb-6 text-sm text-slate-700 cursor-pointer w-fit border border-slate-200 rounded-sm p-3 bg-slate-50">
+              <Switch checked={!!mkt.trial_enabled} onCheckedChange={(v)=>setMF("trial_enabled", v)} data-testid="mkt-trial-enabled" />
+              <span>Show "Free Trial" signup (off = homepage links straight to login, for internal-only use)</span>
+            </label>
+
+            <h4 className="font-display text-base font-semibold mb-3">Hero</h4>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+              <Fld label="Brand name"><Input value={mkt.brand_name || ""} onChange={e=>setMF("brand_name", e.target.value)} className="rounded-sm" /></Fld>
+              <Fld label="Logo URL"><Input value={mkt.logo_url || ""} onChange={e=>setMF("logo_url", e.target.value)} className="rounded-sm" /></Fld>
+              <Fld label="Overline"><Input value={mkt.overline || ""} onChange={e=>setMF("overline", e.target.value)} className="rounded-sm" /></Fld>
+              <div className="grid grid-cols-3 gap-2">
+                <Fld label="Heading prefix"><Input value={mkt.heading_prefix || ""} onChange={e=>setMF("heading_prefix", e.target.value)} className="rounded-sm" /></Fld>
+                <Fld label="Heading highlight"><Input value={mkt.heading_highlight || ""} onChange={e=>setMF("heading_highlight", e.target.value)} className="rounded-sm" /></Fld>
+                <Fld label="Heading suffix"><Input value={mkt.heading_suffix || ""} onChange={e=>setMF("heading_suffix", e.target.value)} className="rounded-sm" /></Fld>
+              </div>
+              <Fld label="Subheading"><Textarea rows={3} value={mkt.subheading || ""} onChange={e=>setMF("subheading", e.target.value)} className="rounded-sm" /></Fld>
+              <Fld label="Hero image URL"><Input value={mkt.hero_image || ""} onChange={e=>setMF("hero_image", e.target.value)} className="rounded-sm" /></Fld>
+              <Fld label="Feature image URL"><Input value={mkt.feature_image || ""} onChange={e=>setMF("feature_image", e.target.value)} className="rounded-sm" /></Fld>
+              <div className="grid grid-cols-3 gap-2">
+                <Fld label="Hero badge line 1"><Input value={mkt.hero_badge_line1 || ""} onChange={e=>setMF("hero_badge_line1", e.target.value)} className="rounded-sm" /></Fld>
+                <Fld label="Hero badge line 2"><Input value={mkt.hero_badge_line2 || ""} onChange={e=>setMF("hero_badge_line2", e.target.value)} className="rounded-sm" /></Fld>
+                <Fld label="Hero badge line 3"><Input value={mkt.hero_badge_line3 || ""} onChange={e=>setMF("hero_badge_line3", e.target.value)} className="rounded-sm" /></Fld>
+              </div>
+            </div>
+
+            <h4 className="font-display text-base font-semibold mb-3">Stats strip</h4>
+            <StatsEditor stats={mkt.stats || []} onChange={(arr)=>setMF("stats", arr)} />
+
+            <h4 className="font-display text-base font-semibold mt-8 mb-3">Feature cards</h4>
+            <FeaturesEditor features={mkt.features || []} onChange={(arr)=>setMF("features", arr)} />
+
+            <h4 className="font-display text-base font-semibold mt-8 mb-3">Modules list</h4>
+            <Fld label="Modules (comma-separated)">
+              <Textarea rows={2} value={(mkt.modules || []).join(", ")} onChange={e=>setMF("modules", e.target.value.split(",").map(s=>s.trim()).filter(Boolean))} className="rounded-sm" />
+            </Fld>
+
+            <h4 className="font-display text-base font-semibold mt-8 mb-3">Footer</h4>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <Fld label="Footer CTA heading"><Input value={mkt.footer_cta_heading || ""} onChange={e=>setMF("footer_cta_heading", e.target.value)} className="rounded-sm" /></Fld>
+              <Fld label="Footer CTA sub-text"><Input value={mkt.footer_cta_sub || ""} onChange={e=>setMF("footer_cta_sub", e.target.value)} className="rounded-sm" /></Fld>
+              <Fld label="Footer copyright"><Input value={mkt.footer_copyright || ""} onChange={e=>setMF("footer_copyright", e.target.value)} className="rounded-sm" /></Fld>
+              <Fld label="Footer version line"><Input value={mkt.footer_version || ""} onChange={e=>setMF("footer_version", e.target.value)} className="rounded-sm" /></Fld>
+              <Fld label="Sandbox note (shown when trial is on)"><Input value={mkt.sandbox_note || ""} onChange={e=>setMF("sandbox_note", e.target.value)} className="rounded-sm" /></Fld>
+            </div>
+
+            <div className="mt-6"><Button onClick={saveMkt} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="save-marketing"><Save className="h-4 w-4 mr-1" /> Save</Button></div>
           </Card>
         </TabsContent>
 
@@ -922,6 +986,45 @@ function Toggle({ label, checked, onChange }) {
   );
 }
 
+
+function StatsEditor({ stats, onChange }) {
+  const arr = Array.isArray(stats) ? stats : [];
+  const update = (i, key, val) => onChange(arr.map((u, idx) => idx === i ? { ...u, [key]: val } : u));
+  const add = () => onChange([...arr, { k: "", v: "" }]);
+  const remove = (i) => onChange(arr.filter((_, idx) => idx !== i));
+  return (
+    <div className="space-y-2" data-testid="stats-editor">
+      {arr.map((u, i) => (
+        <div key={i} className="grid grid-cols-1 md:grid-cols-12 gap-2 items-end border border-slate-200 rounded-sm p-3 bg-slate-50">
+          <div className="md:col-span-3"><Label className="text-xs uppercase tracking-wider text-slate-600">Value (e.g. 16+)</Label><Input value={u.k || ""} onChange={e=>update(i, "k", e.target.value)} className="mt-1 rounded-sm" /></div>
+          <div className="md:col-span-8"><Label className="text-xs uppercase tracking-wider text-slate-600">Label</Label><Input value={u.v || ""} onChange={e=>update(i, "v", e.target.value)} className="mt-1 rounded-sm" /></div>
+          <div className="md:col-span-1 flex md:justify-end"><Button type="button" variant="outline" size="icon" onClick={()=>remove(i)} className="rounded-sm h-9 w-9"><Trash2 className="h-4 w-4" /></Button></div>
+        </div>
+      ))}
+      <Button type="button" variant="outline" size="sm" onClick={add} className="rounded-sm"><Plus className="h-4 w-4 mr-1" /> Add stat</Button>
+    </div>
+  );
+}
+
+function FeaturesEditor({ features, onChange }) {
+  const arr = Array.isArray(features) ? features : [];
+  const update = (i, key, val) => onChange(arr.map((u, idx) => idx === i ? { ...u, [key]: val } : u));
+  const add = () => onChange([...arr, { icon: "Cog", title: "", desc: "" }]);
+  const remove = (i) => onChange(arr.filter((_, idx) => idx !== i));
+  return (
+    <div className="space-y-2" data-testid="features-editor">
+      {arr.map((u, i) => (
+        <div key={i} className="grid grid-cols-1 md:grid-cols-12 gap-2 items-start border border-slate-200 rounded-sm p-3 bg-slate-50">
+          <div className="md:col-span-2"><Label className="text-xs uppercase tracking-wider text-slate-600">Icon</Label><Input value={u.icon || ""} onChange={e=>update(i, "icon", e.target.value)} className="mt-1 rounded-sm" placeholder="Boxes/Layers/ShieldCheck/BarChart3/Users/Cog" /></div>
+          <div className="md:col-span-3"><Label className="text-xs uppercase tracking-wider text-slate-600">Title</Label><Input value={u.title || ""} onChange={e=>update(i, "title", e.target.value)} className="mt-1 rounded-sm" /></div>
+          <div className="md:col-span-6"><Label className="text-xs uppercase tracking-wider text-slate-600">Description</Label><Textarea rows={2} value={u.desc || ""} onChange={e=>update(i, "desc", e.target.value)} className="mt-1 rounded-sm" /></div>
+          <div className="md:col-span-1 flex md:justify-end md:items-end h-full"><Button type="button" variant="outline" size="icon" onClick={()=>remove(i)} className="rounded-sm h-9 w-9 mt-1 md:mt-6"><Trash2 className="h-4 w-4" /></Button></div>
+        </div>
+      ))}
+      <Button type="button" variant="outline" size="sm" onClick={add} className="rounded-sm"><Plus className="h-4 w-4 mr-1" /> Add feature</Button>
+    </div>
+  );
+}
 
 function UnitsEditor({ units, onChange }) {
   const arr = Array.isArray(units) ? units : [];
