@@ -39,6 +39,8 @@ export default function EwayBillForm() {
     irn: "", ack_no: "", ack_date: "", signed_qr: "",
   });
   const [filingEinv, setFilingEinv] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const [cancellingEinv, setCancellingEinv] = useState(false);
   const set = (k, v) => setF(p => ({ ...p, [k]: v }));
 
   useEffect(() => {
@@ -84,6 +86,28 @@ export default function EwayBillForm() {
     } catch (e) { toast.error(e?.response?.data?.detail || "e-Invoice filing failed"); }
     setFilingEinv(false);
   };
+  const cancelEinv = async () => {
+    const remark = window.prompt("Reason for cancelling this IRN? (required by NIC, e.g. 'Data entry mistake')", "Data entry mistake");
+    if (remark === null) return;
+    if (!window.confirm("Cancel this IRN via NIC? This can only be done within 24 hours of generation and cannot be undone.")) return;
+    setCancellingEinv(true);
+    try {
+      await api.post(`/invoices/${id}/e-invoice/cancel`, { reason_code: "2", reason_remark: remark });
+      toast.success("e-Invoice cancelled"); navg("/app/invoices");
+    } catch (e) { toast.error(e?.response?.data?.detail || "Cancel failed"); }
+    setCancellingEinv(false);
+  };
+  const cancelEway = async () => {
+    const remark = window.prompt("Reason for cancelling this e-way bill? (required by NIC)", "Data entry mistake");
+    if (remark === null) return;
+    if (!window.confirm("Cancel this e-way bill via NIC? This can only be done within 24 hours of generation and cannot be undone.")) return;
+    setCancelling(true);
+    try {
+      await api.post(`/invoices/${id}/eway-bill/cancel`, { reason_code: "2", reason_remark: remark });
+      toast.success("E-way bill cancelled"); navg("/app/invoices");
+    } catch (e) { toast.error(e?.response?.data?.detail || "Cancel failed"); }
+    setCancelling(false);
+  };
 
   const odc = f.vehicle_type === "Over Dimensional Cargo";
   const days = validityDays(f.distance_km, odc);
@@ -111,7 +135,7 @@ export default function EwayBillForm() {
       </div>
       <div className="flex items-start gap-2 text-xs bg-amber-50 border border-amber-200 text-amber-800 rounded-md p-2.5 mb-4">
         <Info className="w-4 h-4 shrink-0 mt-0.5" />
-        <span>Filing directly to the government (NIC) needs a connected GSP. For now: generate the bill on the NIC portal, then paste its number below. Validity is auto-computed from distance.</span>
+        <span>Filing directly to the government (NIC) via our GSP (Adaequare) needs API credentials in Railway env vars. Until connected: generate the bill on the NIC portal, then paste its number below. Validity is auto-computed from distance.</span>
       </div>
 
       <div className="border border-slate-200 rounded-md p-4 mb-4">
@@ -119,9 +143,13 @@ export default function EwayBillForm() {
           <h3 className="text-sm font-semibold text-slate-800">e-Invoice (IRN + signed QR)</h3>
           <div className="flex gap-2">
             <Button size="sm" variant="outline" className="rounded-sm" onClick={saveEinv}>Save e-Invoice details</Button>
-            {gsp.configured
+            {gsp.configured && f.irn
+              ? <Button size="sm" variant="outline" onClick={cancelEinv} disabled={cancellingEinv} className="rounded-sm border-red-300 text-red-700 hover:bg-red-50">{cancellingEinv ? "Cancelling…" : "Cancel IRN"}</Button>
+              : null}
+            {gsp.configured && !f.irn
               ? <Button size="sm" onClick={fileEinv} disabled={filingEinv} className="rounded-sm bg-red-600 hover:bg-red-700">{filingEinv ? "Generating…" : "Generate e-Invoice (auto)"}</Button>
-              : <span className="text-[11px] text-slate-400 self-center">GSP required for auto-generate</span>}
+              : null}
+            {!gsp.configured ? <span className="text-[11px] text-slate-400 self-center">GSP required for auto-generate</span> : null}
           </div>
         </div>
         <p className="text-[11px] text-slate-500 mb-3">e-Invoicing (IRN) applies once your annual turnover crosses ₹5 crore (or if you've voluntarily enabled it). Until then your GSTIN usually can't generate an IRN — this section is ready for when you're eligible.</p>
@@ -187,9 +215,13 @@ export default function EwayBillForm() {
         <span className="mr-auto text-sm text-slate-500 inline-flex items-center gap-1"><FileCheck2 className="w-4 h-4" /> {f.eway_bill_no ? `E-way ${f.eway_bill_no}` : "Capture e-way details"}</span>
         <Button variant="outline" className="rounded-sm" onClick={() => navg("/app/invoices")}>Cancel</Button>
         <Button onClick={save} disabled={saving} variant="outline" className="rounded-sm"><Save className="h-4 w-4 mr-1" /> {saving ? "Saving…" : "Save details"}</Button>
-        {gsp.configured
+        {gsp.configured && f.eway_bill_no
+          ? <Button onClick={cancelEway} disabled={cancelling} variant="outline" className="rounded-sm border-red-300 text-red-700 hover:bg-red-50">{cancelling ? "Cancelling…" : "Cancel E-Way Bill"}</Button>
+          : null}
+        {gsp.configured && !f.eway_bill_no
           ? <Button onClick={fileToNic} disabled={filing} className="rounded-sm bg-red-600 hover:bg-red-700"><FileCheck2 className="h-4 w-4 mr-1" /> {filing ? "Filing…" : "File to NIC (auto)"}</Button>
-          : <span className="text-[11px] text-slate-400 max-w-[220px]">Connect a GSP in server config to enable one-click filing.</span>}
+          : null}
+        {!gsp.configured ? <span className="text-[11px] text-slate-400 max-w-[220px]">Connect a GSP in server config to enable one-click filing.</span> : null}
       </div>
     </div>
   );
