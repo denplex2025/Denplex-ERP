@@ -7842,11 +7842,13 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
             doc["cgst"] = cgst; doc["sgst"] = sgst; doc["igst"] = igst
             doc["gst_total"] = tax_total
             doc["status"] = "paid" if cur_bal <= 0.01 else "sent"
+            doc["outstanding"] = round(max(cur_bal, 0.0), 2)  # Vyapar's own live balance = ground truth
         else:
             doc["supplier_id"] = ""
             doc["supplier_name"] = party_name
             doc["gst_total"] = tax_total
             doc["status"] = "received" if cur_bal <= 0.01 else "open"
+            doc["outstanding"] = round(max(cur_bal, 0.0), 2)  # Vyapar's own live balance = ground truth
 
         if not opts.dry_run:
             target = getattr(db, collection_name)
@@ -8203,6 +8205,49 @@ async def vyapar_import_job_status(job_id: str, user=Depends(require_roles("admi
     if not job:
         raise HTTPException(404, "Job not found")
     return job
+
+
+@api.post("/integrations/vyapar/backfill-outstanding")
+async def vyapar_backfill_outstanding(payload: VyaparReconcileIn, user=Depends(require_roles("admin"))):
+    """One-off migration for invoices/bills imported before the 'outstanding' field existed:
+    sets outstanding = Vyapar's own live txn_current_balance (ground truth) via $set, matched
+    by vyapar_id. Safe to re-run. Does not touch anything else (no re-insert, no duplication)."""
+    import sqlite3, zipfile, tempfile
+    meta = await db.vyapar_uploads.find_one({"id": payload.token, "user_id": user["id"]}, {"_id": 0})
+    if not meta:
+        raise HTTPException(404, "Upload not found. Re-upload the file.")
+    path = Path(meta["path"])
+    if not path.exists():
+        raise HTTPException(404, "Uploaded file is no longer on disk. Please re-upload.")
+    kind = meta.get("kind")
+    if kind in ("zip", "zip_sqlite"):
+        with zipfile.ZipFile(path) as z:
+            inner = [n for n in z.namelist() if n.endswith(".db") or n.endswith(".sqlite") or n.endswith(".vyp")]
+            if not inner:
+                raise HTTPException(400, "Archive doesn't contain a SQLite database.")
+            tmpd = Path(tempfile.mkdtemp())
+            z.extract(inner[0], tmpd)
+            path = tmpd / inner[0]
+
+    def _run():
+        con = sqlite3.connect(str(path)); con.row_factory = sqlite3.Row
+        cur = con.cursor()
+        cur.execute("SELECT txn_id, txn_type, txn_current_balance FROM kb_transactions WHERE txn_type IN (1,2)")
+        rows = cur.fetchall()
+        con.close()
+        return [(int(r["txn_id"]), int(r["txn_type"]), float(r["txn_current_balance"] or 0)) for r in rows]
+
+    rows = await asyncio.to_thread(_run)
+    updated_inv = 0; updated_bill = 0
+    for txn_id, t, cur_bal in rows:
+        out = round(max(cur_bal, 0.0), 2)
+        status = ("paid" if cur_bal <= 0.01 else "sent") if t == 1 else ("received" if cur_bal <= 0.01 else "open")
+        coll = db.invoices if t == 1 else db.vendor_bills
+        res = await coll.update_one({"vyapar_id": str(txn_id)}, {"$set": {"outstanding": out, "status": status}})
+        if res.matched_count:
+            if t == 1: updated_inv += 1
+            else: updated_bill += 1
+    return {"ok": True, "invoices_updated": updated_inv, "bills_updated": updated_bill, "total_rows": len(rows)}
 
 
 class VyaparReconcileIn(BaseModel):
@@ -8981,7 +9026,7 @@ async def del_expense_v2(eid: str, user=Depends(require_roles("admin", "accounta
 async def dashboard_receivable_payable(user=Depends(get_current_user)):
     """Computes total receivable (from open invoices) and payable (from open vendor bills)."""
     # Receivable: invoices where status != 'paid'
-    open_invoices = await db.invoices.find({"status": {"$ne": "paid"}}, {"_id": 0, "id": 1, "total": 1, "customer_id": 1}).to_list(10000)
+    open_invoices = await db.invoices.find({"status": {"$ne": "paid"}}, {"_id": 0, "id": 1, "total": 1, "customer_id": 1, "outstanding": 1}).to_list(10000)
     # Subtract allocated payments
     payments_in = await db.payments_in.find({}, {"_id": 0, "allocations": 1}).to_list(10000)
     allocated_per_inv: Dict[str, float] = {}
@@ -8992,14 +9037,19 @@ async def dashboard_receivable_payable(user=Depends(get_current_user)):
     receivable_total = 0.0
     receivable_parties = set()
     for inv in open_invoices:
-        outstanding = float(inv.get("total", 0)) - allocated_per_inv.get(inv.get("id", ""), 0)
+        # Prefer Vyapar's own live balance (ground truth, captures credit notes/returns/etc.) when present;
+        # fall back to total-minus-allocations for invoices created outside the Vyapar import.
+        if inv.get("outstanding") is not None:
+            outstanding = float(inv.get("outstanding") or 0)
+        else:
+            outstanding = float(inv.get("total", 0)) - allocated_per_inv.get(inv.get("id", ""), 0)
         if outstanding > 0.01:
             receivable_total += outstanding
             if inv.get("customer_id"):
                 receivable_parties.add(inv["customer_id"])
 
     # Payable: vendor bills where balance > 0
-    bills = await db.vendor_bills.find({}, {"_id": 0, "total": 1, "supplier_id": 1, "status": 1, "id": 1}).to_list(10000)
+    bills = await db.vendor_bills.find({}, {"_id": 0, "total": 1, "supplier_id": 1, "status": 1, "id": 1, "outstanding": 1}).to_list(10000)
     payments_out = await db.payments_out.find({}, {"_id": 0, "allocations": 1}).to_list(10000)
     allocated_per_bill: Dict[str, float] = {}
     for p in payments_out:
@@ -9011,7 +9061,10 @@ async def dashboard_receivable_payable(user=Depends(get_current_user)):
     for b in bills:
         if b.get("status") == "paid":
             continue
-        outstanding = float(b.get("total", 0)) - allocated_per_bill.get(b.get("id", ""), 0)
+        if b.get("outstanding") is not None:
+            outstanding = float(b.get("outstanding") or 0)
+        else:
+            outstanding = float(b.get("total", 0)) - allocated_per_bill.get(b.get("id", ""), 0)
         if outstanding > 0.01:
             payable_total += outstanding
             if b.get("supplier_id"):
