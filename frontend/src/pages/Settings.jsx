@@ -823,6 +823,7 @@ function VyaparImportPanel() {
   const [opts, setOpts] = useState({ parties: true, items: true, sales: true, purchases: true, expenses: true, dry_run: false });
   const [results, setResults] = useState(null);
   const [recon, setRecon] = useState(null);
+  const [progress, setProgress] = useState("");
 
   const runReconcile = async () => {
     if (!analysis?.token) { toast.error("Upload a .vyb backup first"); return; }
@@ -851,13 +852,33 @@ function VyaparImportPanel() {
 
   const runImport = async () => {
     if (!analysis?.token) { toast.error("Upload a file first"); return; }
-    setBusy(true);
+    setBusy(true); setResults(null); setProgress("Starting import…");
     try {
       const r = await api.post("/integrations/vyapar/import", { token: analysis.token, ...opts });
-      setResults(r.data);
-      toast.success(`Imported: ${r.data.summary || "done"}`);
-    } catch (e) { toast.error(e?.response?.data?.detail || "Import failed"); }
-    finally { setBusy(false); }
+      const jobId = r.data.job_id;
+      if (!jobId) { setResults(r.data); toast.success(`Imported: ${r.data.summary || "done"}`); setBusy(false); return; }
+      // Large imports (thousands of transactions) run in the background so the
+      // request never gets killed by a platform timeout — poll for completion.
+      let tries = 0;
+      const poll = async () => {
+        tries += 1;
+        try {
+          const j = await api.get(`/integrations/vyapar/import/jobs/${jobId}`, { silent: true });
+          if (j.data.status === "running") {
+            setProgress(`Importing… (${tries * 3}s elapsed — large backups can take a few minutes)`);
+            if (tries < 200) setTimeout(poll, 3000);
+            else { toast.error("Import is taking unusually long — check back or re-open Settings."); setBusy(false); }
+          } else if (j.data.status === "done") {
+            setResults(j.data.result); setProgress(""); setBusy(false);
+            toast.success(`Imported: ${j.data.result?.summary || "done"}`);
+          } else {
+            setProgress(""); setBusy(false);
+            toast.error(j.data.error || "Import failed");
+          }
+        } catch (e) { setProgress(""); setBusy(false); toast.error("Lost track of import job — please reload"); }
+      };
+      setTimeout(poll, 3000);
+    } catch (e) { toast.error(e?.response?.data?.detail || "Import failed"); setBusy(false); }
   };
 
   return (
@@ -914,6 +935,7 @@ function VyaparImportPanel() {
                     {busy ? "Working…" : "Reconcile ERP vs backup"}
                   </Button>
                 </div>
+                {progress && <div className="text-xs text-slate-500" data-testid="vyapar-progress">{progress}</div>}
               </>
             )}
 
