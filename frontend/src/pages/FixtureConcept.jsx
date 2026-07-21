@@ -44,22 +44,34 @@ export default function FixtureConcept() {
       }
       setLastImg({ b64: payload.image_base64 || "", mime: payload.mime || "image/png" });
       const r = await api.post("/fixture/concept", payload);
-      setConcept(r.data?.concept || null);
-      setDims(r.data?.dims || null);
-      setCadViews(r.data?.views || []);
-      if (!r.data?.concept) setRaw(r.data?.raw || "No structured result.");
-      else toast.success("Concept ready");
+      const gotConcept = r.data?.concept || null;
+      const gotDims = r.data?.dims || null;
+      const gotViews = r.data?.views || [];
+      setConcept(gotConcept);
+      setDims(gotDims);
+      setCadViews(gotViews);
+      if (!gotConcept) setRaw(r.data?.raw || "No structured result.");
+      else {
+        toast.success("Concept ready");
+        // Auto-generate the concept sketch right away so the PDF always has a picture
+        // (previously this was a separate manual step that was easy to miss).
+        genSketch(gotConcept, gotDims, gotViews, { b64: payload.image_base64 || "", mime: payload.mime || "image/png" });
+      }
     } catch (e) {
       toast.error(e?.response?.status === 503 ? "Set ANTHROPIC_API_KEY in Railway → Variables." : (e?.response?.data?.detail || "Generation failed"));
     }
     setBusy(false);
   };
 
-  const genSketch = async () => {
-    if (!concept) return;
+  const genSketch = async (conceptArg, dimsArg, viewsArg, imgArg) => {
+    const c = conceptArg || concept;
+    if (!c) return;
+    const d = dimsArg !== undefined ? dimsArg : dims;
+    const v = viewsArg !== undefined ? viewsArg : cadViews;
+    const li = imgArg || lastImg;
     setSketching(true);
     try {
-      const r = await api.post("/fixture/sketch", { concept, part_name: f.part_name, material: f.material, dims, image_base64: lastImg.b64, mime: lastImg.mime, views: cadViews });
+      const r = await api.post("/fixture/sketch", { concept: c, part_name: f.part_name, material: f.material, dims: d, image_base64: li.b64, mime: li.mime, views: v });
       if (r.data?.svg) setSketchSvg(r.data.svg); else toast.error("Couldn't produce a sketch — try again.");
     } catch (e) { toast.error("Sketch failed"); }
     setSketching(false);
@@ -91,7 +103,7 @@ export default function FixtureConcept() {
     if (!concept) return;
     try {
       const sketch_png_base64 = sketchSvg ? await svgToPng(sketchSvg) : "";
-      const r = await api.post("/fixture/concept/pdf", { concept, meta: { part_name: f.part_name }, sketch_png_base64 }, { responseType: "blob" });
+      const r = await api.post("/fixture/concept/pdf", { concept, meta: { part_name: f.part_name }, sketch_png_base64, cad_views_base64: cadViews }, { responseType: "blob" });
       const url = URL.createObjectURL(new Blob([r.data]));
       const a = document.createElement("a"); a.href = url; a.download = `FixtureConcept_${f.part_name || "part"}.pdf`; a.click(); URL.revokeObjectURL(url);
     } catch (e) { toast.error("PDF failed"); }
@@ -144,18 +156,30 @@ export default function FixtureConcept() {
           {!concept && !raw && <div className="text-slate-400 text-sm flex items-center justify-center h-full">The fixture concept brief will appear here.</div>}
           {raw && <pre className="text-xs whitespace-pre-wrap text-slate-600">{raw}</pre>}
           {concept && <Brief c={concept} onPdf={downloadPdf} />}
+          {concept && cadViews.length > 0 && (
+            <div className="mt-4 border-t border-slate-200 pt-3">
+              <div className="text-[11px] uppercase tracking-wider text-slate-500 mb-2">Actual part — rendered from your 3D file (included in the PDF)</div>
+              <div className="grid grid-cols-3 gap-2">
+                {cadViews.map((v, i) => (
+                  <img key={i} src={`data:image/png;base64,${v}`} alt={["Isometric", "Top", "Right"][i] || `View ${i + 1}`} className="border border-slate-200 rounded bg-white w-full" />
+                ))}
+              </div>
+            </div>
+          )}
           {concept && (
             <div className="mt-4 border-t border-slate-200 pt-3">
               <div className="flex items-center justify-between mb-2">
-                <div className="text-[11px] uppercase tracking-wider text-slate-500">Concept sketch (schematic)</div>
+                <div className="text-[11px] uppercase tracking-wider text-slate-500">Concept sketch (AI schematic — included in the PDF)</div>
                 <div className="flex gap-2">
                   {sketchSvg && <Button onClick={downloadSvg} variant="outline" size="sm" className="rounded-sm"><Download className="h-4 w-4 mr-1" /> SVG</Button>}
-                  <Button onClick={genSketch} disabled={sketching} variant="outline" size="sm" className="rounded-sm">{sketching ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : <Wrench className="h-4 w-4 mr-1" />}{sketchSvg ? "Regenerate" : "Generate sketch"}</Button>
+                  <Button onClick={() => genSketch()} disabled={sketching} variant="outline" size="sm" className="rounded-sm">{sketching ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : <Wrench className="h-4 w-4 mr-1" />}{sketching ? "Sketching…" : "Regenerate"}</Button>
                 </div>
               </div>
               {sketchSvg
                 ? <div className="border border-slate-200 rounded bg-white overflow-auto [&_svg]:w-full [&_svg]:h-auto" dangerouslySetInnerHTML={{ __html: sketchSvg }} />
-                : <div className="text-xs text-slate-400">Click "Generate sketch" for a labelled top + front view concept (schematic, not a manufacturing drawing).</div>}
+                : (sketching
+                    ? <div className="text-xs text-slate-400 flex items-center gap-2"><Loader2 className="h-3.5 w-3.5 animate-spin" /> Drawing the concept schematic…</div>
+                    : <div className="text-xs text-slate-400">No sketch yet — click "Regenerate" to draw a labelled top + front view concept (schematic, not a manufacturing drawing).</div>)}
             </div>
           )}
         </div>
