@@ -8138,6 +8138,47 @@ async def _do_import_xlsx(path: Path, opts: VyaparImportIn) -> Dict[str, Any]:
     wb.close()
     return res
 
+_VYAPAR_BG_TASKS: set = set()
+
+async def _run_vyapar_import_job(job_id: str, path: Path, kind: str, payload: "VyaparImportIn", user: dict):
+    """Runs the (potentially multi-minute) import off the request/response cycle so Railway's
+    edge proxy never kills it with a 503 mid-import. Progress/result is polled via job_id."""
+    try:
+        p = path
+        k = kind
+        if k in ("zip", "zip_sqlite"):
+            import zipfile, tempfile
+            with zipfile.ZipFile(p) as z:
+                inner = [n for n in z.namelist() if n.endswith(".db") or n.endswith(".sqlite") or n.endswith(".vyp")]
+                if not inner:
+                    raise ValueError("Archive doesn't contain a SQLite database.")
+                tmpd = Path(tempfile.mkdtemp())
+                z.extract(inner[0], tmpd)
+                p = tmpd / inner[0]
+                k = "sqlite"
+        if k == "sqlite":
+            details = await _do_import_sqlite(p, payload)
+        elif k == "xlsx":
+            details = await _do_import_xlsx(p, payload)
+        else:
+            raise ValueError(f"Cannot import file kind '{k}'. Please export an Excel file from Vyapar (Reports → Sale/Party/Item/Purchase Report → Excel icon).")
+        await write_audit(user["name"], "vyapar_import", "import", payload.token,
+                          {**details, "dry_run": payload.dry_run})
+        bits = [f"{details.get(k2,0)} {k2.replace('_',' ')}" for k2 in
+                ("parties","items","sales","purchases","payments_in","payments_out","quotations","sale_orders","purchase_orders","delivery_challans","job_work_out","sale_returns")
+                if details.get(k2)]
+        summary = " · ".join(bits) or "nothing matched"
+        if payload.dry_run: summary += " (dry run)"
+        if details.get("company_seeded"): summary += " · company details auto-filled"
+        await db.vyapar_import_jobs.update_one({"id": job_id}, {"$set": {
+            "status": "done", "finished_at": now_iso(),
+            "result": {"ok": True, "summary": summary, "details": details, "dry_run": payload.dry_run},
+        }})
+    except Exception as e:
+        await db.vyapar_import_jobs.update_one({"id": job_id}, {"$set": {
+            "status": "error", "finished_at": now_iso(), "error": str(e),
+        }})
+
 @api.post("/integrations/vyapar/import")
 async def vyapar_import(payload: VyaparImportIn, user=Depends(require_roles("admin"))):
     meta = await db.vyapar_uploads.find_one({"id": payload.token, "user_id": user["id"]}, {"_id": 0})
@@ -8146,32 +8187,22 @@ async def vyapar_import(payload: VyaparImportIn, user=Depends(require_roles("adm
     path = Path(meta["path"])
     if not path.exists():
         raise HTTPException(404, "Uploaded file is no longer on disk. Please re-upload.")
-    kind = meta.get("kind")
-    if kind in ("zip", "zip_sqlite"):
-        import zipfile, tempfile
-        with zipfile.ZipFile(path) as z:
-            inner = [n for n in z.namelist() if n.endswith(".db") or n.endswith(".sqlite") or n.endswith(".vyp")]
-            if not inner:
-                raise HTTPException(400, "Archive doesn't contain a SQLite database.")
-            tmpd = Path(tempfile.mkdtemp())
-            z.extract(inner[0], tmpd)
-            path = tmpd / inner[0]
-            kind = "sqlite"
-    if kind == "sqlite":
-        details = await _do_import_sqlite(path, payload)
-    elif kind == "xlsx":
-        details = await _do_import_xlsx(path, payload)
-    else:
-        raise HTTPException(400, f"Cannot import file kind '{kind}'. Please export an Excel file from Vyapar (Reports → Sale/Party/Item/Purchase Report → Excel icon).")
-    await write_audit(user["name"], "vyapar_import", "import", payload.token,
-                      {**details, "dry_run": payload.dry_run})
-    bits = [f"{details.get(k,0)} {k.replace('_',' ')}" for k in
-            ("parties","items","sales","purchases","payments_in","payments_out","quotations","sale_orders","purchase_orders","delivery_challans","job_work_out","sale_returns")
-            if details.get(k)]
-    summary = " · ".join(bits) or "nothing matched"
-    if payload.dry_run: summary += " (dry run)"
-    if details.get("company_seeded"): summary += " · company details auto-filled"
-    return {"ok": True, "summary": summary, "details": details, "dry_run": payload.dry_run}
+    job_id = new_id()
+    await db.vyapar_import_jobs.insert_one({
+        "id": job_id, "token": payload.token, "user_id": user["id"], "user_name": user["name"],
+        "status": "running", "opts": payload.dict(), "started_at": now_iso(),
+    })
+    task = asyncio.create_task(_run_vyapar_import_job(job_id, path, meta.get("kind"), payload, user))
+    _VYAPAR_BG_TASKS.add(task)
+    task.add_done_callback(_VYAPAR_BG_TASKS.discard)
+    return {"ok": True, "job_id": job_id, "status": "running"}
+
+@api.get("/integrations/vyapar/import/jobs/{job_id}")
+async def vyapar_import_job_status(job_id: str, user=Depends(require_roles("admin"))):
+    job = await db.vyapar_import_jobs.find_one({"id": job_id, "user_id": user["id"]}, {"_id": 0})
+    if not job:
+        raise HTTPException(404, "Job not found")
+    return job
 
 
 class VyaparReconcileIn(BaseModel):
