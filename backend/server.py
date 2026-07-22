@@ -8405,11 +8405,6 @@ FIXTURE_SYSTEM = (
 )
 FIXTURE_SCHEMA = (
     'Return ONLY this JSON: {"fixture_type":str, "summary":str, '
-    '"locating_scheme":str, "locators":[str], "clamping":[str], "supports":[str], '
-    '"base_plate":str, "actuation":str, '
-    '"standard_components":[{"item":str,"qty":str,"note":str}], '
-    '"access_and_clearance":[str], "distortion_risks":[str], "inspection_points":[str], '
-    '"estimated_build":{"cost_inr":number,"time_days":number}, "assumptions":str, '
     '"geometry":{'
     '"base_plate":{"length_mm":number,"width_mm":number,"thickness_mm":number,'
     '"cutouts":[{"x_mm":number,"y_mm":number,"w_mm":number,"h_mm":number}]},'
@@ -8418,21 +8413,31 @@ FIXTURE_SCHEMA = (
     '"clamps":[{"x_mm":number,"y_mm":number,"height_mm":number}],'
     '"part_proxy":{"type":"tube"|"block"|"none","length_mm":number,"diameter_mm":number,'
     '"x_mm":number,"y_mm":number,"z_mm":number,"axis":"x"|"y"}'
-    '}}. '
+    '}, '
+    '"locating_scheme":str, "locators":[str], "clamping":[str], "supports":[str], '
+    '"base_plate":str, "actuation":str, '
+    '"standard_components":[{"item":str,"qty":str,"note":str}], '
+    '"access_and_clearance":[str], "distortion_risks":[str], "inspection_points":[str], '
+    '"estimated_build":{"cost_inr":number,"time_days":number}, "assumptions":str}. '
     "fixture_type = the recommended type (e.g. Milling fixture, Drilling jig, Welding jig, "
     "Hydraulic machining fixture, Leak-test fixture, Inspection fixture). "
     "locating_scheme = how the 3-2-1 datums are established. standard_components = a BOM of "
     "off-the-shelf parts with quantities. "
     "GEOMETRY is a SEPARATE, numeric, machine-usable version of the same concept, used to build a "
-    "real (simplified) 3D render — never omit it, never leave it as placeholder zeros. Coordinate "
-    "convention: origin (0,0,0) at one corner of the base plate's bottom face; X runs along the "
-    "plate's length, Y along its width, Z is up. base_plate.thickness_mm typically 12-20. Each "
-    "post's x_mm/y_mm is the CENTRE of its footprint on the plate; height_mm is measured from the "
-    "plate's TOP face; give one post per real support node/bend/end you identified in the part (same "
-    "count as standard_components). cutouts are lightening pockets cut through the plate between "
-    "posts. part_proxy approximates the real part resting in the fixture using its actual bounding "
-    "box/geometry from the inputs — 'tube' for round/tubular parts, 'block' for prismatic parts; set "
-    "type='none' only if neither approximation is reasonable."
+    "real (simplified) 3D render — never omit it, never leave it as placeholder zeros. KEEP IT SMALL: "
+    "posts array MUST have AT MOST 6 entries and cutouts MUST have AT MOST 4 entries, total — if the "
+    "part has more real support nodes than that, merge the least critical ones rather than listing "
+    "more (this is a rough concept render, not a manufacturing model; going over this limit will "
+    "truncate your response and break it, so stay under it even if standard_components mentions a "
+    "higher post count in the text BOM). Coordinate convention: origin (0,0,0) at one corner of the "
+    "base plate's bottom face; X runs along the plate's length, Y along its width, Z is up. "
+    "base_plate.thickness_mm typically 12-20. Each post's x_mm/y_mm is the CENTRE of its footprint on "
+    "the plate; height_mm is measured from the plate's TOP face. part_proxy approximates the real "
+    "part resting in the fixture using its actual bounding box/geometry from the inputs — 'tube' for "
+    "round/tubular parts, 'block' for prismatic parts; set type='none' only if neither approximation "
+    "is reasonable. Write the geometry object BEFORE the longer text fields (access_and_clearance, "
+    "distortion_risks, inspection_points, assumptions) in your JSON so it's never at risk of being cut "
+    "off if you run long."
 )
 
 class FixtureConceptIn(BaseModel):
@@ -8535,7 +8540,7 @@ async def fixture_concept(inp: FixtureConceptIn, user=Depends(get_current_user))
     for v in cad_views:
         content.append({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": v}})
     content.append({"type": "text", "text": FIXTURE_SCHEMA + "\n\nINPUTS:\n" + ctx})
-    body = {"model": QC_VISION_MODEL, "max_tokens": 3800, "system": FIXTURE_SYSTEM, "messages": [{"role": "user", "content": content}]}
+    body = {"model": QC_VISION_MODEL, "max_tokens": 6000, "system": FIXTURE_SYSTEM, "messages": [{"role": "user", "content": content}]}
     headers = {"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"}
     try:
         async with httpx.AsyncClient(timeout=120) as cx:
@@ -8555,6 +8560,15 @@ async def fixture_concept(inp: FixtureConceptIn, user=Depends(get_current_user))
     geo = concept.get("geometry") if isinstance(concept, dict) else None
     if geo and CAD_SERVICE_URL:
         try:
+            # Defensive clamp: even with the prompt's cap, never send a runaway number of
+            # features to the CAD builder (keeps boolean-op time/stability bounded).
+            if isinstance(geo.get("posts"), list):
+                geo["posts"] = geo["posts"][:6]
+            if isinstance(geo.get("clamps"), list):
+                geo["clamps"] = geo["clamps"][:2]
+            bp = geo.get("base_plate")
+            if isinstance(bp, dict) and isinstance(bp.get("cutouts"), list):
+                bp["cutouts"] = bp["cutouts"][:4]
             async with httpx.AsyncClient(timeout=90) as cx:
                 fr = await cx.post(f"{CAD_SERVICE_URL}/fixture-build", json={**geo, "views": 3})
             if fr.status_code < 400:
