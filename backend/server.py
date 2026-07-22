@@ -9963,6 +9963,64 @@ async def dashboard_shopfloor(user=Depends(get_current_user)):
         "today": today_iso,
     }
 
+@api.get("/parties/{pid}/transactions")
+async def party_transactions(pid: str, user=Depends(get_current_user)):
+    """Document-centric transaction list for one party (invoices/bills/returns/payments), the
+    data behind the Party Details drill-down panel: Type/Number/Date/Total/Balance/Due Date/Status
+    per row, newest first. Distinct from /parties/{pid}/statement (a chronological debit/credit
+    running-balance ledger) — this mirrors each document's own status instead."""
+    customer = await db.customers.find_one({"id": pid}, {"_id": 0})
+    supplier = None if customer else await db.suppliers.find_one({"id": pid}, {"_id": 0})
+    party = customer or supplier
+    if not party:
+        raise HTTPException(404, "Party not found")
+    kind = "customer" if customer else "supplier"
+    rows = []
+    if kind == "customer":
+        for inv in await db.invoices.find({"customer_id": pid}, {"_id": 0}).to_list(5000):
+            rows.append({"type": "Sale", "number": inv.get("code"), "date": inv.get("date"),
+                         "total": float(inv.get("total", 0) or 0),
+                         "balance": float(inv.get("outstanding", inv.get("total", 0)) or 0),
+                         "due_date": inv.get("due_date"), "status": inv.get("status"),
+                         "doc_type": "invoice", "id": inv.get("id")})
+        for cn in await db.credit_notes.find({"customer_id": pid}, {"_id": 0}).to_list(5000):
+            rows.append({"type": "Sale Return", "number": cn.get("code"), "date": cn.get("date"),
+                         "total": float(cn.get("total", 0) or 0), "balance": 0,
+                         "due_date": None, "status": cn.get("status"),
+                         "doc_type": "credit_note", "id": cn.get("id")})
+        for p in await db.payments_in.find({"party_id": pid}, {"_id": 0}).to_list(5000):
+            amt = float(p.get("amount", 0) or 0); alloc = float(p.get("allocated_amount", 0) or 0)
+            rows.append({"type": "Payment In", "number": p.get("code"), "date": p.get("date"),
+                         "total": amt, "balance": round(amt - alloc, 2),
+                         "due_date": None, "status": p.get("status"),
+                         "doc_type": "payment_in", "id": p.get("id")})
+    else:
+        for b in await db.vendor_bills.find({"supplier_id": pid}, {"_id": 0}).to_list(5000):
+            rows.append({"type": "Purchase", "number": b.get("code"), "date": b.get("date"),
+                         "total": float(b.get("total", 0) or 0),
+                         "balance": float(b.get("outstanding", b.get("total", 0)) or 0),
+                         "due_date": b.get("due_date"), "status": b.get("status"),
+                         "doc_type": "vendor_bill", "id": b.get("id")})
+        for pr in await db.purchase_returns.find({"supplier_id": pid}, {"_id": 0}).to_list(5000):
+            rows.append({"type": "Purchase Return", "number": pr.get("code"), "date": pr.get("date"),
+                         "total": float(pr.get("total", 0) or 0), "balance": 0,
+                         "due_date": None, "status": pr.get("status"),
+                         "doc_type": "purchase_return", "id": pr.get("id")})
+        for p in await db.payments_out.find({"party_id": pid}, {"_id": 0}).to_list(5000):
+            amt = float(p.get("amount", 0) or 0); alloc = float(p.get("allocated_amount", 0) or 0)
+            rows.append({"type": "Payment Out", "number": p.get("code"), "date": p.get("date"),
+                         "total": amt, "balance": round(amt - alloc, 2),
+                         "due_date": None, "status": p.get("status"),
+                         "doc_type": "payment_out", "id": p.get("id")})
+    rows.sort(key=lambda r: str(r.get("date") or ""), reverse=True)
+    return {
+        "party": {"id": party.get("id"), "name": party.get("name"), "phone": party.get("phone"),
+                  "email": party.get("email"), "gstin": party.get("gstin"), "address": party.get("address"),
+                  "contact_person": party.get("contact_person")},
+        "kind": kind,
+        "transactions": rows,
+    }
+
 @api.get("/parties/{pid}/statement")
 async def party_statement(pid: str, period: str = "this_year", user=Depends(get_current_user)):
     """Per-party ledger: opening balance + transactions + closing balance."""
