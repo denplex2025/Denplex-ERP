@@ -1,5 +1,6 @@
 import { CrudPage } from "@/components/erp/CrudPage";
 import { fmtDate } from "@/components/erp/Primitives";
+import { ViewLedgerButton } from "@/components/erp/PartyLedgerSheet";
 
 const fields = [
   { name: "name", label: "Supplier Name", required: true },
@@ -29,6 +30,7 @@ export default function Suppliers() {
       fields={fields}
       columns={cols}
       whatsappField="phone"
+      rowActions={(row) => <ViewLedgerButton row={row} />}
     />
   );
 }

@@ -1,5 +1,6 @@
 import { CrudPage, StatusBadge } from "@/components/erp/CrudPage";
 import { fmtDate } from "@/components/erp/Primitives";
+import { ViewLedgerButton } from "@/components/erp/PartyLedgerSheet";
 
 const fields = [
   { name: "name", label: "Customer Name", required: true },
@@ -34,6 +35,7 @@ export default function Customers() {
       columns={cols}
       defaults={{ customer_type: "one_time" }}
       whatsappField="phone"
+      rowActions={(row) => <ViewLedgerButton row={row} />}
     />
   );
 }
