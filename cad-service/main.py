@@ -45,6 +45,113 @@ def _render_views(wp, n, tmp):
     return views
 
 
+def _render_views_shaded(wp, n, tmp):
+    """Real shaded offscreen render via VTK (grey solid faces + dark edges, white background) —
+    much closer to a SolidWorks/Fusion 'shaded with edges' view than the plain wireframe SVG export.
+    Needs the container's virtual display (see Dockerfile: xvfb-run wraps the whole process) because
+    VTK's render window talks to an X server even in offscreen mode."""
+    import cadquery as cq
+    import vtk
+
+    stlp = os.path.join(tmp, "shaded.stl")
+    cq.exporters.export(wp, stlp, tolerance=0.15, angularTolerance=0.3)
+
+    reader = vtk.vtkSTLReader()
+    reader.SetFileName(stlp)
+    reader.Update()
+    if reader.GetOutput().GetNumberOfPoints() == 0:
+        raise RuntimeError("STL tessellation produced no geometry")
+
+    mapper = vtk.vtkPolyDataMapper()
+    mapper.SetInputConnection(reader.GetOutputPort())
+
+    actor = vtk.vtkActor()
+    actor.SetMapper(mapper)
+    prop = actor.GetProperty()
+    prop.SetColor(0.82, 0.82, 0.84)
+    prop.SetAmbient(0.35)
+    prop.SetDiffuse(0.7)
+    prop.SetSpecular(0.15)
+    prop.SetSpecularPower(20)
+    # Raw per-triangle edges (EdgeVisibilityOn) draw every STL tessellation diagonal across flat
+    # faces too, which looks like cross-hatching instead of clean CAD lines — especially bad on
+    # square-on top/right views where a flat face fills the frame. Instead: shade with edges OFF,
+    # and draw only real sharp/boundary edges via vtkFeatureEdges as a separate black line actor.
+    prop.EdgeVisibilityOff()
+
+    feat = vtk.vtkFeatureEdges()
+    feat.SetInputConnection(reader.GetOutputPort())
+    feat.BoundaryEdgesOn()
+    feat.FeatureEdgesOn()
+    feat.SetFeatureAngle(30)
+    feat.NonManifoldEdgesOff()
+    feat.ManifoldEdgesOff()
+    feat.ColoringOff()
+    edge_mapper = vtk.vtkPolyDataMapper()
+    edge_mapper.SetInputConnection(feat.GetOutputPort())
+    edge_actor = vtk.vtkActor()
+    edge_actor.SetMapper(edge_mapper)
+    edge_actor.GetProperty().SetColor(0.12, 0.12, 0.12)
+    edge_actor.GetProperty().SetLineWidth(1.4)
+
+    renderer = vtk.vtkRenderer()
+    renderer.AddActor(actor)
+    renderer.AddActor(edge_actor)
+    renderer.SetBackground(1, 1, 1)
+
+    renwin = vtk.vtkRenderWindow()
+    renwin.SetOffScreenRendering(1)
+    renwin.AddRenderer(renderer)
+    renwin.SetSize(640, 480)
+
+    cam = renderer.GetActiveCamera()
+    cam.ParallelProjectionOn()
+
+    plan = [((1, 1, 1), (0, 0, 1), "iso"), ((0, 0, 1), (0, 1, 0), "top"), ((1, 0, 0), (0, 0, 1), "right")]
+    views = []
+    for direction, up, _name in plan[:max(0, min(int(n or 0), 3))]:
+        renderer.ResetCamera()
+        bounds = actor.GetBounds()
+        cx = (bounds[0] + bounds[1]) / 2.0
+        cy = (bounds[2] + bounds[3]) / 2.0
+        cz = (bounds[4] + bounds[5]) / 2.0
+        diag = ((bounds[1] - bounds[0]) ** 2 + (bounds[3] - bounds[2]) ** 2 + (bounds[5] - bounds[4]) ** 2) ** 0.5
+        dist = max(diag, 1.0) * 2.0
+        cam.SetFocalPoint(cx, cy, cz)
+        cam.SetPosition(cx + direction[0] * dist, cy + direction[1] * dist, cz + direction[2] * dist)
+        cam.SetViewUp(*up)
+        renderer.ResetCamera()
+        renderer.ResetCameraClippingRange()
+        renwin.Render()
+
+        w2i = vtk.vtkWindowToImageFilter()
+        w2i.SetInput(renwin)
+        w2i.SetInputBufferTypeToRGB()
+        w2i.Update()
+        writer = vtk.vtkPNGWriter()
+        writer.SetWriteToMemory(1)
+        writer.SetInputConnection(w2i.GetOutputPort())
+        writer.Write()
+        result = writer.GetResult()
+        png_bytes = bytes(memoryview(result))
+        if not png_bytes:
+            raise RuntimeError("VTK produced an empty PNG")
+        views.append(base64.b64encode(png_bytes).decode())
+    return views
+
+
+def _render_views_best(wp, n, tmp):
+    """Try the shaded VTK render first; silently fall back to the wireframe SVG render if VTK/xvfb
+    isn't available or errors for any reason, so a rendering problem never breaks the whole request."""
+    try:
+        views = _render_views_shaded(wp, n, tmp)
+        if views:
+            return views
+    except Exception:
+        pass
+    return _render_views(wp, n, tmp)
+
+
 # ---------------- Fixture concept -> real parametric CAD (Phase C) ----------------
 # The AI fixture generator now emits a numeric "geometry" spec (base plate + posts + clamps
 # + a simple part proxy) alongside its text brief. This turns that spec into an actual
@@ -183,7 +290,7 @@ def fixture_build(spec: FixtureBuildIn):
         raise HTTPException(400, f"Could not build fixture geometry: {e}")
     views = []
     try:
-        views = _render_views(solid, spec.views, tmp)
+        views = _render_views_best(solid, spec.views, tmp)
     except Exception:
         views = []
     if not views:
@@ -273,7 +380,7 @@ def analyze(inp: AnalyzeIn):
             mesh_b64 = ""; mesh_fmt = ""
 
     try:
-        views = _render_views(wp, inp.views, tmp)
+        views = _render_views_best(wp, inp.views, tmp)
     except Exception:
         views = []
 
