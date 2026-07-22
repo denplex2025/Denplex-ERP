@@ -9975,38 +9975,49 @@ async def party_transactions(pid: str, user=Depends(get_current_user)):
     if not party:
         raise HTTPException(404, "Party not found")
     kind = "customer" if customer else "supplier"
+    # NOTE: Vyapar-imported documents (all 839 invoices / 1822 bills / 532+1032 payments / 8 credit
+    # notes / 5 purchase returns, confirmed live) never got a real customer_id/supplier_id/party_id —
+    # the importer only wrote a denormalized *_name string. So matching on id alone returns nothing
+    # for every legacy record; match on name too (case-insensitive exact) as the primary path, with
+    # id kept as an $or arm so any future non-imported document that DOES set the id still matches.
+    name = (party.get("name") or "").strip()
+    name_rx = {"$regex": f"^{re.escape(name)}$", "$options": "i"} if name else None
     rows = []
     if kind == "customer":
-        for inv in await db.invoices.find({"customer_id": pid}, {"_id": 0}).to_list(5000):
+        cust_q = {"$or": [{"customer_id": pid}] + ([{"customer_name": name_rx}] if name_rx else [])}
+        pay_q = {"$or": [{"party_id": pid}] + ([{"party_name": name_rx}] if name_rx else [])}
+        for inv in await db.invoices.find(cust_q, {"_id": 0}).to_list(5000):
             rows.append({"type": "Sale", "number": inv.get("code"), "date": inv.get("date"),
                          "total": float(inv.get("total", 0) or 0),
                          "balance": float(inv.get("outstanding", inv.get("total", 0)) or 0),
                          "due_date": inv.get("due_date"), "status": inv.get("status"),
                          "doc_type": "invoice", "id": inv.get("id")})
-        for cn in await db.credit_notes.find({"customer_id": pid}, {"_id": 0}).to_list(5000):
+        for cn in await db.credit_notes.find(cust_q, {"_id": 0}).to_list(5000):
             rows.append({"type": "Sale Return", "number": cn.get("code"), "date": cn.get("date"),
                          "total": float(cn.get("total", 0) or 0), "balance": 0,
                          "due_date": None, "status": cn.get("status"),
                          "doc_type": "credit_note", "id": cn.get("id")})
-        for p in await db.payments_in.find({"party_id": pid}, {"_id": 0}).to_list(5000):
+        for p in await db.payments_in.find(pay_q, {"_id": 0}).to_list(5000):
             amt = float(p.get("amount", 0) or 0); alloc = float(p.get("allocated_amount", 0) or 0)
             rows.append({"type": "Payment In", "number": p.get("code"), "date": p.get("date"),
                          "total": amt, "balance": round(amt - alloc, 2),
                          "due_date": None, "status": p.get("status"),
                          "doc_type": "payment_in", "id": p.get("id")})
     else:
-        for b in await db.vendor_bills.find({"supplier_id": pid}, {"_id": 0}).to_list(5000):
+        supp_q = {"$or": [{"supplier_id": pid}] + ([{"supplier_name": name_rx}] if name_rx else [])}
+        pay_q = {"$or": [{"party_id": pid}] + ([{"party_name": name_rx}] if name_rx else [])}
+        for b in await db.vendor_bills.find(supp_q, {"_id": 0}).to_list(5000):
             rows.append({"type": "Purchase", "number": b.get("code"), "date": b.get("date"),
                          "total": float(b.get("total", 0) or 0),
                          "balance": float(b.get("outstanding", b.get("total", 0)) or 0),
                          "due_date": b.get("due_date"), "status": b.get("status"),
                          "doc_type": "vendor_bill", "id": b.get("id")})
-        for pr in await db.purchase_returns.find({"supplier_id": pid}, {"_id": 0}).to_list(5000):
+        for pr in await db.purchase_returns.find(supp_q, {"_id": 0}).to_list(5000):
             rows.append({"type": "Purchase Return", "number": pr.get("code"), "date": pr.get("date"),
                          "total": float(pr.get("total", 0) or 0), "balance": 0,
                          "due_date": None, "status": pr.get("status"),
                          "doc_type": "purchase_return", "id": pr.get("id")})
-        for p in await db.payments_out.find({"party_id": pid}, {"_id": 0}).to_list(5000):
+        for p in await db.payments_out.find(pay_q, {"_id": 0}).to_list(5000):
             amt = float(p.get("amount", 0) or 0); alloc = float(p.get("allocated_amount", 0) or 0)
             rows.append({"type": "Payment Out", "number": p.get("code"), "date": p.get("date"),
                          "total": amt, "balance": round(amt - alloc, 2),
