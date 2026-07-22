@@ -6,7 +6,7 @@ FROM python:3.11-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 libxrender1 libxext6 libsm6 libglib2.0-0 libfontconfig1 \
     libcairo2 libpango-1.0-0 libgdk-pixbuf-2.0-0 \
-    xvfb libglu1-mesa libgl1-mesa-dri \
+    xvfb xauth libglu1-mesa libgl1-mesa-dri \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
