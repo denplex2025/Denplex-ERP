@@ -7723,6 +7723,42 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
     except Exception:
         pass
 
+    # Purchaser Name (Vyapar custom/UDF field) -> txn_id lookup, so it can print on the invoice
+    # exactly like Vyapar does (kb_udf_fields defines the field, kb_udf_values holds per-txn values).
+    purchaser_name_lookup: Dict[int, str] = {}
+    try:
+        cur.execute('SELECT udf_field_id FROM "kb_udf_fields" WHERE udf_field_name = ?', ("Purchaser Name",))
+        _pf_ids = [int(r["udf_field_id"]) for r in cur.fetchall()]
+        if _pf_ids:
+            qmarks = ",".join("?" * len(_pf_ids))
+            cur.execute(f'SELECT udf_ref_id, udf_value FROM "kb_udf_values" WHERE udf_value_field_id IN ({qmarks})', _pf_ids)
+            for r in cur.fetchall():
+                if r["udf_value"]:
+                    purchaser_name_lookup[int(r["udf_ref_id"])] = str(r["udf_value"]).strip()
+    except Exception:
+        pass
+
+    # Payment type names (moved up from the Payment-In/Out pass below so invoices/bills can also
+    # print a Payment Mode — Vyapar shows "Credit" when no payment type is set on the doc itself).
+    ptype_name: Dict[int, str] = {}
+    try:
+        cur.execute('SELECT paymentType_id, paymentType_name FROM "kb_paymentTypes"')
+        for r in cur.fetchall():
+            ptype_name[int(r["paymentType_id"])] = (r["paymentType_name"] or "")
+    except Exception:
+        pass
+
+    def _map_ptype(pid):
+        if pid is None:
+            return "Credit"
+        nm = (ptype_name.get(int(pid)) if pid is not None else "") or ""
+        nmu = nm.upper()
+        if "CASH" in nmu: return "Cash"
+        if "CHEQUE" in nmu: return "Cheque"
+        if "UPI" in nmu: return "UPI"
+        if "CARD" in nmu: return "Card"
+        return "Bank Transfer" if nm else "Credit"
+
     # --- Line items pre-grouped by txn_id ---
     lines_by_txn: Dict[int, List[Dict[str, Any]]] = {}
     try:
@@ -7814,6 +7850,24 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
         tds_amt = float(r["txn_tds_tax_amount"] or 0)
         tds_info = tds_lookup.get(int(r["txn_tds_tax_id"])) if r["txn_tds_tax_id"] is not None else None
 
+        # Vyapar's kb_lineitems.lineitem_tax_amount is often 0/unset even when the transaction as a
+        # whole clearly carries tax (txn_tax_amount > 0) — this used to silently print "0%" GST on
+        # every line of the PDF Tax Summary even though the invoice total was correct. When that
+        # mismatch is detected, redistribute the doc-level tax proportionally across its lines and
+        # snap to the nearest real GST slab, so the printed Tax Summary matches the invoice total.
+        if ln and tax_total > 0.01 and not any(float(l.get("gst_rate", 0) or 0) > 0 for l in ln):
+            _line_taxable_sum = sum(
+                max(float(l.get("qty", 0) or 0) * float(l.get("rate", 0) or 0) - float(l.get("discount_amount", 0) or 0), 0)
+                for l in ln
+            )
+            if _line_taxable_sum > 0:
+                _raw_rate = tax_total / _line_taxable_sum * 100
+                _rate = min([0, 5, 12, 18, 28], key=lambda s: abs(s - _raw_rate))
+                for l in ln:
+                    _lt = max(float(l.get("qty", 0) or 0) * float(l.get("rate", 0) or 0) - float(l.get("discount_amount", 0) or 0), 0)
+                    l["gst_rate"] = _rate
+                    l["gst_amount"] = round(_lt * _rate / 100, 2)
+
         doc: Dict[str, Any] = {
             "id": new_id(),
             "code": code,
@@ -7830,6 +7884,11 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
             "vyapar_txn_type": t,
             "source": "vyapar",
             "created_at": str(r["txn_date_created"] or now_iso()),
+            "po_date": str(r["txn_po_date"] or "")[:10],
+            "po_number": (r["txn_po_ref_number"] or "").strip(),
+            "purchaser_name": purchaser_name_lookup.get(int(r["txn_id"]), ""),
+            "payment_mode": _map_ptype(r["txn_payment_type_id"]),
+            "ship_to_address": (r["txn_shipping_address"] or "").strip(),
         }
         if tds_amt:
             doc["tds"] = round(tds_amt, 2)
@@ -7877,22 +7936,10 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
         elif t == 65: res["proformas"] += 1
 
     # --- Payments In/Out (kb_transactions type 3/4) + bill-to-bill allocations (kb_txn_links) ---
-    ptype_name: Dict[int, str] = {}
-    try:
-        cur.execute('SELECT paymentType_id, paymentType_name FROM "kb_paymentTypes"')
-        for r in cur.fetchall():
-            ptype_name[int(r["paymentType_id"])] = (r["paymentType_name"] or "")
-    except Exception:
-        pass
-
-    def _map_ptype(pid):
-        nm = (ptype_name.get(int(pid)) if pid is not None else "") or ""
-        nmu = nm.upper()
-        if "CASH" in nmu: return "Cash"
-        if "CHEQUE" in nmu: return "Cheque"
-        if "UPI" in nmu: return "UPI"
-        if "CARD" in nmu: return "Card"
-        return "Bank Transfer" if nm else "Cash"
+    # (ptype_name / _map_ptype now built earlier, above the invoice/bill loop, so both passes share it —
+    # for payments-in/out specifically, "Credit" doesn't make sense, so treat a missing type as Cash.)
+    def _map_ptype_payment(pid):
+        return "Cash" if pid is None else _map_ptype(pid)
 
     pay_allocs: Dict[int, List] = {}
     try:
@@ -7922,7 +7969,7 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
         code = (f"PMT-IN-VY-{r['txn_id']}" if is_in else f"PMT-OUT-VY-{r['txn_id']}")
         pdoc = {"id": new_id(), "code": code, "party_id": "", "party_name": party,
                 "date": str(r["txn_date"] or "")[:10] or now_iso()[:10], "amount": round(amt, 2),
-                "allocated_amount": allocated, "payment_type": _map_ptype(r["txn_payment_type_id"]),
+                "allocated_amount": allocated, "payment_type": _map_ptype_payment(r["txn_payment_type_id"]),
                 "ref_no": (r["txn_ref_number_char"] or "").strip(), "bank_name": "", "allocations": allocs,
                 "notes": (r["txn_description"] or "").strip(), "vyapar_id": str(r["txn_id"]), "source": "vyapar",
                 "created_at": str(r["txn_date_created"] or now_iso())}
@@ -7938,7 +7985,7 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
         pdoc = {"id": new_id(),
                 "code": ("PMT-IN-VYCASH-" if cp["is_in"] else "PMT-OUT-VYCASH-") + str(cp["txn_id"]),
                 "party_id": "", "party_name": cp["party"], "date": cp["date"], "amount": cp["amount"],
-                "allocated_amount": cp["amount"], "payment_type": _map_ptype(cp["ptype_id"]),
+                "allocated_amount": cp["amount"], "payment_type": _map_ptype_payment(cp["ptype_id"]),
                 "ref_no": "", "bank_name": "",
                 "allocations": [{"document_id": cp["doc_id"], "document_code": cp["doc_code"],
                                  "document_type": "invoice" if cp["is_in"] else "vendor_bill",
@@ -7980,7 +8027,7 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
                     "party_id": "", "party_name": "",
                     "date": str(r["txn_date"] or "")[:19] or now_iso(),
                     "amount": round(e_cash + e_bal, 2), "paid_amount": round(e_cash, 2),
-                    "payment_type": _map_ptype(r["txn_payment_type_id"]),
+                    "payment_type": _map_ptype_payment(r["txn_payment_type_id"]),
                     "ref_no": (r["txn_ref_number_char"] or "").strip(),
                     "notes": (r["txn_description"] or "").strip(),
                     "status": "Paid" if e_bal <= 0.01 else ("Partial" if e_cash > 0.01 else "Unpaid"),
@@ -8212,9 +8259,13 @@ class _VyaparBackfillIn(BaseModel):
 
 @api.post("/integrations/vyapar/backfill-outstanding")
 async def vyapar_backfill_outstanding(payload: _VyaparBackfillIn, user=Depends(require_roles("admin"))):
-    """One-off migration for invoices/bills imported before the 'outstanding' field existed:
-    sets outstanding = Vyapar's own live txn_current_balance (ground truth) via $set, matched
-    by vyapar_id. Safe to re-run. Does not touch anything else (no re-insert, no duplication)."""
+    """One-off migration for invoices/bills imported before certain fields existed. Sets, via $set
+    matched by vyapar_id (safe to re-run, no re-insert/duplication):
+    - outstanding = Vyapar's own live txn_current_balance (ground truth)
+    - po_date / po_number / ship_to_address / purchaser_name / payment_mode — these existed in the
+      original .vyb all along (txn_po_date, txn_po_ref_number, txn_shipping_address, kb_udf_values
+      "Purchaser Name", txn_payment_type_id) but weren't mapped by the importer at the time these
+      docs were first created, so they were silently missing from the invoice/bill PDF."""
     import sqlite3, zipfile, tempfile
     meta = await db.vyapar_uploads.find_one({"id": payload.token, "user_id": user["id"]}, {"_id": 0})
     if not meta:
@@ -8235,22 +8286,129 @@ async def vyapar_backfill_outstanding(payload: _VyaparBackfillIn, user=Depends(r
     def _run():
         con = sqlite3.connect(str(path)); con.row_factory = sqlite3.Row
         cur = con.cursor()
-        cur.execute("SELECT txn_id, txn_type, txn_current_balance FROM kb_transactions WHERE txn_type IN (1,2)")
-        rows = cur.fetchall()
+
+        purchaser_lookup: Dict[int, str] = {}
+        try:
+            cur.execute('SELECT udf_field_id FROM "kb_udf_fields" WHERE udf_field_name = ?', ("Purchaser Name",))
+            _pf_ids = [int(r["udf_field_id"]) for r in cur.fetchall()]
+            if _pf_ids:
+                qmarks = ",".join("?" * len(_pf_ids))
+                cur.execute(f'SELECT udf_ref_id, udf_value FROM "kb_udf_values" WHERE udf_value_field_id IN ({qmarks})', _pf_ids)
+                for r in cur.fetchall():
+                    if r["udf_value"]:
+                        purchaser_lookup[int(r["udf_ref_id"])] = str(r["udf_value"]).strip()
+        except Exception:
+            pass
+
+        ptype_lookup: Dict[int, str] = {}
+        try:
+            cur.execute('SELECT paymentType_id, paymentType_name FROM "kb_paymentTypes"')
+            for r in cur.fetchall():
+                ptype_lookup[int(r["paymentType_id"])] = (r["paymentType_name"] or "")
+        except Exception:
+            pass
+
+        def map_ptype(pid):
+            if pid is None:
+                return "Credit"
+            nm = (ptype_lookup.get(int(pid)) if pid is not None else "") or ""
+            nmu = nm.upper()
+            if "CASH" in nmu: return "Cash"
+            if "CHEQUE" in nmu: return "Cheque"
+            if "UPI" in nmu: return "UPI"
+            if "CARD" in nmu: return "Card"
+            return "Bank Transfer" if nm else "Credit"
+
+        cur.execute("""SELECT txn_id, txn_type, txn_current_balance, txn_po_date, txn_po_ref_number,
+                              txn_shipping_address, txn_payment_type_id
+                       FROM kb_transactions WHERE txn_type IN (1,2)""")
+        out_rows = []
+        for r in cur.fetchall():
+            txn_id = int(r["txn_id"])
+            out_rows.append({
+                "txn_id": txn_id, "txn_type": int(r["txn_type"]),
+                "cur_bal": float(r["txn_current_balance"] or 0),
+                "po_date": str(r["txn_po_date"] or "")[:10],
+                "po_number": (r["txn_po_ref_number"] or "").strip(),
+                "ship_to_address": (r["txn_shipping_address"] or "").strip(),
+                "purchaser_name": purchaser_lookup.get(txn_id, ""),
+                "payment_mode": map_ptype(r["txn_payment_type_id"]),
+            })
         con.close()
-        return [(int(r["txn_id"]), int(r["txn_type"]), float(r["txn_current_balance"] or 0)) for r in rows]
+        return out_rows
 
     rows = await asyncio.to_thread(_run)
     updated_inv = 0; updated_bill = 0
-    for txn_id, t, cur_bal in rows:
+    for row in rows:
+        txn_id = row["txn_id"]; t = row["txn_type"]; cur_bal = row["cur_bal"]
         out = round(max(cur_bal, 0.0), 2)
         status = ("paid" if cur_bal <= 0.01 else "sent") if t == 1 else ("received" if cur_bal <= 0.01 else "open")
         coll = db.invoices if t == 1 else db.vendor_bills
-        res = await coll.update_one({"vyapar_id": str(txn_id)}, {"$set": {"outstanding": out, "status": status}})
+        updates = {"outstanding": out, "status": status}
+        if row["po_date"]: updates["po_date"] = row["po_date"]
+        if row["po_number"]: updates["po_number"] = row["po_number"]
+        if row["ship_to_address"]: updates["ship_to_address"] = row["ship_to_address"]
+        if row["purchaser_name"]: updates["purchaser_name"] = row["purchaser_name"]
+        if row["payment_mode"]: updates["payment_mode"] = row["payment_mode"]
+        res = await coll.update_one({"vyapar_id": str(txn_id)}, {"$set": updates})
         if res.matched_count:
             if t == 1: updated_inv += 1
             else: updated_bill += 1
     return {"ok": True, "invoices_updated": updated_inv, "bills_updated": updated_bill, "total_rows": len(rows)}
+
+
+class _GstLineBackfillIn(BaseModel):
+    dry_run: bool = True
+
+_GST_SLABS = [0, 5, 12, 18, 28]
+
+async def _backfill_line_gst_for_collection(coll, dry_run: bool):
+    affected = 0
+    examples = []
+    cursor = coll.find({"source": "vyapar"}, {"_id": 0, "id": 1, "code": 1, "lines": 1, "cgst": 1, "sgst": 1, "igst": 1, "subtotal": 1})
+    async for doc in cursor:
+        lines = doc.get("lines") or []
+        if not lines:
+            continue
+        doc_tax_total = float(doc.get("cgst", 0) or 0) + float(doc.get("sgst", 0) or 0) + float(doc.get("igst", 0) or 0)
+        if doc_tax_total <= 0.01:
+            continue  # genuinely a 0-tax / non-GST document — leave alone
+        if any(float(l.get("gst_rate", 0) or 0) > 0 for l in lines):
+            continue  # lines already carry a real rate — not the bug we're fixing
+        subtotal = float(doc.get("subtotal", 0) or 0)
+        if subtotal <= 0:
+            continue
+        raw_rate = doc_tax_total / subtotal * 100
+        rate = min(_GST_SLABS, key=lambda s: abs(s - raw_rate))
+        if rate <= 0:
+            continue
+        new_lines = []
+        for l in lines:
+            qty = float(l.get("qty", 0) or 0); r = float(l.get("rate", 0) or 0)
+            disc = float(l.get("discount_amount", 0) or 0)
+            taxable = max(qty * r - disc, 0)
+            new_lines.append({**l, "gst_rate": rate, "gst_amount": round(taxable * rate / 100, 2)})
+        affected += 1
+        if len(examples) < 8:
+            examples.append({"id": doc.get("id"), "code": doc.get("code"), "rate": rate})
+        if not dry_run:
+            await coll.update_one({"id": doc["id"]}, {"$set": {"lines": new_lines}})
+    return affected, examples
+
+@api.post("/integrations/vyapar/backfill-line-gst")
+async def vyapar_backfill_line_gst(payload: _GstLineBackfillIn, user=Depends(require_roles("admin"))):
+    """One-off fix for invoices/bills whose line items show 0% GST on the PDF Tax Summary even
+    though the document's own cgst/sgst/igst totals (and hence the grand total) are correct.
+    Root cause: Vyapar's kb_lineitems.lineitem_tax_amount was often unset, so the importer's
+    per-line implied_gst_rate came out 0 even for fully-taxed invoices. This derives the real
+    rate from the document-level tax total instead (snapped to the nearest GST slab) and writes
+    it onto every line. Pure Mongo — does not need the original .vyb re-uploaded. Call with
+    dry_run=true first to see the affected count with no writes; dry_run=false to apply."""
+    inv_count, inv_examples = await _backfill_line_gst_for_collection(db.invoices, payload.dry_run)
+    bill_count, bill_examples = await _backfill_line_gst_for_collection(db.vendor_bills, payload.dry_run)
+    return {"dry_run": payload.dry_run,
+            "invoices_affected": inv_count, "invoice_examples": inv_examples,
+            "vendor_bills_affected": bill_count, "vendor_bill_examples": bill_examples}
 
 
 class VyaparReconcileIn(BaseModel):
