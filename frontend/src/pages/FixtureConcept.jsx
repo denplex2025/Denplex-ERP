@@ -25,6 +25,7 @@ export default function FixtureConcept() {
   const [sketching, setSketching] = useState(false);
   const [lastImg, setLastImg] = useState({ b64: "", mime: "" });
   const [cadViews, setCadViews] = useState([]);
+  const [fixtureCadViews, setFixtureCadViews] = useState([]);
   const imgRef = useRef(null);
   const stlRef = useRef(null);
   const set = (k, v) => setF(p => ({ ...p, [k]: v }));
@@ -33,7 +34,7 @@ export default function FixtureConcept() {
     const img = imgRef.current?.files?.[0];
     const stl = stlRef.current?.files?.[0];
     if (!img && !stl && !f.part_name) { toast.error("Upload a drawing/3D file or at least enter a part name"); return; }
-    setBusy(true); setConcept(null); setRaw(""); setSketchSvg("");
+    setBusy(true); setConcept(null); setRaw(""); setSketchSvg(""); setFixtureCadViews([]);
     try {
       const payload = { ...f, qty: Number(f.qty) || 1, fixture_type: f.fixture_type.startsWith("(") ? "" : f.fixture_type };
       if (img) { payload.image_base64 = await fileToB64(img); payload.mime = img.type || "image/png"; }
@@ -47,15 +48,19 @@ export default function FixtureConcept() {
       const gotConcept = r.data?.concept || null;
       const gotDims = r.data?.dims || null;
       const gotViews = r.data?.views || [];
+      const gotFixtureCadViews = r.data?.fixture_cad_views || [];
       setConcept(gotConcept);
       setDims(gotDims);
       setCadViews(gotViews);
+      setFixtureCadViews(gotFixtureCadViews);
       if (!gotConcept) setRaw(r.data?.raw || "No structured result.");
       else {
         toast.success("Concept ready");
-        // Auto-generate the concept sketch right away so the PDF always has a picture
-        // (previously this was a separate manual step that was easy to miss).
-        genSketch(gotConcept, gotDims, gotViews, { b64: payload.image_base64 || "", mime: payload.mime || "image/png" });
+        // Only fall back to the AI-drawn sketch when we couldn't get a real 3D render of the
+        // proposed fixture (e.g. the AI didn't return geometry, or the CAD service is unavailable).
+        if (!gotFixtureCadViews.length) {
+          genSketch(gotConcept, gotDims, gotViews, { b64: payload.image_base64 || "", mime: payload.mime || "image/png" });
+        }
       }
     } catch (e) {
       toast.error(e?.response?.status === 503 ? "Set ANTHROPIC_API_KEY in Railway → Variables." : (e?.response?.data?.detail || "Generation failed"));
@@ -103,7 +108,7 @@ export default function FixtureConcept() {
     if (!concept) return;
     try {
       const sketch_png_base64 = sketchSvg ? await svgToPng(sketchSvg) : "";
-      const r = await api.post("/fixture/concept/pdf", { concept, meta: { part_name: f.part_name }, sketch_png_base64, cad_views_base64: cadViews }, { responseType: "blob" });
+      const r = await api.post("/fixture/concept/pdf", { concept, meta: { part_name: f.part_name }, sketch_png_base64, cad_views_base64: cadViews, fixture_cad_views_base64: fixtureCadViews }, { responseType: "blob" });
       const url = URL.createObjectURL(new Blob([r.data]));
       const a = document.createElement("a"); a.href = url; a.download = `FixtureConcept_${f.part_name || "part"}.pdf`; a.click(); URL.revokeObjectURL(url);
     } catch (e) { toast.error("PDF failed"); }
@@ -156,6 +161,17 @@ export default function FixtureConcept() {
           {!concept && !raw && <div className="text-slate-400 text-sm flex items-center justify-center h-full">The fixture concept brief will appear here.</div>}
           {raw && <pre className="text-xs whitespace-pre-wrap text-slate-600">{raw}</pre>}
           {concept && <Brief c={concept} onPdf={downloadPdf} />}
+          {concept && fixtureCadViews.length > 0 && (
+            <div className="mt-4 border-t border-slate-200 pt-3">
+              <div className="text-[11px] uppercase tracking-wider text-slate-500 mb-2">Proposed fixture — 3D concept render (included in the PDF)</div>
+              <div className="grid grid-cols-3 gap-2">
+                {fixtureCadViews.map((v, i) => (
+                  <img key={i} src={`data:image/png;base64,${v}`} alt={["Isometric", "Top", "Right"][i] || `View ${i + 1}`} className="border border-slate-200 rounded bg-white w-full" />
+                ))}
+              </div>
+              <div className="text-[11px] text-slate-400 mt-1">Simplified parametric solid — base plate, posts/locators, part in place. Real geometry, not a hand-drawn sketch.</div>
+            </div>
+          )}
           {concept && cadViews.length > 0 && (
             <div className="mt-4 border-t border-slate-200 pt-3">
               <div className="text-[11px] uppercase tracking-wider text-slate-500 mb-2">Actual part — rendered from your 3D file (included in the PDF)</div>
@@ -166,7 +182,7 @@ export default function FixtureConcept() {
               </div>
             </div>
           )}
-          {concept && (
+          {concept && !fixtureCadViews.length && (
             <div className="mt-4 border-t border-slate-200 pt-3">
               <div className="flex items-center justify-between mb-2">
                 <div className="text-[11px] uppercase tracking-wider text-slate-500">Concept sketch (AI schematic — included in the PDF)</div>
