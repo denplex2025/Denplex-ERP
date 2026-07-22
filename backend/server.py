@@ -8409,11 +8409,30 @@ FIXTURE_SCHEMA = (
     '"base_plate":str, "actuation":str, '
     '"standard_components":[{"item":str,"qty":str,"note":str}], '
     '"access_and_clearance":[str], "distortion_risks":[str], "inspection_points":[str], '
-    '"estimated_build":{"cost_inr":number,"time_days":number}, "assumptions":str}. '
+    '"estimated_build":{"cost_inr":number,"time_days":number}, "assumptions":str, '
+    '"geometry":{'
+    '"base_plate":{"length_mm":number,"width_mm":number,"thickness_mm":number,'
+    '"cutouts":[{"x_mm":number,"y_mm":number,"w_mm":number,"h_mm":number}]},'
+    '"posts":[{"x_mm":number,"y_mm":number,"height_mm":number,"width_mm":number,'
+    '"top":"v_groove"|"flat"|"pin","pin_diameter_mm":number}],'
+    '"clamps":[{"x_mm":number,"y_mm":number,"height_mm":number}],'
+    '"part_proxy":{"type":"tube"|"block"|"none","length_mm":number,"diameter_mm":number,'
+    '"x_mm":number,"y_mm":number,"z_mm":number,"axis":"x"|"y"}'
+    '}}. '
     "fixture_type = the recommended type (e.g. Milling fixture, Drilling jig, Welding jig, "
     "Hydraulic machining fixture, Leak-test fixture, Inspection fixture). "
     "locating_scheme = how the 3-2-1 datums are established. standard_components = a BOM of "
-    "off-the-shelf parts with quantities."
+    "off-the-shelf parts with quantities. "
+    "GEOMETRY is a SEPARATE, numeric, machine-usable version of the same concept, used to build a "
+    "real (simplified) 3D render — never omit it, never leave it as placeholder zeros. Coordinate "
+    "convention: origin (0,0,0) at one corner of the base plate's bottom face; X runs along the "
+    "plate's length, Y along its width, Z is up. base_plate.thickness_mm typically 12-20. Each "
+    "post's x_mm/y_mm is the CENTRE of its footprint on the plate; height_mm is measured from the "
+    "plate's TOP face; give one post per real support node/bend/end you identified in the part (same "
+    "count as standard_components). cutouts are lightening pockets cut through the plate between "
+    "posts. part_proxy approximates the real part resting in the fixture using its actual bounding "
+    "box/geometry from the inputs — 'tube' for round/tubular parts, 'block' for prismatic parts; set "
+    "type='none' only if neither approximation is reasonable."
 )
 
 class FixtureConceptIn(BaseModel):
@@ -8516,7 +8535,7 @@ async def fixture_concept(inp: FixtureConceptIn, user=Depends(get_current_user))
     for v in cad_views:
         content.append({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": v}})
     content.append({"type": "text", "text": FIXTURE_SCHEMA + "\n\nINPUTS:\n" + ctx})
-    body = {"model": QC_VISION_MODEL, "max_tokens": 2600, "system": FIXTURE_SYSTEM, "messages": [{"role": "user", "content": content}]}
+    body = {"model": QC_VISION_MODEL, "max_tokens": 3800, "system": FIXTURE_SYSTEM, "messages": [{"role": "user", "content": content}]}
     headers = {"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"}
     try:
         async with httpx.AsyncClient(timeout=120) as cx:
@@ -8528,7 +8547,23 @@ async def fixture_concept(inp: FixtureConceptIn, user=Depends(get_current_user))
     data = r.json()
     text = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
     concept = _loads_tolerant(text) or {}
-    return {"concept": concept, "dims": dims, "views": cad_views, "raw": text if not concept else ""}
+
+    # Turn the concept's numeric "geometry" into a real (simplified) 3D CAD render via the CAD
+    # microservice — a genuine solid model of the PROPOSED FIXTURE, not just the part, so the PDF
+    # shows real geometry instead of relying solely on the AI-drawn sketch.
+    fixture_cad_views = []
+    geo = concept.get("geometry") if isinstance(concept, dict) else None
+    if geo and CAD_SERVICE_URL:
+        try:
+            async with httpx.AsyncClient(timeout=90) as cx:
+                fr = await cx.post(f"{CAD_SERVICE_URL}/fixture-build", json={**geo, "views": 3})
+            if fr.status_code < 400:
+                fixture_cad_views = (fr.json().get("views") or [])[:3]
+        except Exception:
+            fixture_cad_views = []
+
+    return {"concept": concept, "dims": dims, "views": cad_views,
+            "fixture_cad_views": fixture_cad_views, "raw": text if not concept else ""}
 
 @api.post("/fixture/concept/pdf")
 async def fixture_concept_pdf(body: dict, user=Depends(get_current_user)):
@@ -8546,6 +8581,30 @@ async def fixture_concept_pdf(body: dict, user=Depends(get_current_user)):
     el = [Paragraph("<b>Fixture Concept Brief</b>", ss["Title"]),
           Paragraph(f"Denplex Engineering Company &nbsp;·&nbsp; {meta.get('part_name','')} &nbsp;·&nbsp; {c.get('fixture_type','')}", ss["Normal"]),
           Spacer(1, 4 * mm)]
+    # Real (simplified) 3D render of the PROPOSED FIXTURE, built from the concept's numeric geometry
+    # via CadQuery — genuine solid geometry, not an AI hand-drawn sketch. Shown first as the primary
+    # picture; the AI sketch below is only shown as a fallback when this isn't available.
+    fixture_cad_views_b64 = (body or {}).get("fixture_cad_views_base64") or []
+    if fixture_cad_views_b64:
+        try:
+            from reportlab.platypus import Image as RLImage
+            import base64 as _b64
+            labels = ["Isometric", "Top", "Right"]
+            thumbs = []
+            for i, v in enumerate(fixture_cad_views_b64[:3]):
+                png = _b64.b64decode((v or "").split(",")[-1])
+                img = RLImage(io.BytesIO(png))
+                maxw = 82 * mm
+                if img.drawWidth > maxw:
+                    ratio = maxw / img.drawWidth; img.drawWidth = maxw; img.drawHeight *= ratio
+                thumbs.append([img, Paragraph(labels[i] if i < len(labels) else f"View {i+1}", ss["Normal"])])
+            if thumbs:
+                trow = [[t[0] for t in thumbs], [t[1] for t in thumbs]]
+                t = Table(trow, colWidths=[86 * mm] * len(thumbs))
+                t.setStyle(TableStyle([("ALIGN", (0, 0), (-1, -1), "CENTER"), ("VALIGN", (0, 0), (-1, -1), "MIDDLE")]))
+                el += [Paragraph("Proposed fixture — 3D concept render", h), t, Spacer(1, 4 * mm)]
+        except Exception:
+            fixture_cad_views_b64 = []
     # Real rendered views of the actual uploaded part (from the STEP/CAD service) — genuine geometry,
     # not an AI guess. Shown first since it's the most trustworthy picture in the document.
     cad_views_b64 = (body or {}).get("cad_views_base64") or []
@@ -8569,8 +8628,10 @@ async def fixture_concept_pdf(body: dict, user=Depends(get_current_user)):
                 el += [Paragraph("Actual part — rendered from the uploaded 3D file", h), t, Spacer(1, 4 * mm)]
         except Exception:
             pass
-    # Optional concept sketch (rasterized PNG passed from the browser) — AI-drawn schematic of the fixture
-    spng = (body or {}).get("sketch_png_base64") or ""
+    # Optional concept sketch (rasterized PNG passed from the browser) — AI-drawn schematic of the
+    # fixture. Only included when the real 3D render above isn't available, to avoid showing a rough
+    # hand-drawn sketch alongside genuine solid geometry.
+    spng = (body or {}).get("sketch_png_base64") or "" if not fixture_cad_views_b64 else ""
     if spng:
         try:
             from reportlab.platypus import Image as RLImage
