@@ -9,6 +9,7 @@ which it feeds (with the user's prompt) to the AI fixture generator.
 import base64
 import os
 import tempfile
+from typing import List, Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
@@ -18,6 +19,176 @@ app = FastAPI(title="Denplex CAD Service", version="1.0")
 class AnalyzeIn(BaseModel):
     step_base64: str
     views: int = 3
+
+
+def _render_views(wp, n, tmp):
+    """Shared iso/top/right SVG->PNG rendering, used by /analyze and /fixture-build."""
+    import cairosvg
+    from cadquery import exporters
+    views = []
+    plan = [((1, 1, 1), "iso"), ((0, 0, 1), "top"), ((1, 0, 0), "right")]
+    for d, name in plan[:max(0, min(int(n or 0), 3))]:
+        svgp = os.path.join(tmp, f"{name}.svg")
+        try:
+            exporters.export(wp, svgp, exportType="SVG",
+                             opt={"width": 640, "height": 480, "projectionDir": d,
+                                  "showAxes": False, "strokeWidth": 0.4,
+                                  # cadquery's SVG default marginLeft/marginTop (200/20) is sized for
+                                  # width=None auto-fit mode; with explicit width+height it instead
+                                  # shoves the model off-canvas for anything wider than it is tall.
+                                  # Small, roughly-square margins keep the model centred either way.
+                                  "marginLeft": 25, "marginTop": 25})
+            png = cairosvg.svg2png(url=svgp, output_width=640, output_height=480, background_color="white")
+            views.append(base64.b64encode(png).decode())
+        except Exception:
+            pass
+    return views
+
+
+# ---------------- Fixture concept -> real parametric CAD (Phase C) ----------------
+# The AI fixture generator now emits a numeric "geometry" spec (base plate + posts + clamps
+# + a simple part proxy) alongside its text brief. This turns that spec into an actual
+# CadQuery solid and renders it the same way as a real STEP part, so the PDF gets a genuine
+# 3D render of the PROPOSED FIXTURE instead of an AI hand-drawn SVG sketch. It's a simplified
+# parametric approximation (box/cylinder primitives) — not as polished as a hand-modelled
+# SolidWorks assembly, but real solid geometry with correct proportions and topology.
+
+class CutoutIn(BaseModel):
+    x_mm: float = 0
+    y_mm: float = 0
+    w_mm: float = 30
+    h_mm: float = 30
+
+class BasePlateIn(BaseModel):
+    length_mm: float = 200
+    width_mm: float = 120
+    thickness_mm: float = 12
+    cutouts: List[CutoutIn] = []
+
+class PostIn(BaseModel):
+    x_mm: float = 0
+    y_mm: float = 0
+    height_mm: float = 60
+    width_mm: float = 20
+    top: str = "v_groove"          # v_groove | flat | pin
+    pin_diameter_mm: float = 8
+
+class ClampIn(BaseModel):
+    x_mm: float = 0
+    y_mm: float = 0
+    height_mm: float = 60
+
+class PartProxyIn(BaseModel):
+    type: str = "none"             # tube | block | none
+    length_mm: float = 100
+    diameter_mm: float = 20
+    x_mm: float = 0
+    y_mm: float = 0
+    z_mm: float = 0
+    axis: str = "x"                # x | y
+
+class FixtureBuildIn(BaseModel):
+    base_plate: BasePlateIn = BasePlateIn()
+    posts: List[PostIn] = []
+    clamps: List[ClampIn] = []
+    part_proxy: Optional[PartProxyIn] = None
+    views: int = 3
+
+
+def _build_fixture_solid(spec: "FixtureBuildIn"):
+    import cadquery as cq
+    bp = spec.base_plate
+
+    plate = (cq.Workplane("XY")
+             .box(bp.length_mm, bp.width_mm, bp.thickness_mm)
+             .translate((bp.length_mm / 2, bp.width_mm / 2, bp.thickness_mm / 2)))
+    for c in (bp.cutouts or []):
+        cutter = (cq.Workplane("XY")
+                  .box(max(c.w_mm, 1), max(c.h_mm, 1), bp.thickness_mm + 4)
+                  .translate((c.x_mm, c.y_mm, bp.thickness_mm / 2)))
+        try:
+            plate = plate.cut(cutter)
+        except Exception:
+            pass
+
+    combined = plate
+    for p in (spec.posts or []):
+        w = max(p.width_mm, 6)
+        h = max(p.height_mm, 10)
+        post = (cq.Workplane("XY").box(w, w, h).translate((0, 0, h / 2)))
+        if p.top == "v_groove":
+            depth = w * 0.4
+            pts = [(-w, h), (0, h - depth), (w, h)]
+            try:
+                tool = (cq.Workplane("XZ")
+                        .polyline(pts).close()
+                        .extrude(w * 2)
+                        .translate((0, -w, 0)))
+                post = post.cut(tool)
+            except Exception:
+                pass
+        elif p.top == "pin":
+            try:
+                pin = (cq.Workplane("XY")
+                       .circle(max(p.pin_diameter_mm, 2) / 2)
+                       .extrude(h * 0.3)
+                       .translate((0, 0, h)))
+                post = post.union(pin)
+            except Exception:
+                pass
+        post = post.translate((p.x_mm, p.y_mm, bp.thickness_mm))
+        try:
+            combined = combined.union(post)
+        except Exception:
+            pass
+
+    for c in (spec.clamps or []):
+        ch = max(c.height_mm, 20)
+        try:
+            base = cq.Workplane("XY").box(15, 15, ch).translate((0, 0, ch / 2))
+            arm = cq.Workplane("XY").box(45, 12, 10).translate((22, 0, ch - 5))
+            clamp = base.union(arm).translate((c.x_mm, c.y_mm, bp.thickness_mm))
+            combined = combined.union(clamp)
+        except Exception:
+            pass
+
+    pp = spec.part_proxy
+    if pp and pp.type in ("tube", "block"):
+        try:
+            length = max(pp.length_mm, 10)
+            dia = max(pp.diameter_mm, 4)
+            if pp.type == "tube":
+                proxy = cq.Workplane("YZ").circle(dia / 2).extrude(length)
+                if pp.axis == "x":
+                    proxy = proxy.rotate((0, 0, 0), (0, 1, 0), 90)
+            else:
+                if pp.axis == "x":
+                    proxy = cq.Workplane("XY").box(length, dia, dia)
+                else:
+                    proxy = cq.Workplane("XY").box(dia, length, dia)
+            proxy = proxy.translate((pp.x_mm, pp.y_mm, pp.z_mm))
+            combined = combined.union(proxy)
+        except Exception:
+            pass
+
+    return combined
+
+
+@app.post("/fixture-build")
+def fixture_build(spec: FixtureBuildIn):
+    tmp = tempfile.mkdtemp()
+    try:
+        solid = _build_fixture_solid(spec)
+    except Exception as e:
+        raise HTTPException(400, f"Could not build fixture geometry: {e}")
+    views = []
+    try:
+        views = _render_views(solid, spec.views, tmp)
+    except Exception:
+        views = []
+    if not views:
+        raise HTTPException(502, "Fixture geometry built but rendering failed (no views produced).")
+    return {"ok": True, "views": views, "view_count": len(views)}
 
 
 @app.get("/health")
@@ -101,22 +272,10 @@ def analyze(inp: AnalyzeIn):
         except Exception:
             mesh_b64 = ""; mesh_fmt = ""
 
-    views = []
     try:
-        import cairosvg
-        plan = [((1, 1, 1), "iso"), ((0, 0, 1), "top"), ((1, 0, 0), "right")]
-        for d, name in plan[:max(0, min(int(inp.views or 0), 3))]:
-            svgp = os.path.join(tmp, f"{name}.svg")
-            try:
-                exporters.export(wp, svgp, exportType="SVG",
-                                 opt={"width": 640, "height": 480, "projectionDir": d,
-                                      "showAxes": False, "strokeWidth": 0.4})
-                png = cairosvg.svg2png(url=svgp, output_width=640, output_height=480, background_color="white")
-                views.append(base64.b64encode(png).decode())
-            except Exception:
-                pass
+        views = _render_views(wp, inp.views, tmp)
     except Exception:
-        pass
+        views = []
 
     return {"ok": True, "geometry": geom, "views": views, "view_count": len(views),
             "mesh_base64": mesh_b64, "mesh_format": mesh_fmt}
