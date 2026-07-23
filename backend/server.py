@@ -8006,6 +8006,13 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
         else:
             doc["supplier_id"] = ""
             doc["supplier_name"] = party_name
+            # BUG FIX (2026-07-23): this branch used to omit cgst/sgst/igst entirely — only the
+            # customer/invoice branch above wrote them, even though `cgst`/`sgst`/`igst` were computed
+            # for both types up front. Every imported vendor_bill ended up with a correct gst_total but
+            # no CGST/SGST/IGST split, which zeroed out Input Tax Credit on the GST Reports page for
+            # ALL purchase bills. See /integrations/vyapar/backfill-bill-gst-split for the one-off fix
+            # applied to already-imported bills.
+            doc["cgst"] = cgst; doc["sgst"] = sgst; doc["igst"] = igst
             doc["gst_total"] = tax_total
             doc["status"] = "received" if cur_bal <= 0.01 else "open"
             doc["outstanding"] = round(max(cur_bal, 0.0), 2)  # Vyapar's own live balance = ground truth
@@ -8510,6 +8517,39 @@ async def vyapar_backfill_line_gst(payload: _GstLineBackfillIn, user=Depends(req
     return {"dry_run": payload.dry_run,
             "invoices_affected": inv_count, "invoice_examples": inv_examples,
             "vendor_bills_affected": bill_count, "vendor_bill_examples": bill_examples}
+
+
+@api.post("/integrations/vyapar/backfill-bill-gst-split")
+async def vyapar_backfill_bill_gst_split(payload: _GstLineBackfillIn, user=Depends(require_roles("admin"))):
+    """One-off fix for the importer bug where every imported vendor_bill got a correct `gst_total`
+    but NO cgst/sgst/igst fields at all (the customer/invoice import branch wrote them, the
+    supplier/vendor_bill branch forgot to — fixed going forward at the import site above). Because
+    GST Reports' Input Tax Credit and GSTR-2 both sum `cgst`/`sgst`/`igst` directly off the stored
+    document (not from lines), every purchase bill was silently contributing ₹0 ITC even when it
+    clearly carried real tax. This derives the split from the existing `gst_total` + `is_interstate`
+    (same formula the importer already used) and writes it onto any vendor_bill still missing it.
+    Safe to re-run; only touches docs where cgst/sgst/igst are all absent. dry_run=true previews the
+    count with no writes."""
+    cur = db.vendor_bills.find({
+        "gst_total": {"$gt": 0.01},
+        "cgst": {"$exists": False}, "sgst": {"$exists": False}, "igst": {"$exists": False},
+    }, {"_id": 0, "id": 1, "code": 1, "gst_total": 1, "is_interstate": 1})
+    affected = 0
+    examples = []
+    async for doc in cur:
+        gt = float(doc.get("gst_total") or 0)
+        inter = bool(doc.get("is_interstate"))
+        cgst, sgst, igst = (0.0, 0.0, gt) if inter else (gt / 2, gt / 2, 0.0)
+        affected += 1
+        if len(examples) < 8:
+            examples.append({"id": doc.get("id"), "code": doc.get("code"), "gst_total": gt,
+                              "cgst": round(cgst, 2), "sgst": round(sgst, 2), "igst": round(igst, 2)})
+        if not payload.dry_run:
+            await db.vendor_bills.update_one(
+                {"id": doc["id"]},
+                {"$set": {"cgst": round(cgst, 2), "sgst": round(sgst, 2), "igst": round(igst, 2)}},
+            )
+    return {"dry_run": payload.dry_run, "vendor_bills_affected": affected, "examples": examples}
 
 
 class VyaparReconcileIn(BaseModel):
