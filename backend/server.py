@@ -3570,6 +3570,13 @@ async def get_invoice(iid: str, user=Depends(get_current_user)):
         raise HTTPException(404, "Invoice not found")
     return inv
 
+@api.get("/invoices/settled-summary")
+async def invoices_settled_summary(user=Depends(get_current_user)):
+    """Bulk invoice_id -> settled amount map (reuses _settled_per_invoice with no filter) — powers
+    the Sales report page's Total/Received/Balance summary cards + per-row Balance column without
+    an N+1 call per invoice."""
+    return await _settled_per_invoice()
+
 @api.get("/invoices/{iid}/payments")
 async def invoice_payments(iid: str, user=Depends(get_current_user)):
     """Payment-In records allocated against this invoice, plus settled/balance — the data behind the
@@ -6809,6 +6816,23 @@ async def create_vendor_bill(vb: VendorBill, user=Depends(get_current_user)):
 @api.get("/vendor-bills")
 async def list_vendor_bills(user=Depends(get_current_user)):
     return await list_collection(db.vendor_bills, sort_key="date")
+
+@api.get("/vendor-bills/settled-summary")
+async def vendor_bills_settled_summary(user=Depends(get_current_user)):
+    """Bulk vendor_bill id -> settled amount map (reuses _settled_per_bill with no filter) — powers
+    the Purchase Bills report page's Paid/Unpaid/Overdue/Total summary cards + per-row Balance Due
+    column without an N+1 call per bill."""
+    return await _settled_per_bill()
+
+@api.delete("/vendor-bills/{did}")
+async def del_vendor_bill(did: str, user=Depends(require_roles("admin", "manager", "accountant", "ca"))):
+    """Was missing — vendor_bills previously had no delete route at all (only list/pdf/create),
+    unlike every other document type which already gets recycle-bin-backed delete. Mirrors
+    del_invoice's pattern exactly."""
+    doc = await db.vendor_bills.find_one({"id": did}, {"_id": 0})
+    await _recycle("vendor_bills", "Purchase Bill", doc, user)
+    await db.vendor_bills.delete_one({"id": did})
+    return {"ok": True}
 
 @api.get("/vendor-bills/{did}/pdf")
 async def vendor_bill_pdf(did: str, user=Depends(get_current_user)):
