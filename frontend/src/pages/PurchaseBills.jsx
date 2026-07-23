@@ -10,9 +10,11 @@ import {
   matchesText, matchesDate, matchesNum,
   ColumnFilterPopover, CheckboxFilterContent, CategoryFilterContent,
 } from "@/components/erp/TableFilters";
+import { useColumnWidths, ColResizeHandle } from "@/components/erp/ColumnResize";
 import { Plus, Search, Eye, FileDown, Mail, MessageCircle, Trash2, Download as DLIcon, Printer, FileSpreadsheet } from "lucide-react";
 import { toast } from "sonner";
 
+const DEFAULT_COL_WIDTHS = { date: 110, code: 130, party: 220, amount: 120, balance: 130, dueDate: 110, status: 100 };
 const EMPTY_FILTERS = {
   code: { category: "contains", value: "" },
   party: { category: "contains", value: "" },
@@ -56,6 +58,7 @@ export default function PurchaseBills() {
   const [previewUrl, setPreviewUrl] = useState("");
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewRow, setPreviewRow] = useState(null);
+  const [colWidths, startResize] = useColumnWidths("colw:purchase-bills", DEFAULT_COL_WIDTHS);
 
   const load = async () => {
     setLoading(true);
@@ -231,50 +234,54 @@ export default function PurchaseBills() {
           <Empty label="No transactions found." />
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full">
+            <table style={{ tableLayout: "fixed", width: "100%" }}>
+              <colgroup>
+                {Object.entries(colWidths).map(([k, w]) => <col key={k} style={{ width: w }} />)}
+                <col style={{ width: 200 }} />
+              </colgroup>
               <thead><tr>
-                <Th><div className="flex items-center gap-1">Date
+                <Th className="relative"><div className="flex items-center gap-1">Date
                   <ColumnFilterPopover active={!!filters.date.value} renderContent={(close) => (
                     <CategoryFilterContent categoryOptions={DATE_CATEGORIES} inputType="date" valueLabel="Select Date" committed={filters.date}
                       onApply={(v) => setFilters((f) => ({ ...f, date: v }))} onClear={() => setFilters((f) => ({ ...f, date: { category: "equal", value: "" } }))} close={close} />
                   )} />
-                </div></Th>
-                <Th><div className="flex items-center gap-1">Bill No
+                </div><ColResizeHandle onMouseDown={startResize("date")} /></Th>
+                <Th className="relative"><div className="flex items-center gap-1">Bill No
                   <ColumnFilterPopover active={!!filters.code.value} renderContent={(close) => (
                     <CategoryFilterContent categoryOptions={TEXT_CATEGORIES} inputType="text" valueLabel="Bill No" committed={filters.code}
                       onApply={(v) => setFilters((f) => ({ ...f, code: v }))} onClear={() => setFilters((f) => ({ ...f, code: { category: "contains", value: "" } }))} close={close} />
                   )} />
-                </div></Th>
-                <Th><div className="flex items-center gap-1">Party Name
+                </div><ColResizeHandle onMouseDown={startResize("code")} /></Th>
+                <Th className="relative"><div className="flex items-center gap-1">Party Name
                   <ColumnFilterPopover active={!!filters.party.value} renderContent={(close) => (
                     <CategoryFilterContent categoryOptions={TEXT_CATEGORIES} inputType="text" valueLabel="Party Name" committed={filters.party}
                       onApply={(v) => setFilters((f) => ({ ...f, party: v }))} onClear={() => setFilters((f) => ({ ...f, party: { category: "contains", value: "" } }))} close={close} />
                   )} />
-                </div></Th>
-                <Th className="text-right"><div className="flex items-center justify-end gap-1">Amount
+                </div><ColResizeHandle onMouseDown={startResize("party")} /></Th>
+                <Th className="relative text-right"><div className="flex items-center justify-end gap-1">Amount
                   <ColumnFilterPopover active={filters.amount.value !== ""} renderContent={(close) => (
                     <CategoryFilterContent categoryOptions={NUM_CATEGORIES} inputType="number" valueLabel="Amount" committed={filters.amount}
                       onApply={(v) => setFilters((f) => ({ ...f, amount: v }))} onClear={() => setFilters((f) => ({ ...f, amount: { category: "equal", value: "" } }))} close={close} />
                   )} />
-                </div></Th>
-                <Th className="text-right"><div className="flex items-center justify-end gap-1">Balance Due
+                </div><ColResizeHandle onMouseDown={startResize("amount")} /></Th>
+                <Th className="relative text-right"><div className="flex items-center justify-end gap-1">Balance Due
                   <ColumnFilterPopover active={filters.balance.value !== ""} renderContent={(close) => (
                     <CategoryFilterContent categoryOptions={NUM_CATEGORIES} inputType="number" valueLabel="Balance Due" committed={filters.balance}
                       onApply={(v) => setFilters((f) => ({ ...f, balance: v }))} onClear={() => setFilters((f) => ({ ...f, balance: { category: "equal", value: "" } }))} close={close} />
                   )} />
-                </div></Th>
-                <Th><div className="flex items-center gap-1">Due Date
+                </div><ColResizeHandle onMouseDown={startResize("balance")} /></Th>
+                <Th className="relative"><div className="flex items-center gap-1">Due Date
                   <ColumnFilterPopover active={!!filters.dueDate.value} renderContent={(close) => (
                     <CategoryFilterContent categoryOptions={DATE_CATEGORIES} inputType="date" valueLabel="Select Date" committed={filters.dueDate}
                       onApply={(v) => setFilters((f) => ({ ...f, dueDate: v }))} onClear={() => setFilters((f) => ({ ...f, dueDate: { category: "equal", value: "" } }))} close={close} />
                   )} />
-                </div></Th>
-                <Th><div className="flex items-center gap-1">Status
+                </div><ColResizeHandle onMouseDown={startResize("dueDate")} /></Th>
+                <Th className="relative"><div className="flex items-center gap-1">Status
                   <ColumnFilterPopover active={filters.statuses.length > 0} renderContent={(close) => (
                     <CheckboxFilterContent options={["paid", "unpaid", "overdue"]} committed={filters.statuses}
                       onApply={(v) => setFilters((f) => ({ ...f, statuses: v }))} onClear={() => setFilters((f) => ({ ...f, statuses: [] }))} close={close} />
                   )} />
-                </div></Th>
+                </div><ColResizeHandle onMouseDown={startResize("status")} /></Th>
                 <Th className="text-right">Actions</Th>
               </tr></thead>
               <tbody>
@@ -284,12 +291,12 @@ export default function PurchaseBills() {
                   const cls = classify(row, s);
                   return (
                     <tr key={row.id} className="hover:bg-slate-50">
-                      <Td>{fmtDate(row.date)}</Td>
-                      <Td className="font-mono-tech text-xs">{row.code}</Td>
-                      <Td>{row.supplier_name}</Td>
+                      <Td className="truncate">{fmtDate(row.date)}</Td>
+                      <Td className="font-mono-tech text-xs truncate">{row.code}</Td>
+                      <Td className="truncate">{row.supplier_name}</Td>
                       <Td className="text-right font-mono-tech">{inr(row.total)}</Td>
                       <Td className="text-right font-mono-tech">{bal > 0.5 ? inr(bal) : "—"}</Td>
-                      <Td>{fmtDate(row.due_date)}</Td>
+                      <Td className="truncate">{fmtDate(row.due_date)}</Td>
                       <Td><span className={`inline-block px-2 py-0.5 rounded-sm text-[10px] uppercase tracking-wider font-semibold border ${STATUS_STYLE[cls]}`}>{cls}</span></Td>
                       <Td className="text-right whitespace-nowrap">
                         <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => previewPdf(row)} title="Preview PDF"><Eye className="h-4 w-4 text-slate-700" /></Button>
