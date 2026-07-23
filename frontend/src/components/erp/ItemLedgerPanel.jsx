@@ -1,15 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 import api from "@/lib/api";
 import { Button } from "@/components/ui/button";
-import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { Badge } from "@/components/ui/badge";
 import { Th, Td, Empty, inr, fmtDate } from "@/components/erp/Primitives";
-import { StatusBadge } from "@/components/erp/CrudPage";
 import {
   TEXT_CATEGORIES, DATE_CATEGORIES, NUM_CATEGORIES,
   matchesText, matchesDate, matchesNum,
   ColumnFilterPopover, CheckboxFilterContent, CategoryFilterContent,
 } from "@/components/erp/TableFilters";
-import { BookUser, Edit, Trash2, X } from "lucide-react";
+import { ArrowDownToLine, ArrowUpFromLine, ArrowLeftRight, SlidersHorizontal, QrCode, Edit, Trash2, X, Boxes } from "lucide-react";
 import { toast } from "sonner";
 
 const EMPTY_FILTERS = {
@@ -17,34 +16,34 @@ const EMPTY_FILTERS = {
   statuses: [],
   number: { category: "contains", value: "" },
   date: { category: "equal", value: "" },
-  dueDate: { category: "equal", value: "" },
-  total: { category: "equal", value: "" },
-  balance: { category: "equal", value: "" },
+  quantity: { category: "equal", value: "" },
+  price: { category: "equal", value: "" },
 };
 
-/** Core ledger content: party header + per-column-filterable transaction table. Reused by both
- * the slide-over Sheet (ViewLedgerButton, for pages keeping the classic table layout) and the
- * dual-pane PartyDualPane layout (right-hand detail panel). `kind` disambiguates the handful of
- * dual-role parties that share an id across both the customers and suppliers collections. */
-export function PartyLedgerPanel({ pid, kind, onEdit, onDelete, compact }) {
+/** Item-detail right-hand panel for the Items dual-pane layout, mirroring PartyLedgerPanel's
+ * pattern: header stats + a per-column-filterable transaction table (merged StockMovement +
+ * StockAdjustment rows), plus a read-only "used in BOM(s)" summary. Items with no BOM linkage at
+ * all just show a normal empty state here — linkage is optional, never required. */
+export function ItemLedgerPanel({ itemId, onStockIn, onStockOut, onTransfer, onAdjust, onQr, onEdit, onDelete }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [filters, setFilters] = useState(EMPTY_FILTERS);
 
   useEffect(() => {
-    if (!pid) { setData(null); return; }
+    if (!itemId) { setData(null); return; }
     let cancelled = false;
     setLoading(true);
     setFilters(EMPTY_FILTERS);
-    api.get(`/parties/${pid}/transactions`, { params: kind ? { kind } : {} })
+    api.get(`/inventory/items/${itemId}/ledger`)
       .then((r) => { if (!cancelled) setData(r.data); })
-      .catch(() => { if (!cancelled) toast.error("Failed to load party ledger"); })
+      .catch(() => { if (!cancelled) toast.error("Failed to load item ledger"); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [pid, kind]);
+  }, [itemId]);
 
-  const party = data?.party;
+  const item = data?.item;
   const allTxns = data?.transactions || [];
+  const usedInBoms = data?.used_in_boms || [];
 
   const typeOptions = useMemo(() => [...new Set(allTxns.map((t) => t.type))], [allTxns]);
   const statusOptions = useMemo(() => [...new Set(allTxns.map((t) => t.status).filter(Boolean))], [allTxns]);
@@ -54,54 +53,78 @@ export function PartyLedgerPanel({ pid, kind, onEdit, onDelete, compact }) {
     if (filters.statuses.length && !filters.statuses.includes(t.status)) return false;
     if (!matchesText(t.number, filters.number)) return false;
     if (!matchesDate(t.date, filters.date)) return false;
-    if (!matchesDate(t.due_date, filters.dueDate)) return false;
-    if (!matchesNum(t.total, filters.total)) return false;
-    if (!matchesNum(t.balance, filters.balance)) return false;
+    if (!matchesNum(t.quantity, filters.quantity)) return false;
+    if (!matchesNum(t.price_per_unit, filters.price)) return false;
     return true;
   }), [allTxns, filters]);
 
-  const totalOutstanding = txns.reduce((s, t) => {
-    const sign = t.type.startsWith("Payment") || t.type.includes("Return") ? -1 : 1;
-    return s + sign * (t.balance || 0);
-  }, 0);
-
   const hasActiveFilters = filters.types.length > 0 || filters.statuses.length > 0
-    || !!filters.number.value || !!filters.date.value || !!filters.dueDate.value
-    || filters.total.value !== "" || filters.balance.value !== "";
+    || !!filters.number.value || !!filters.date.value
+    || filters.quantity.value !== "" || filters.price.value !== "";
 
   const clearAll = () => setFilters(EMPTY_FILTERS);
 
-  if (!pid) return <Empty label="Select a party on the left to view their ledger." />;
+  if (!itemId) return <Empty label="Select an item on the left to view its details." />;
   if (loading) return <div className="text-sm text-slate-500 py-8 text-center">Loading…</div>;
-  if (!data) return <Empty label="Could not load party details." />;
+  if (!data) return <Empty label="Could not load item details." />;
+
+  const stockValue = (item.qty_on_hand || 0) * (item.unit_cost || 0);
+  const byLocation = Object.entries(item.qty_by_location || {}).filter(([, q]) => q);
 
   return (
-    <div className={compact ? "space-y-4" : "space-y-5"}>
-      <div className="flex items-start justify-between gap-4">
+    <div className="space-y-5">
+      <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
-          <div className="font-display text-xl font-bold text-slate-900">{party.name}</div>
-          {kind && <div className="text-xs uppercase tracking-wider text-slate-500 mt-0.5">{kind === "supplier" ? "Supplier" : "Customer"}</div>}
+          <div className="font-display text-xl font-bold text-slate-900">{item.name}</div>
+          <div className="text-xs uppercase tracking-wider text-slate-500 mt-0.5 font-mono-tech">{item.sku}</div>
         </div>
-        {(onEdit || onDelete) && (
-          <div className="flex gap-1 shrink-0">
-            {onEdit && <Button size="icon" variant="ghost" className="rounded-sm h-8 w-8" onClick={() => onEdit(party)} data-testid="ledger-edit-party"><Edit className="h-4 w-4" /></Button>}
-            {onDelete && <Button size="icon" variant="ghost" className="rounded-sm h-8 w-8" onClick={() => onDelete(party)} data-testid="ledger-delete-party"><Trash2 className="h-4 w-4 text-red-600" /></Button>}
+        <div className="flex gap-1 shrink-0 flex-wrap">
+          {onStockIn && <Button size="sm" variant="outline" className="rounded-sm h-8 text-xs" onClick={() => onStockIn(item)} data-testid="item-stock-in"><ArrowDownToLine className="h-3.5 w-3.5 mr-1" /> In</Button>}
+          {onStockOut && <Button size="sm" variant="outline" className="rounded-sm h-8 text-xs" onClick={() => onStockOut(item)} data-testid="item-stock-out"><ArrowUpFromLine className="h-3.5 w-3.5 mr-1" /> Out</Button>}
+          {onTransfer && <Button size="sm" variant="outline" className="rounded-sm h-8 text-xs" onClick={() => onTransfer(item)} data-testid="item-transfer"><ArrowLeftRight className="h-3.5 w-3.5 mr-1" /> Transfer</Button>}
+          {onAdjust && <Button size="sm" variant="outline" className="rounded-sm h-8 text-xs" onClick={() => onAdjust(item)} data-testid="item-adjust"><SlidersHorizontal className="h-3.5 w-3.5 mr-1" /> Adjust</Button>}
+          {onQr && <Button size="icon" variant="ghost" className="rounded-sm h-8 w-8" onClick={() => onQr(item)} data-testid="item-qr"><QrCode className="h-4 w-4" /></Button>}
+          {onEdit && <Button size="icon" variant="ghost" className="rounded-sm h-8 w-8" onClick={() => onEdit(item)} data-testid="item-edit"><Edit className="h-4 w-4" /></Button>}
+          {onDelete && <Button size="icon" variant="ghost" className="rounded-sm h-8 w-8" onClick={() => onDelete(item)} data-testid="item-delete"><Trash2 className="h-4 w-4 text-red-600" /></Button>}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-6 gap-y-3 text-sm bg-slate-50 border border-slate-200 rounded-sm p-4">
+        <div><span className="text-slate-500 block text-xs uppercase tracking-wider">On Hand</span> {item.qty_on_hand} {item.uom}</div>
+        <div><span className="text-slate-500 block text-xs uppercase tracking-wider">In Process</span> {item.qty_in_process || 0} {item.uom}</div>
+        <div><span className="text-slate-500 block text-xs uppercase tracking-wider">Reorder Level</span> {item.reorder_level || 0} {item.uom}</div>
+        <div><span className="text-slate-500 block text-xs uppercase tracking-wider">Stock Value</span> <span className="font-display font-bold">{inr(stockValue)}</span></div>
+        <div><span className="text-slate-500 block text-xs uppercase tracking-wider">Unit Cost</span> {inr(item.unit_cost)}</div>
+        <div><span className="text-slate-500 block text-xs uppercase tracking-wider">Sale Price</span> {inr(item.sale_price)}</div>
+        <div><span className="text-slate-500 block text-xs uppercase tracking-wider">Purchase Price</span> {inr(item.purchase_price)}</div>
+        <div><span className="text-slate-500 block text-xs uppercase tracking-wider">GST / HSN</span> {item.gst_rate}% · {item.hsn || "—"}</div>
+        {byLocation.length > 0 && (
+          <div className="col-span-2 sm:col-span-4 pt-2 border-t border-slate-200 mt-1">
+            <span className="text-slate-500 text-xs uppercase tracking-wider block mb-1">By Location</span>
+            <div className="flex gap-1.5 flex-wrap">
+              {byLocation.map(([loc, q]) => (
+                <Badge key={loc} variant="outline" className="rounded-sm font-normal">{loc}: {q} {item.uom}</Badge>
+              ))}
+            </div>
           </div>
         )}
       </div>
 
-      <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm bg-slate-50 border border-slate-200 rounded-sm p-4">
-        <div><span className="text-slate-500">GSTIN:</span> {party.gstin || "—"}</div>
-        <div><span className="text-slate-500">Phone:</span> {party.phone || "—"}</div>
-        <div><span className="text-slate-500">Contact:</span> {party.contact_person || "—"}</div>
-        <div><span className="text-slate-500">Email:</span> {party.email || "—"}</div>
-        <div className="col-span-2"><span className="text-slate-500">Address:</span> {party.address || "—"}</div>
-        <div className="col-span-2 pt-2 border-t border-slate-200 mt-1">
-          <span className="text-slate-500">Net Outstanding{hasActiveFilters ? " (filtered)" : ""}:</span>{" "}
-          <span className={`font-display font-bold ${totalOutstanding > 0 ? "text-red-600" : "text-emerald-600"}`}>
-            {inr(Math.abs(totalOutstanding))} {totalOutstanding > 0 ? "receivable" : totalOutstanding < 0 ? "advance/credit" : ""}
-          </span>
+      <div>
+        <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2 flex items-center gap-1.5">
+          <Boxes className="h-3.5 w-3.5" /> Used in BOM(s)
         </div>
+        {usedInBoms.length === 0 ? (
+          <div className="text-sm text-slate-400 italic">Not linked to any BOM.</div>
+        ) : (
+          <div className="flex gap-1.5 flex-wrap">
+            {usedInBoms.map((b) => (
+              <Badge key={b.id} variant="outline" className={`rounded-sm font-normal ${b.is_active === false ? "opacity-50" : ""}`}>
+                {b.code || b.product_name} {b.revision ? `· Rev ${b.revision}` : ""}
+              </Badge>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="flex items-center justify-between">
@@ -116,7 +139,7 @@ export function PartyLedgerPanel({ pid, kind, onEdit, onDelete, compact }) {
       </div>
 
       {allTxns.length === 0 ? (
-        <Empty label="No transactions yet." />
+        <Empty label="No stock movements yet." />
       ) : (
         <div className="overflow-x-auto border border-slate-200 rounded-sm">
           <table className="w-full">
@@ -179,17 +202,17 @@ export function PartyLedgerPanel({ pid, kind, onEdit, onDelete, compact }) {
                 </Th>
                 <Th className="text-right">
                   <div className="flex items-center justify-end gap-1">
-                    Total
+                    Quantity
                     <ColumnFilterPopover
-                      active={filters.total.value !== ""}
+                      active={filters.quantity.value !== ""}
                       renderContent={(close) => (
                         <CategoryFilterContent
                           categoryOptions={NUM_CATEGORIES}
                           inputType="number"
-                          valueLabel="Total"
-                          committed={filters.total}
-                          onApply={(v) => setFilters((f) => ({ ...f, total: v }))}
-                          onClear={() => setFilters((f) => ({ ...f, total: { category: "equal", value: "" } }))}
+                          valueLabel="Quantity"
+                          committed={filters.quantity}
+                          onApply={(v) => setFilters((f) => ({ ...f, quantity: v }))}
+                          onClear={() => setFilters((f) => ({ ...f, quantity: { category: "equal", value: "" } }))}
                           close={close}
                         />
                       )}
@@ -198,36 +221,17 @@ export function PartyLedgerPanel({ pid, kind, onEdit, onDelete, compact }) {
                 </Th>
                 <Th className="text-right">
                   <div className="flex items-center justify-end gap-1">
-                    Balance
+                    Price / Unit
                     <ColumnFilterPopover
-                      active={filters.balance.value !== ""}
+                      active={filters.price.value !== ""}
                       renderContent={(close) => (
                         <CategoryFilterContent
                           categoryOptions={NUM_CATEGORIES}
                           inputType="number"
-                          valueLabel="Balance"
-                          committed={filters.balance}
-                          onApply={(v) => setFilters((f) => ({ ...f, balance: v }))}
-                          onClear={() => setFilters((f) => ({ ...f, balance: { category: "equal", value: "" } }))}
-                          close={close}
-                        />
-                      )}
-                    />
-                  </div>
-                </Th>
-                <Th>
-                  <div className="flex items-center gap-1">
-                    Due Date
-                    <ColumnFilterPopover
-                      active={!!filters.dueDate.value}
-                      renderContent={(close) => (
-                        <CategoryFilterContent
-                          categoryOptions={DATE_CATEGORIES}
-                          inputType="date"
-                          valueLabel="Select Date"
-                          committed={filters.dueDate}
-                          onApply={(v) => setFilters((f) => ({ ...f, dueDate: v }))}
-                          onClear={() => setFilters((f) => ({ ...f, dueDate: { category: "equal", value: "" } }))}
+                          valueLabel="Price / Unit"
+                          committed={filters.price}
+                          onApply={(v) => setFilters((f) => ({ ...f, price: v }))}
+                          onClear={() => setFilters((f) => ({ ...f, price: { category: "equal", value: "" } }))}
                           close={close}
                         />
                       )}
@@ -255,17 +259,16 @@ export function PartyLedgerPanel({ pid, kind, onEdit, onDelete, compact }) {
             </thead>
             <tbody>
               {txns.length === 0 ? (
-                <tr><td colSpan={7}><Empty label="No transactions match the current filters." /></td></tr>
+                <tr><td colSpan={6}><Empty label="No transactions match the current filters." /></td></tr>
               ) : (
                 txns.map((t, i) => (
                   <tr key={i} className="hover:bg-slate-50">
                     <Td>{t.type}</Td>
                     <Td className="font-mono-tech text-xs">{t.number || "—"}</Td>
                     <Td>{fmtDate(t.date)}</Td>
-                    <Td className="text-right">{inr(t.total)}</Td>
-                    <Td className="text-right">{t.balance ? inr(t.balance) : "—"}</Td>
-                    <Td>{fmtDate(t.due_date)}</Td>
-                    <Td>{t.status ? <StatusBadge status={t.status} /> : "—"}</Td>
+                    <Td className="text-right">{t.quantity}</Td>
+                    <Td className="text-right">{inr(t.price_per_unit)}</Td>
+                    <Td className="text-slate-500">{t.status || "—"}</Td>
                   </tr>
                 ))
               )}
@@ -274,41 +277,5 @@ export function PartyLedgerPanel({ pid, kind, onEdit, onDelete, compact }) {
         </div>
       )}
     </div>
-  );
-}
-
-/** Per-row "View Ledger" trigger button for CrudPage rowActions (slide-over version). Kept for
- * any page that still uses the classic single-pane table layout instead of PartyDualPane. */
-export function ViewLedgerButton({ row, kind }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <>
-      <Button
-        size="icon"
-        variant="ghost"
-        className="rounded-sm h-8 w-8"
-        title="View Ledger"
-        data-testid={`row-ledger-${row.id}`}
-        onClick={() => setOpen(true)}
-      >
-        <BookUser className="h-4 w-4 text-slate-600" />
-      </Button>
-      {open && <PartyLedgerSheet pid={row.id} kind={kind} open={open} onOpenChange={setOpen} />}
-    </>
-  );
-}
-
-export function PartyLedgerSheet({ pid, kind, open, onOpenChange }) {
-  return (
-    <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent className="rounded-none w-full sm:max-w-3xl overflow-y-auto" data-testid="party-ledger-sheet">
-        <SheetHeader>
-          <SheetTitle className="font-display tracking-tight">Party Details</SheetTitle>
-        </SheetHeader>
-        <div className="mt-4">
-          <PartyLedgerPanel pid={open ? pid : null} kind={kind} />
-        </div>
-      </SheetContent>
-    </Sheet>
   );
 }
