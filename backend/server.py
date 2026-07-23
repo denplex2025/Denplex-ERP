@@ -3570,6 +3570,29 @@ async def get_invoice(iid: str, user=Depends(get_current_user)):
         raise HTTPException(404, "Invoice not found")
     return inv
 
+@api.get("/invoices/{iid}/payments")
+async def invoice_payments(iid: str, user=Depends(get_current_user)):
+    """Payment-In records allocated against this invoice, plus settled/balance — the data behind the
+    Invoice dual-pane detail's payment history (mirrors the party-transactions merge pattern, scoped
+    to a single invoice instead of a whole party). Reuses the same allocations shape as
+    _settled_per_invoice / the payments-in module."""
+    inv = await db.invoices.find_one({"id": iid}, {"_id": 0})
+    if not inv:
+        raise HTTPException(404, "Invoice not found")
+    pays = await db.payments_in.find({"allocations.document_id": iid}, {"_id": 0}).to_list(2000)
+    rows = []
+    settled = 0.0
+    for p in pays:
+        for a in (p.get("allocations") or []):
+            if a.get("document_id") == iid and a.get("document_type") == "invoice":
+                amt = float(a.get("amount") or 0) + float(a.get("tds_amount") or 0)
+                settled += amt
+                rows.append({"payment_id": p.get("id"), "payment_code": p.get("code"), "date": p.get("date"),
+                             "amount": round(amt, 2), "payment_type": p.get("payment_type")})
+    rows.sort(key=lambda r: str(r.get("date") or ""), reverse=True)
+    total = float(inv.get("total", 0) or 0)
+    return {"total": round(total, 2), "settled": round(settled, 2), "balance": round(total - settled, 2), "payments": rows}
+
 # ---------------- E-way bill / e-Invoice — Adaequare GSP (Enriched APIs) ----------------
 # Adaequare Info Pvt Ltd is our chosen GSP (confirmed July 2026). Enriched APIs handle NIC/IRP
 # encryption+session management for us — we call Adaequare's own gateway with plain JSON.
