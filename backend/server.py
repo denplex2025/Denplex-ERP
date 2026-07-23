@@ -400,6 +400,8 @@ class InventoryItem(BaseModel):
     qty_by_location: dict = Field(default_factory=dict)   # {"Vatva": 12, "Santej": 3} — per-location on-hand
     reorder_level: float = 0
     unit_cost: float = 0
+    sale_price: float = 0             # default selling rate — line items can pull from this instead of manual entry
+    purchase_price: float = 0         # default buying rate
     hsn: Optional[str] = ""
     gst_rate: float = 18.0
     location: Optional[str] = ""
@@ -1874,7 +1876,7 @@ async def update_item(iid: str, it: InventoryItem, user=Depends(get_current_user
 async def bulk_update_items(body: dict, user=Depends(require_roles("admin", "manager"))):
     """Update many items at once (price / stock / reorder / hsn / gst). Body: {updates:[{id, ...fields}]}."""
     updates = body.get("updates") or []
-    allowed = {"name", "category", "uom", "unit_cost", "reorder_level", "hsn", "gst_rate", "qty_on_hand"}
+    allowed = {"name", "category", "uom", "unit_cost", "sale_price", "purchase_price", "reorder_level", "hsn", "gst_rate", "qty_on_hand"}
     n = 0
     for u in updates:
         iid = u.get("id")
@@ -1893,6 +1895,55 @@ async def del_item(iid: str, user=Depends(require_roles("admin", "manager"))):
     await _recycle("items", "Inventory Item", doc, user)
     await db.items.delete_one({"id": iid})
     return {"ok": True}
+
+@api.get("/inventory/items/{iid}/ledger")
+async def item_ledger(iid: str, user=Depends(get_current_user)):
+    """Document-centric detail view for one item, backing the Items dual-pane drill-down (mirrors
+    the /parties/{pid}/transactions pattern): merges StockMovement + StockAdjustment (both keyed on
+    item_id) into one Type/Number/Date/Quantity/Price-per-Unit/Status list, newest first, plus a
+    read-only "used in BOM(s)" summary. BOM linkage is discovered by querying db.boms where any
+    line's item_id matches (there is no reverse-reference field stored on the item itself) — an item
+    with no BOM matches simply gets an empty list back, never an error, since most raw/consumable
+    items are never used in an assembly."""
+    item = await db.items.find_one({"id": iid}, {"_id": 0})
+    if not item:
+        raise HTTPException(404, "Item not found")
+
+    rows = []
+    for m in await db.movements.find({"item_id": iid}, {"_id": 0}).to_list(5000):
+        qty = float(m.get("qty", 0) or 0)
+        mtype = m.get("type")
+        label = {"in": "Stock In", "out": "Stock Out", "adjust": "Adjustment",
+                  "in_process": "In Process", "transfer": "Transfer"}.get(mtype, mtype or "Movement")
+        rows.append({"type": label, "number": m.get("ref") or "", "date": m.get("created_at"),
+                     "quantity": qty, "price_per_unit": float(item.get("unit_cost", 0) or 0),
+                     "status": m.get("notes") or "", "doc_type": "movement", "id": m.get("id"),
+                     "location": m.get("location"), "to_location": m.get("to_location")})
+    for a in await db.stock_adjustments.find({"item_id": iid}, {"_id": 0}).to_list(5000):
+        qty = float(a.get("qty", 0) or 0)
+        rows.append({"type": "Adjustment", "number": a.get("code") or "", "date": a.get("created_at"),
+                     "quantity": qty, "price_per_unit": float(a.get("at_price", item.get("unit_cost", 0)) or 0),
+                     "status": a.get("reason") or "", "doc_type": "stock_adjustment", "id": a.get("id"),
+                     "location": a.get("location")})
+    rows.sort(key=lambda r: str(r.get("date") or ""), reverse=True)
+
+    used_in_boms = []
+    async for b in db.boms.find({"lines.item_id": iid}, {"_id": 0}):
+        used_in_boms.append({"id": b.get("id"), "code": b.get("code"), "product_name": b.get("product_name"),
+                              "revision": b.get("revision"), "bom_type": b.get("bom_type"),
+                              "is_active": b.get("is_active")})
+
+    return {
+        "item": {"id": item.get("id"), "sku": item.get("sku"), "name": item.get("name"),
+                  "category": item.get("category"), "uom": item.get("uom"),
+                  "qty_on_hand": item.get("qty_on_hand", 0), "qty_in_process": item.get("qty_in_process", 0),
+                  "qty_by_location": item.get("qty_by_location", {}), "reorder_level": item.get("reorder_level", 0),
+                  "unit_cost": item.get("unit_cost", 0), "sale_price": item.get("sale_price", 0),
+                  "purchase_price": item.get("purchase_price", 0), "hsn": item.get("hsn"),
+                  "gst_rate": item.get("gst_rate"), "location": item.get("location")},
+        "transactions": rows,
+        "used_in_boms": used_in_boms,
+    }
 
 # ---------------------------------------------------------------------------
 # Standard Parts Library endpoints
