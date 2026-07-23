@@ -60,6 +60,7 @@ import EwayBillForm from "./pages/EwayBillForm";
 import Webhooks from "./pages/Webhooks";
 import SalesOrderCreate from "./pages/SalesOrderCreate";
 import PurchaseBillCreate from "./pages/PurchaseBillCreate";
+import PurchaseBills from "./pages/PurchaseBills";
 import PartLibrary from "./pages/PartLibrary";
 import ResetData from "./pages/ResetData";
 import GSTReports from "./pages/GSTReports";
@@ -94,6 +95,7 @@ function App() {
               <Route path="purchase-orders" element={<PurchaseOrders />} />
               <Route path="purchase-orders/new" element={<PurchaseOrderCreate />} />
               <Route path="sale-orders/new" element={<SalesOrderCreate />} />
+              <Route path="purchase-bills" element={<PurchaseBills />} />
               <Route path="purchase-bills/new" element={<PurchaseBillCreate />} />
               <Route path="invoices" element={<Invoices />} />
               <Route path="invoices/new" element={<InvoiceCreate />} />
