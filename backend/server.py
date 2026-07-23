@@ -3563,19 +3563,22 @@ async def record_eway_bill(iid: str, body: EwayBillIn, user=Depends(get_current_
     await db.invoices.update_one({"id": iid}, {"$set": upd})
     return {"ok": True, "valid_days": days, **upd}
 
+@api.get("/invoices/settled-summary")
+async def invoices_settled_summary(user=Depends(get_current_user)):
+    """Bulk invoice_id -> settled amount map (reuses _settled_per_invoice with no filter) — powers
+    the Sales report page's Total/Received/Balance summary cards + per-row Balance column without
+    an N+1 call per invoice. MUST be registered before /invoices/{iid} — FastAPI matches routes in
+    registration order, so a literal path like this needs to come first or the {iid} pattern below
+    swallows it (iid="settled-summary") and returns a false 404. Hit this bug once already; if you
+    add another literal /invoices/<word> route, put it up here too."""
+    return await _settled_per_invoice()
+
 @api.get("/invoices/{iid}")
 async def get_invoice(iid: str, user=Depends(get_current_user)):
     inv = await db.invoices.find_one({"id": iid}, {"_id": 0})
     if not inv:
         raise HTTPException(404, "Invoice not found")
     return inv
-
-@api.get("/invoices/settled-summary")
-async def invoices_settled_summary(user=Depends(get_current_user)):
-    """Bulk invoice_id -> settled amount map (reuses _settled_per_invoice with no filter) — powers
-    the Sales report page's Total/Received/Balance summary cards + per-row Balance column without
-    an N+1 call per invoice."""
-    return await _settled_per_invoice()
 
 @api.get("/invoices/{iid}/payments")
 async def invoice_payments(iid: str, user=Depends(get_current_user)):
