@@ -1,7 +1,7 @@
-import LineItemDoc from "@/components/erp/LineItemDoc";
+import { InvoiceDualPane } from "@/components/erp/InvoiceDualPane";
 export default function Invoices() {
   return (
-    <LineItemDoc
+    <InvoiceDualPane
       testid="invoices-page"
       overline="Accounting"
       title="Sale Invoices"
@@ -11,8 +11,6 @@ export default function Invoices() {
       partyField="Customer"
       partyNameField="customer_name"
       partyKey="customer"
-      statusOptions={["draft","sent","paid","overdue"]}
-      isInvoice
       createTo="/app/invoices/new"
       editTo={(row) => `/app/invoices/${row.id}/edit`}
     />
