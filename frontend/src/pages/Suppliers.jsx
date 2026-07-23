@@ -30,7 +30,7 @@ export default function Suppliers() {
       fields={fields}
       columns={cols}
       whatsappField="phone"
-      rowActions={(row) => <ViewLedgerButton row={row} />}
+      rowActions={(row) => <ViewLedgerButton row={row} kind="supplier" />}
     />
   );
 }

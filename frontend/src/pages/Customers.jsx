@@ -35,7 +35,7 @@ export default function Customers() {
       columns={cols}
       defaults={{ customer_type: "one_time" }}
       whatsappField="phone"
-      rowActions={(row) => <ViewLedgerButton row={row} />}
+      rowActions={(row) => <ViewLedgerButton row={row} kind="customer" />}
     />
   );
 }
