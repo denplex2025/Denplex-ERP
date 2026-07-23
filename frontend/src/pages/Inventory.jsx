@@ -8,9 +8,10 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { PageHeader, Card, Th, Td, Empty, fmtDate } from "@/components/erp/Primitives";
-import { Plus, Edit, Trash2, ArrowDownToLine, ArrowUpFromLine, RefreshCw, Sparkles, Loader2, QrCode, ArrowLeftRight, MapPin } from "lucide-react";
+import { Plus, Edit, Trash2, ArrowDownToLine, ArrowUpFromLine, RefreshCw, Sparkles, Loader2, QrCode, ArrowLeftRight, MapPin, Search } from "lucide-react";
 import QRView from "@/components/erp/QRView";
 import MaterialStates from "@/components/erp/MaterialStates";
+import { ItemLedgerPanel } from "@/components/erp/ItemLedgerPanel";
 import { toast } from "sonner";
 
 export default function Inventory() {
@@ -34,6 +35,9 @@ export default function Inventory() {
   const [scanOpen, setScanOpen] = useState(false);
   const [scanLoading, setScanLoading] = useState(false);
   const [scanResult, setScanResult] = useState(null);
+  const [itemSearch, setItemSearch] = useState("");
+  const [selectedItemId, setSelectedItemId] = useState(null);
+  const [itemRefresh, setItemRefresh] = useState(0);
 
   const load = async () => {
     const [a, b, l, adj, rs] = await Promise.all([
@@ -56,12 +60,12 @@ export default function Inventory() {
   const saveAdj = async () => {
     try {
       await api.post("/inventory/adjustments", { ...adjForm, qty: Number(adjForm.qty), at_price: Number(adjForm.at_price) });
-      toast.success("Stock adjusted"); setAdjOpen(false); await load();
+      toast.success("Stock adjusted"); setAdjOpen(false); await load(); setItemRefresh(r => r + 1);
     } catch (e) { toast.error(e?.response?.data?.detail || "Adjustment failed"); }
   };
   const delAdj = async (a) => {
     if (!window.confirm(`Delete adjustment ${a.code}? Stock will be restored (undo).`)) return;
-    try { await api.delete(`/inventory/adjustments/${a.id}`); toast.success("Adjustment reversed"); await load(); }
+    try { await api.delete(`/inventory/adjustments/${a.id}`); toast.success("Adjustment reversed"); await load(); setItemRefresh(r => r + 1); }
     catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
   };
 
@@ -75,31 +79,38 @@ export default function Inventory() {
   const saveTransfer = async () => {
     try {
       await api.post("/inventory/transfer", { ...transferForm, qty: Number(transferForm.qty) });
-      toast.success("Stock transferred"); setTransferOpen(false); await load();
+      toast.success("Stock transferred"); setTransferOpen(false); await load(); setItemRefresh(r => r + 1);
     } catch (e) { toast.error(e?.response?.data?.detail || "Transfer failed"); }
   };
   const locTotal = (loc) => items.reduce((s, it) => s + Number((it.qty_by_location || {})[loc] || 0), 0);
   const visibleItems = locFilter === "All" ? items : items.filter(it => Number((it.qty_by_location || {})[locFilter] || 0) !== 0);
+  const q = itemSearch.trim().toLowerCase();
+  const searchedItems = q ? visibleItems.filter(it => (it.name || "").toLowerCase().includes(q) || (it.sku || "").toLowerCase().includes(q)) : visibleItems;
 
   const setF = (k, v) => setForm(p => ({ ...p, [k]: v }));
+  const openEdit = (it) => { setEditing(it); setForm(it); setOpen(true); };
   const save = async () => {
     try {
       if (editing) await api.put(`/inventory/items/${editing.id}`, form);
       else await api.post("/inventory/items", form);
       toast.success(editing ? "Updated" : "Created");
-      setOpen(false); await load();
+      setOpen(false); await load(); setItemRefresh(r => r + 1);
     } catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
   };
   const del = async (it) => {
     if (!window.confirm("Delete this item?")) return;
-    try { await api.delete(`/inventory/items/${it.id}`); toast.success("Deleted"); load(); }
-    catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
+    try {
+      await api.delete(`/inventory/items/${it.id}`);
+      toast.success("Deleted");
+      if (selectedItemId === it.id) setSelectedItemId(null);
+      load();
+    } catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
   };
   const openMove = (it, type) => { setMoveForm({ type, qty: 0, item_id: it.id, item_sku: it.sku, item_name: it.name }); setMoveOpen(true); };
   const saveMove = async () => {
     try {
       await api.post("/inventory/movements", { ...moveForm, qty: Number(moveForm.qty) });
-      toast.success("Stock updated"); setMoveOpen(false); await load();
+      toast.success("Stock updated"); setMoveOpen(false); await load(); setItemRefresh(r => r + 1);
     } catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
   };
 
@@ -144,7 +155,7 @@ export default function Inventory() {
       } catch {}
     }
     toast.success(`Added ${added} items to stock`);
-    setScanOpen(false); setScanResult(null); await load();
+    setScanOpen(false); setScanResult(null); await load(); setItemRefresh(r => r + 1);
   };
 
   return (
@@ -183,44 +194,58 @@ export default function Inventory() {
               ))}
             </div>
           )}
-          <Card>
-            {visibleItems.length === 0 ? <Empty label="No items. Add your first." /> : (
-              <div className="overflow-x-auto">
-                <table className="w-full">
-                  <thead><tr>
-                    <Th>SKU</Th><Th>Name</Th><Th>Category</Th><Th>On Hand</Th><Th>By Location</Th><Th>In Process</Th><Th>Reorder</Th><Th>Cost</Th><Th className="text-right">Actions</Th>
-                  </tr></thead>
-                  <tbody>
-                    {visibleItems.map(it => (
-                      <tr key={it.id} className="hover:bg-slate-50">
-                        <Td><span className="font-mono-tech text-xs">{it.sku}</span></Td>
-                        <Td>{it.name}</Td>
-                        <Td className="capitalize">{it.category}</Td>
-                        <Td><span className={`font-mono-tech ${it.qty_on_hand <= it.reorder_level ? "text-red-700 font-semibold" : ""}`}>{it.qty_on_hand} {it.uom}</span></Td>
-                        <Td>
-                          {Object.entries(it.qty_by_location || {}).filter(([, v]) => Number(v) !== 0).length === 0
-                            ? <span className="text-slate-300 text-xs">—</span>
-                            : <span className="flex flex-wrap gap-1">{Object.entries(it.qty_by_location || {}).filter(([, v]) => Number(v) !== 0).map(([l, v]) => <span key={l} className="inline-block px-1.5 py-0.5 rounded-sm text-[11px] font-medium bg-slate-100 text-slate-700">{l} {v}</span>)}</span>}
-                        </Td>
-                        <Td><span className="font-mono-tech text-amber-700">{it.qty_in_process || 0}</span></Td>
-                        <Td><span className="font-mono-tech">{it.reorder_level}</span></Td>
-                        <Td>₹{it.unit_cost}</Td>
-                        <Td className="text-right whitespace-nowrap">
-                          <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => openMove(it, "in")} title="Stock In" data-testid={`stock-in-${it.id}`}><ArrowDownToLine className="h-4 w-4 text-emerald-700" /></Button>
-                          <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => openMove(it, "out")} title="Stock Out" data-testid={`stock-out-${it.id}`}><ArrowUpFromLine className="h-4 w-4 text-red-700" /></Button>
-                          <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => openTransfer(it)} title="Transfer between locations" disabled={locations.length < 2}><ArrowLeftRight className="h-4 w-4 text-blue-600" /></Button>
-                          <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => openAdj(it)} title="Adjust stock (with reason)"><RefreshCw className="h-4 w-4 text-red-600" /></Button>
-                          <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => setQrItem({ entity: "inventory", id: it.id, code: it.sku, label: it.name })} title="QR code"><QrCode className="h-4 w-4 text-slate-600" /></Button>
-                          <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => { setEditing(it); setForm(it); setOpen(true); }}><Edit className="h-4 w-4" /></Button>
-                          <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => del(it)}><Trash2 className="h-4 w-4 text-red-600" /></Button>
-                        </Td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+          <div className="grid grid-cols-1 lg:grid-cols-[380px_1fr] gap-4 items-start">
+            <Card className="overflow-hidden">
+              <div className="p-3 border-b border-slate-200">
+                <div className="relative">
+                  <Search className="h-3.5 w-3.5 text-slate-400 absolute left-2.5 top-2.5" />
+                  <Input
+                    placeholder="Search SKU or name…"
+                    value={itemSearch}
+                    onChange={(e) => setItemSearch(e.target.value)}
+                    className="rounded-sm border-slate-300 pl-8 h-8 text-sm"
+                    data-testid="items-search"
+                  />
+                </div>
               </div>
-            )}
-          </Card>
+              <div className="max-h-[70vh] overflow-y-auto">
+                {searchedItems.length === 0 ? (
+                  <Empty label="No items found." />
+                ) : (
+                  searchedItems.map((it) => (
+                    <div
+                      key={it.id}
+                      onClick={() => setSelectedItemId(it.id)}
+                      className={`px-3 py-2.5 border-b border-slate-100 cursor-pointer ${selectedItemId === it.id ? "bg-red-50 border-l-2 border-l-red-600" : "hover:bg-slate-50"}`}
+                      data-testid={`item-row-${it.id}`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="text-sm font-medium text-slate-900 truncate">{it.name}</div>
+                          <div className="text-xs text-slate-500 font-mono-tech truncate">{it.sku}</div>
+                        </div>
+                        <span className={`font-mono-tech text-xs shrink-0 ${it.qty_on_hand <= it.reorder_level ? "text-red-700 font-semibold" : "text-slate-600"}`}>{it.qty_on_hand} {it.uom}</span>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </Card>
+
+            <Card className="p-5 min-h-[400px]">
+              <ItemLedgerPanel
+                key={itemRefresh}
+                itemId={selectedItemId}
+                onStockIn={(it) => openMove(it, "in")}
+                onStockOut={(it) => openMove(it, "out")}
+                onTransfer={openTransfer}
+                onAdjust={openAdj}
+                onQr={(it) => setQrItem({ entity: "inventory", id: it.id, code: it.sku, label: it.name })}
+                onEdit={openEdit}
+                onDelete={del}
+              />
+            </Card>
+          </div>
         </TabsContent>
 
         <TabsContent value="moves">
@@ -353,6 +378,8 @@ export default function Inventory() {
             <Field label="Qty on Hand"><Input type="number" value={form.qty_on_hand ?? 0} onChange={e=>setF("qty_on_hand", Number(e.target.value))} /></Field>
             <Field label="Reorder Level"><Input type="number" value={form.reorder_level ?? 0} onChange={e=>setF("reorder_level", Number(e.target.value))} /></Field>
             <Field label="Unit Cost (₹)"><Input type="number" value={form.unit_cost ?? 0} onChange={e=>setF("unit_cost", Number(e.target.value))} /></Field>
+            <Field label="Sale Price (₹)"><Input type="number" value={form.sale_price ?? 0} onChange={e=>setF("sale_price", Number(e.target.value))} data-testid="item-sale-price" /></Field>
+            <Field label="Purchase Price (₹)"><Input type="number" value={form.purchase_price ?? 0} onChange={e=>setF("purchase_price", Number(e.target.value))} data-testid="item-purchase-price" /></Field>
             <Field label="GST %"><Input type="number" value={form.gst_rate ?? 18} onChange={e=>setF("gst_rate", Number(e.target.value))} /></Field>
             <Field label="HSN"><Input value={form.hsn || ""} onChange={e=>setF("hsn", e.target.value)} /></Field>
             <Field label="Location"><Input value={form.location || ""} onChange={e=>setF("location", e.target.value)} /></Field>
