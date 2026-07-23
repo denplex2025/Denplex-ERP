@@ -7,8 +7,11 @@ import { StatusBadge } from "@/components/erp/CrudPage";
 import { BookUser } from "lucide-react";
 import { toast } from "sonner";
 
-/** Per-row "View Ledger" trigger button for Customers/Suppliers CrudPage rowActions. */
-export function ViewLedgerButton({ row }) {
+/** Per-row "View Ledger" trigger button for Customers/Suppliers CrudPage rowActions.
+ * `kind` ("customer" or "supplier") must be passed by the calling page — a handful of parties
+ * (dual-role vendors Denplex also sells to) share the same id across both collections, so without
+ * an explicit hint the backend can't always tell which ledger the user actually wants. */
+export function ViewLedgerButton({ row, kind }) {
   const [open, setOpen] = useState(false);
   return (
     <>
@@ -22,13 +25,13 @@ export function ViewLedgerButton({ row }) {
       >
         <BookUser className="h-4 w-4 text-slate-600" />
       </Button>
-      {open && <PartyLedgerSheet pid={row.id} open={open} onOpenChange={setOpen} />}
+      {open && <PartyLedgerSheet pid={row.id} kind={kind} open={open} onOpenChange={setOpen} />}
     </>
   );
 }
 
 /** Two-pane style party detail: header summary + full transaction history table. */
-export function PartyLedgerSheet({ pid, open, onOpenChange }) {
+export function PartyLedgerSheet({ pid, kind, open, onOpenChange }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
 
@@ -36,12 +39,12 @@ export function PartyLedgerSheet({ pid, open, onOpenChange }) {
     if (!open || !pid) return;
     let cancelled = false;
     setLoading(true);
-    api.get(`/parties/${pid}/transactions`)
+    api.get(`/parties/${pid}/transactions`, { params: kind ? { kind } : {} })
       .then((r) => { if (!cancelled) setData(r.data); })
       .catch(() => { if (!cancelled) toast.error("Failed to load party ledger"); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [open, pid]);
+  }, [open, pid, kind]);
 
   const party = data?.party;
   const txns = data?.transactions || [];
