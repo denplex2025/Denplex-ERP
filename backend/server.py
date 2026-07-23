@@ -9964,17 +9964,31 @@ async def dashboard_shopfloor(user=Depends(get_current_user)):
     }
 
 @api.get("/parties/{pid}/transactions")
-async def party_transactions(pid: str, user=Depends(get_current_user)):
+async def party_transactions(pid: str, kind: Optional[str] = None, user=Depends(get_current_user)):
     """Document-centric transaction list for one party (invoices/bills/returns/payments), the
     data behind the Party Details drill-down panel: Type/Number/Date/Total/Balance/Due Date/Status
     per row, newest first. Distinct from /parties/{pid}/statement (a chronological debit/credit
-    running-balance ledger) — this mirrors each document's own status instead."""
+    running-balance ledger) — this mirrors each document's own status instead.
+
+    `kind` ("customer" or "supplier") is an optional hint from the calling page. It matters because
+    8 of 302 suppliers share the exact same `id` as a customer record of the same name (real
+    dual-role parties Denplex both buys from and sells to, confirmed live) — without a hint we'd
+    always resolve those ids to "customer" and silently show the wrong side's ledger when clicked
+    from the Suppliers page. If kind is omitted (e.g. old cached frontend) we fall back to the old
+    customer-first auto-detect so the endpoint never 404s."""
     customer = await db.customers.find_one({"id": pid}, {"_id": 0})
-    supplier = None if customer else await db.suppliers.find_one({"id": pid}, {"_id": 0})
-    party = customer or supplier
+    supplier = await db.suppliers.find_one({"id": pid}, {"_id": 0})
+    if kind == "supplier" and supplier:
+        party, resolved_kind = supplier, "supplier"
+    elif kind == "customer" and customer:
+        party, resolved_kind = customer, "customer"
+    elif customer:
+        party, resolved_kind = customer, "customer"
+    else:
+        party, resolved_kind = supplier, "supplier"
     if not party:
         raise HTTPException(404, "Party not found")
-    kind = "customer" if customer else "supplier"
+    kind = resolved_kind
     # NOTE: Vyapar-imported documents (all 839 invoices / 1822 bills / 532+1032 payments / 8 credit
     # notes / 5 purchase returns, confirmed live) never got a real customer_id/supplier_id/party_id —
     # the importer only wrote a denormalized *_name string. So matching on id alone returns nothing
