@@ -8,8 +8,11 @@ import {
   matchesText, matchesDate, matchesNum,
   ColumnFilterPopover, CheckboxFilterContent, CategoryFilterContent,
 } from "@/components/erp/TableFilters";
+import { useColumnWidths, ColResizeHandle } from "@/components/erp/ColumnResize";
 import { ArrowDownToLine, ArrowUpFromLine, ArrowLeftRight, SlidersHorizontal, QrCode, Edit, Trash2, X, Boxes } from "lucide-react";
 import { toast } from "sonner";
+
+const DEFAULT_COL_WIDTHS = { type: 130, number: 130, date: 100, quantity: 100, price: 110, status: 110 };
 
 const EMPTY_FILTERS = {
   types: [],
@@ -28,6 +31,7 @@ export function ItemLedgerPanel({ itemId, onStockIn, onStockOut, onTransfer, onA
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [filters, setFilters] = useState(EMPTY_FILTERS);
+  const [colWidths, startResize] = useColumnWidths("colw:item-ledger", DEFAULT_COL_WIDTHS);
 
   useEffect(() => {
     if (!itemId) { setData(null); return; }
@@ -142,10 +146,13 @@ export function ItemLedgerPanel({ itemId, onStockIn, onStockOut, onTransfer, onA
         <Empty label="No stock movements yet." />
       ) : (
         <div className="overflow-x-auto border border-slate-200 rounded-sm">
-          <table className="w-full">
+          <table style={{ tableLayout: "fixed", width: "100%" }}>
+            <colgroup>
+              {Object.entries(colWidths).map(([k, w]) => <col key={k} style={{ width: w }} />)}
+            </colgroup>
             <thead>
               <tr>
-                <Th>
+                <Th className="relative">
                   <div className="flex items-center gap-1">
                     Type
                     <ColumnFilterPopover
@@ -161,8 +168,9 @@ export function ItemLedgerPanel({ itemId, onStockIn, onStockOut, onTransfer, onA
                       )}
                     />
                   </div>
+                  <ColResizeHandle onMouseDown={startResize("type")} />
                 </Th>
-                <Th>
+                <Th className="relative">
                   <div className="flex items-center gap-1">
                     Number
                     <ColumnFilterPopover
@@ -180,8 +188,9 @@ export function ItemLedgerPanel({ itemId, onStockIn, onStockOut, onTransfer, onA
                       )}
                     />
                   </div>
+                  <ColResizeHandle onMouseDown={startResize("number")} />
                 </Th>
-                <Th>
+                <Th className="relative">
                   <div className="flex items-center gap-1">
                     Date
                     <ColumnFilterPopover
@@ -199,8 +208,9 @@ export function ItemLedgerPanel({ itemId, onStockIn, onStockOut, onTransfer, onA
                       )}
                     />
                   </div>
+                  <ColResizeHandle onMouseDown={startResize("date")} />
                 </Th>
-                <Th className="text-right">
+                <Th className="relative text-right">
                   <div className="flex items-center justify-end gap-1">
                     Quantity
                     <ColumnFilterPopover
@@ -218,8 +228,9 @@ export function ItemLedgerPanel({ itemId, onStockIn, onStockOut, onTransfer, onA
                       )}
                     />
                   </div>
+                  <ColResizeHandle onMouseDown={startResize("quantity")} />
                 </Th>
-                <Th className="text-right">
+                <Th className="relative text-right">
                   <div className="flex items-center justify-end gap-1">
                     Price / Unit
                     <ColumnFilterPopover
@@ -237,8 +248,9 @@ export function ItemLedgerPanel({ itemId, onStockIn, onStockOut, onTransfer, onA
                       )}
                     />
                   </div>
+                  <ColResizeHandle onMouseDown={startResize("price")} />
                 </Th>
-                <Th>
+                <Th className="relative">
                   <div className="flex items-center gap-1">
                     Status
                     <ColumnFilterPopover
@@ -254,6 +266,7 @@ export function ItemLedgerPanel({ itemId, onStockIn, onStockOut, onTransfer, onA
                       )}
                     />
                   </div>
+                  <ColResizeHandle onMouseDown={startResize("status")} />
                 </Th>
               </tr>
             </thead>
@@ -263,12 +276,12 @@ export function ItemLedgerPanel({ itemId, onStockIn, onStockOut, onTransfer, onA
               ) : (
                 txns.map((t, i) => (
                   <tr key={i} className="hover:bg-slate-50">
-                    <Td>{t.type}</Td>
-                    <Td className="font-mono-tech text-xs">{t.number || "—"}</Td>
-                    <Td>{fmtDate(t.date)}</Td>
+                    <Td className="truncate">{t.type}</Td>
+                    <Td className="font-mono-tech text-xs truncate">{t.number || "—"}</Td>
+                    <Td className="truncate">{fmtDate(t.date)}</Td>
                     <Td className="text-right">{t.quantity}</Td>
                     <Td className="text-right">{inr(t.price_per_unit)}</Td>
-                    <Td className="text-slate-500">{t.status || "—"}</Td>
+                    <Td className="text-slate-500 truncate">{t.status || "—"}</Td>
                   </tr>
                 ))
               )}
