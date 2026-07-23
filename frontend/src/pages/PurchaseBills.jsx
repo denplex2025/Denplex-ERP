@@ -5,16 +5,14 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { PageHeader, Card, Th, Td, Empty, inr, fmtDate } from "@/components/erp/Primitives";
-import { StatusBadge } from "@/components/erp/CrudPage";
 import {
   TEXT_CATEGORIES, DATE_CATEGORIES, NUM_CATEGORIES,
   matchesText, matchesDate, matchesNum,
   ColumnFilterPopover, CheckboxFilterContent, CategoryFilterContent,
 } from "@/components/erp/TableFilters";
-import { Plus, Search, Eye, FileDown, Mail, MessageCircle, Edit, Trash2, Download as DLIcon, Printer, FileSpreadsheet, MapPin } from "lucide-react";
+import { Plus, Search, Eye, FileDown, Mail, MessageCircle, Trash2, Download as DLIcon, Printer, FileSpreadsheet } from "lucide-react";
 import { toast } from "sonner";
 
-const GODOWNS = ["All", "Vatva", "Santej"];
 const EMPTY_FILTERS = {
   code: { category: "contains", value: "" },
   party: { category: "contains", value: "" },
@@ -25,9 +23,27 @@ const EMPTY_FILTERS = {
   statuses: [],
 };
 
-/** Sales Invoices report: date-range + godown filter bar, a Total/Received/Balance summary card,
- * and a flat (non-dual-pane) transactions table with Vyapar-style per-column funnel filters. */
-export default function Invoices() {
+/** Classify a bill for the Paid/Unpaid/Overdue buckets. The stored `status` field only ever gets
+ * auto-set to "paid" or "unpaid" by the backend (see _refresh_bill_paid_status) — "overdue" is a
+ * derived view, not a stored state, so it's computed here the same way /reports/overdue does it. */
+function classify(bill, settledAmt) {
+  const total = Number(bill.total) || 0;
+  if (settledAmt >= total - 0.01) return "paid";
+  const due = (bill.due_date || "").slice(0, 10);
+  if (due && due < new Date().toISOString().slice(0, 10)) return "overdue";
+  return "unpaid";
+}
+const STATUS_STYLE = {
+  paid: "bg-emerald-50 text-emerald-700 border-emerald-200",
+  unpaid: "bg-amber-50 text-amber-700 border-amber-200",
+  overdue: "bg-red-50 text-red-700 border-red-200",
+};
+
+/** Dedicated Purchase Bills page (separate from the generic DocList.jsx used by other simple doc
+ * types like Credit Notes / Sale Orders) — its own summary shape (Paid/Unpaid/Overdue/Total,
+ * matching how purchase-side bookkeeping is actually tracked) rather than sharing the Sales page's
+ * Total/Received/Balance card. */
+export default function PurchaseBills() {
   const navigate = useNavigate();
   const [items, setItems] = useState([]);
   const [parties, setParties] = useState([]);
@@ -35,7 +51,6 @@ export default function Invoices() {
   const [loading, setLoading] = useState(true);
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
-  const [godown, setGodown] = useState("All");
   const [search, setSearch] = useState("");
   const [filters, setFilters] = useState(EMPTY_FILTERS);
   const [previewUrl, setPreviewUrl] = useState("");
@@ -46,8 +61,8 @@ export default function Invoices() {
     setLoading(true);
     try {
       const [r, p, s] = await Promise.all([
-        api.get("/invoices"), api.get("/customers"),
-        api.get("/invoices/settled-summary").catch(() => ({ data: {} })),
+        api.get("/vendor-bills"), api.get("/suppliers"),
+        api.get("/vendor-bills/settled-summary").catch(() => ({ data: {} })),
       ]);
       setItems(r.data); setParties(p.data); setSettled(s.data || {});
     } catch { toast.error("Failed to load"); }
@@ -55,30 +70,37 @@ export default function Invoices() {
   };
   useEffect(() => { load(); }, []);
 
-  const baseFiltered = useMemo(() => items.filter((inv) => {
-    const d = (inv.date || "").slice(0, 10);
+  const baseFiltered = useMemo(() => items.filter((b) => {
+    const d = (b.date || "").slice(0, 10);
     if (dateFrom && d && d < dateFrom) return false;
     if (dateTo && d && d > dateTo) return false;
-    if (godown !== "All" && (inv.godown || "") !== godown) return false;
     return true;
-  }), [items, dateFrom, dateTo, godown]);
+  }), [items, dateFrom, dateTo]);
 
-  const totalSales = baseFiltered.reduce((s, i) => s + (Number(i.total) || 0), 0);
-  const received = baseFiltered.reduce((s, i) => s + Math.min(settled[i.id] || 0, Number(i.total) || 0), 0);
-  const balanceDue = totalSales - received;
+  const buckets = useMemo(() => {
+    let paid = 0, unpaid = 0, overdue = 0;
+    for (const b of baseFiltered) {
+      const s = settled[b.id] || 0;
+      const cls = classify(b, s);
+      const bal = (Number(b.total) || 0) - s;
+      if (cls === "paid") paid += Number(b.total) || 0;
+      else if (cls === "overdue") overdue += bal;
+      else unpaid += bal;
+    }
+    return { paid, unpaid, overdue, total: paid + unpaid + overdue };
+  }, [baseFiltered, settled]);
 
-  const statusOptions = useMemo(() => [...new Set(baseFiltered.map((i) => i.status))], [baseFiltered]);
   const q = search.trim().toLowerCase();
-
-  const rows = useMemo(() => baseFiltered.filter((inv) => {
-    if (q && !((inv.code || "").toLowerCase().includes(q) || (inv.customer_name || "").toLowerCase().includes(q))) return false;
-    if (filters.statuses.length && !filters.statuses.includes(inv.status)) return false;
-    if (!matchesText(inv.code, filters.code)) return false;
-    if (!matchesText(inv.customer_name, filters.party)) return false;
-    if (!matchesDate(inv.date, filters.date)) return false;
-    if (!matchesDate(inv.due_date, filters.dueDate)) return false;
-    if (!matchesNum(inv.total, filters.amount)) return false;
-    const bal = (Number(inv.total) || 0) - (settled[inv.id] || 0);
+  const rows = useMemo(() => baseFiltered.filter((b) => {
+    if (q && !((b.code || "").toLowerCase().includes(q) || (b.supplier_name || "").toLowerCase().includes(q))) return false;
+    const cls = classify(b, settled[b.id] || 0);
+    if (filters.statuses.length && !filters.statuses.includes(cls)) return false;
+    if (!matchesText(b.code, filters.code)) return false;
+    if (!matchesText(b.supplier_name, filters.party)) return false;
+    if (!matchesDate(b.date, filters.date)) return false;
+    if (!matchesDate(b.due_date, filters.dueDate)) return false;
+    if (!matchesNum(b.total, filters.amount)) return false;
+    const bal = (Number(b.total) || 0) - (settled[b.id] || 0);
     if (!matchesNum(bal, filters.balance)) return false;
     return true;
   }), [baseFiltered, q, filters, settled]);
@@ -86,16 +108,16 @@ export default function Invoices() {
   const hasActiveFilters = filters.statuses.length > 0 || !!filters.code.value || !!filters.party.value
     || !!filters.date.value || !!filters.dueDate.value || filters.amount.value !== "" || filters.balance.value !== "";
 
-  const partyOf = (row) => parties.find((p) => p.id === row.customer_id);
+  const partyOf = (row) => parties.find((p) => p.id === row.supplier_id);
 
   const del = async (row) => {
     if (!window.confirm("Delete?")) return;
-    try { await api.delete(`/invoices/${row.id}`); toast.success("Deleted"); load(); }
-    catch { toast.error("Failed"); }
+    try { await api.delete(`/vendor-bills/${row.id}`); toast.success("Deleted"); load(); }
+    catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
   };
   const downloadPdf = async (row) => {
     try {
-      const r = await api.get(`/invoices/${row.id}/pdf`, { responseType: "blob" });
+      const r = await api.get(`/vendor-bills/${row.id}/pdf`, { responseType: "blob" });
       const url = window.URL.createObjectURL(r.data);
       const a = document.createElement("a"); a.href = url; a.download = `${row.code}.pdf`; a.click();
       window.URL.revokeObjectURL(url);
@@ -103,7 +125,7 @@ export default function Invoices() {
   };
   const previewPdf = async (row) => {
     try {
-      const r = await api.get(`/invoices/${row.id}/pdf`, { responseType: "blob" });
+      const r = await api.get(`/vendor-bills/${row.id}/pdf`, { responseType: "blob" });
       setPreviewUrl(window.URL.createObjectURL(r.data)); setPreviewRow(row); setPreviewOpen(true);
     } catch { toast.error("Preview failed"); }
   };
@@ -111,28 +133,21 @@ export default function Invoices() {
   const sendWhatsApp = (row) => {
     const p = partyOf(row);
     if (!p?.phone) { toast.error("No phone number on file for this party"); return; }
-    const msg = encodeURIComponent(`Hi ${p.name},\n\nPlease find Sale Invoice ${row.code} attached.\nTotal: ₹${row.total}\n\n— Denplex Engineering Company`);
+    const msg = encodeURIComponent(`Hi ${p.name},\n\nRe: Purchase Bill ${row.code}.\nTotal: ₹${row.total}\n\n— Denplex Engineering Company`);
     window.open(`https://wa.me/${String(p.phone).replace(/\D/g, "")}?text=${msg}`, "_blank");
-  };
-  const sendTwilioWA = async (row) => {
-    const p = partyOf(row);
-    if (!p?.phone) { toast.error("No phone on file"); return; }
-    const body = `Hi ${p.name}, your Sale Invoice ${row.code} is ready. Total ₹${row.total}.`;
-    try { await api.post("/whatsapp/send", { to_phone: p.phone, body }); toast.success("WhatsApp queued via Twilio"); }
-    catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
   };
   const emailDoc = async (row) => {
     const p = partyOf(row);
-    if (!p?.email) { toast.error("Customer email missing"); return; }
+    if (!p?.email) { toast.error("Supplier email missing"); return; }
     try {
-      const r = await api.get(`/invoices/${row.id}/pdf`, { responseType: "blob" });
+      const r = await api.get(`/vendor-bills/${row.id}/pdf`, { responseType: "blob" });
       const reader = new FileReader();
       reader.onload = async () => {
         const b64 = String(reader.result).split(",")[1];
         try {
           const res = await api.post("/email/send", {
-            to: [p.email], subject: `Sale Invoice ${row.code}`,
-            html: `<p>Hi ${p.name},</p><p>Please find Sale Invoice <strong>${row.code}</strong> attached. Total: ₹${row.total}.</p><p>— Denplex Engineering Company</p>`,
+            to: [p.email], subject: `Purchase Bill ${row.code}`,
+            html: `<p>Hi ${p.name},</p><p>Re: Purchase Bill <strong>${row.code}</strong>. Total: ₹${row.total}.</p><p>— Denplex Engineering Company</p>`,
             attachment_base64: b64, attachment_filename: `${row.code}.pdf`,
           });
           toast.success(`Sent to ${p.email} from ${res.data?.from || "your mailbox"}`);
@@ -147,22 +162,22 @@ export default function Invoices() {
       const params = new URLSearchParams();
       if (dateFrom) params.set("date_from", dateFrom);
       if (dateTo) params.set("date_to", dateTo);
-      const r = await api.get(`/export/invoices.xlsx?${params.toString()}`, { responseType: "blob" });
+      const r = await api.get(`/export/vendor-bills.xlsx?${params.toString()}`, { responseType: "blob" });
       const url = window.URL.createObjectURL(r.data);
-      const a = document.createElement("a"); a.href = url; a.download = "invoices.xlsx"; a.click();
+      const a = document.createElement("a"); a.href = url; a.download = "purchase-bills.xlsx"; a.click();
       window.URL.revokeObjectURL(url);
     } catch { toast.error("Export failed"); }
   };
 
   return (
-    <div data-testid="invoices-page">
+    <div data-testid="purchase-bills-page">
       <PageHeader
-        overline="Accounting"
-        title="Sale Invoices"
-        subtitle="CGST/SGST for intra-state, IGST for inter-state — auto computed."
+        overline="Purchases"
+        title="Purchase Bills"
+        subtitle="Track what you owe suppliers — paid, unpaid, and overdue at a glance."
         actions={
-          <Button onClick={() => navigate("/app/invoices/new")} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="invoices-page-new">
-            <Plus className="h-4 w-4 mr-1" /> New
+          <Button onClick={() => navigate("/app/purchase-bills/new")} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="purchase-bills-new">
+            <Plus className="h-4 w-4 mr-1" /> Add Purchase
           </Button>
         }
       />
@@ -173,21 +188,25 @@ export default function Invoices() {
           <Input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} className="rounded-sm h-8 w-36 text-xs" />
           <span className="text-slate-400 text-xs">to</span>
           <Input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} className="rounded-sm h-8 w-36 text-xs" />
-          <span className="text-xs uppercase tracking-wider text-slate-400 font-semibold ml-2 inline-flex items-center gap-1"><MapPin className="w-3 h-3" /> Godown</span>
-          {GODOWNS.map((g) => (
-            <button key={g} onClick={() => setGodown(g)} className={`px-2.5 py-1 text-xs rounded-sm font-medium border ${godown === g ? "bg-red-600 text-white border-red-600" : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50"}`}>{g}</button>
-          ))}
         </div>
       </Card>
 
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4">
-        <div className="bg-white border border-slate-200 rounded-sm p-4 sm:col-span-1">
-          <div className="text-xs uppercase tracking-wider text-slate-500">Total Sales Amount</div>
-          <div className="font-display text-2xl font-bold text-slate-900 mt-1">{inr(totalSales)}</div>
-          <div className="flex gap-4 mt-2 text-xs text-slate-500">
-            <div>Received: <span className="text-emerald-600 font-semibold">{inr(received)}</span></div>
-            <div>Balance: <span className={`font-semibold ${balanceDue > 0.5 ? "text-red-600" : "text-slate-700"}`}>{inr(balanceDue)}</span></div>
-          </div>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
+        <div className="bg-white border border-slate-200 border-l-4 border-l-emerald-500 rounded-sm p-4">
+          <div className="text-xs uppercase tracking-wider text-slate-500">Paid</div>
+          <div className="font-display text-xl font-bold text-emerald-700 mt-1">{inr(buckets.paid)}</div>
+        </div>
+        <div className="bg-white border border-slate-200 border-l-4 border-l-amber-500 rounded-sm p-4">
+          <div className="text-xs uppercase tracking-wider text-slate-500">Unpaid</div>
+          <div className="font-display text-xl font-bold text-amber-700 mt-1">{inr(buckets.unpaid)}</div>
+        </div>
+        <div className="bg-white border border-slate-200 border-l-4 border-l-red-500 rounded-sm p-4">
+          <div className="text-xs uppercase tracking-wider text-slate-500">Overdue</div>
+          <div className="font-display text-xl font-bold text-red-700 mt-1">{inr(buckets.overdue)}</div>
+        </div>
+        <div className="bg-white border border-slate-200 border-l-4 border-l-slate-400 rounded-sm p-4">
+          <div className="text-xs uppercase tracking-wider text-slate-500">Total</div>
+          <div className="font-display text-xl font-bold text-slate-900 mt-1">{inr(buckets.total)}</div>
         </div>
       </div>
 
@@ -220,9 +239,9 @@ export default function Invoices() {
                       onApply={(v) => setFilters((f) => ({ ...f, date: v }))} onClear={() => setFilters((f) => ({ ...f, date: { category: "equal", value: "" } }))} close={close} />
                   )} />
                 </div></Th>
-                <Th><div className="flex items-center gap-1">Invoice No
+                <Th><div className="flex items-center gap-1">Bill No
                   <ColumnFilterPopover active={!!filters.code.value} renderContent={(close) => (
-                    <CategoryFilterContent categoryOptions={TEXT_CATEGORIES} inputType="text" valueLabel="Invoice No" committed={filters.code}
+                    <CategoryFilterContent categoryOptions={TEXT_CATEGORIES} inputType="text" valueLabel="Bill No" committed={filters.code}
                       onApply={(v) => setFilters((f) => ({ ...f, code: v }))} onClear={() => setFilters((f) => ({ ...f, code: { category: "contains", value: "" } }))} close={close} />
                   )} />
                 </div></Th>
@@ -238,9 +257,9 @@ export default function Invoices() {
                       onApply={(v) => setFilters((f) => ({ ...f, amount: v }))} onClear={() => setFilters((f) => ({ ...f, amount: { category: "equal", value: "" } }))} close={close} />
                   )} />
                 </div></Th>
-                <Th className="text-right"><div className="flex items-center justify-end gap-1">Balance
+                <Th className="text-right"><div className="flex items-center justify-end gap-1">Balance Due
                   <ColumnFilterPopover active={filters.balance.value !== ""} renderContent={(close) => (
-                    <CategoryFilterContent categoryOptions={NUM_CATEGORIES} inputType="number" valueLabel="Balance" committed={filters.balance}
+                    <CategoryFilterContent categoryOptions={NUM_CATEGORIES} inputType="number" valueLabel="Balance Due" committed={filters.balance}
                       onApply={(v) => setFilters((f) => ({ ...f, balance: v }))} onClear={() => setFilters((f) => ({ ...f, balance: { category: "equal", value: "" } }))} close={close} />
                   )} />
                 </div></Th>
@@ -252,7 +271,7 @@ export default function Invoices() {
                 </div></Th>
                 <Th><div className="flex items-center gap-1">Status
                   <ColumnFilterPopover active={filters.statuses.length > 0} renderContent={(close) => (
-                    <CheckboxFilterContent options={statusOptions} committed={filters.statuses}
+                    <CheckboxFilterContent options={["paid", "unpaid", "overdue"]} committed={filters.statuses}
                       onApply={(v) => setFilters((f) => ({ ...f, statuses: v }))} onClear={() => setFilters((f) => ({ ...f, statuses: [] }))} close={close} />
                   )} />
                 </div></Th>
@@ -260,23 +279,23 @@ export default function Invoices() {
               </tr></thead>
               <tbody>
                 {rows.map((row) => {
-                  const bal = (Number(row.total) || 0) - (settled[row.id] || 0);
+                  const s = settled[row.id] || 0;
+                  const bal = (Number(row.total) || 0) - s;
+                  const cls = classify(row, s);
                   return (
                     <tr key={row.id} className="hover:bg-slate-50">
                       <Td>{fmtDate(row.date)}</Td>
                       <Td className="font-mono-tech text-xs">{row.code}</Td>
-                      <Td>{row.customer_name}</Td>
+                      <Td>{row.supplier_name}</Td>
                       <Td className="text-right font-mono-tech">{inr(row.total)}</Td>
                       <Td className="text-right font-mono-tech">{bal > 0.5 ? inr(bal) : "—"}</Td>
                       <Td>{fmtDate(row.due_date)}</Td>
-                      <Td><StatusBadge status={row.status} /></Td>
+                      <Td><span className={`inline-block px-2 py-0.5 rounded-sm text-[10px] uppercase tracking-wider font-semibold border ${STATUS_STYLE[cls]}`}>{cls}</span></Td>
                       <Td className="text-right whitespace-nowrap">
                         <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => previewPdf(row)} title="Preview PDF"><Eye className="h-4 w-4 text-slate-700" /></Button>
                         <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => downloadPdf(row)} title="Download PDF"><FileDown className="h-4 w-4 text-slate-700" /></Button>
                         <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => emailDoc(row)} title="Email"><Mail className="h-4 w-4 text-red-600" /></Button>
                         <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => sendWhatsApp(row)} title="WhatsApp web"><MessageCircle className="h-4 w-4 text-emerald-600" /></Button>
-                        <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => sendTwilioWA(row)} title="WhatsApp via Twilio"><MessageCircle className="h-4 w-4 text-emerald-800" strokeWidth={2.5} /></Button>
-                        <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => navigate(`/app/invoices/${row.id}/edit`)} title="Edit"><Edit className="h-4 w-4" /></Button>
                         <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => del(row)} title="Delete"><Trash2 className="h-4 w-4 text-red-600" /></Button>
                       </Td>
                     </tr>

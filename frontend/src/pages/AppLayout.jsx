@@ -49,7 +49,7 @@ function GlobalSearch() {
       {open && q.trim().length >= 2 && (
         <div className="absolute z-50 mt-1 w-full bg-white border border-slate-200 rounded-sm shadow-lg max-h-96 overflow-auto">
           {loading && <div className="px-3 py-2 text-xs text-slate-400">Searching…</div>}
-          {!loading && results.length === 0 && <div className="px-3 py-2 text-xs text-slate-400">No matches for “{q}”</div>}
+          {!loading && results.length === 0 && <div className="px-3 py-2 text-xs text-slate-400">No matches for "{q}"</div>}
           {results.map((r, i) => (
             <button key={i} onClick={() => go(r)} className="w-full text-left px-3 py-2 hover:bg-slate-50 flex items-center gap-2 border-b border-slate-50 last:border-0">
               <span className="text-[10px] uppercase tracking-wider text-red-600 font-semibold w-24 shrink-0">{r.type}</span>
@@ -92,7 +92,7 @@ const NAV_GROUPS = [
       { to: "/app/invoices", label: "Sale Invoices", icon: Receipt, testid: "nav-invoices" },
       { to: "/app/invoices/new", label: "New Sale Invoice", icon: Receipt, testid: "nav-invoice-new", end: true },
       { to: "/app/docs/credit-notes", label: "Credit Notes", icon: Receipt, testid: "nav-credit-notes" },
-      { to: "/app/docs/vendor-bills", label: "Purchase Bills", icon: Receipt, testid: "nav-vendor-bills" },
+      { to: "/app/purchase-bills", label: "Purchase Bills", icon: Receipt, testid: "nav-vendor-bills" },
       { to: "/app/purchase-bills/new", label: "New Purchase Bill", icon: Receipt, testid: "nav-pb-new", end: true },
       { to: "/app/accounting", label: "Accounting", icon: Calculator, testid: "nav-accounting" },
       { to: "/app/gst-reports", label: "GST Reports", icon: Landmark, testid: "nav-gst-reports" },
