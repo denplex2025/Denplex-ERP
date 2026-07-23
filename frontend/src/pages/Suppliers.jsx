@@ -1,6 +1,4 @@
-import { CrudPage } from "@/components/erp/CrudPage";
-import { fmtDate } from "@/components/erp/Primitives";
-import { ViewLedgerButton } from "@/components/erp/PartyLedgerSheet";
+import { PartyDualPane } from "@/components/erp/PartyDualPane";
 
 const fields = [
   { name: "name", label: "Supplier Name", required: true },
@@ -11,26 +9,16 @@ const fields = [
   { name: "address", label: "Address", type: "textarea", full: true },
 ];
 
-const cols = [
-  { key: "name", label: "Name" },
-  { key: "contact_person", label: "Contact" },
-  { key: "phone", label: "Phone" },
-  { key: "gstin", label: "GSTIN" },
-  { key: "created_at", label: "Since", render: (r) => fmtDate(r.created_at) },
-];
-
 export default function Suppliers() {
   return (
-    <CrudPage
+    <PartyDualPane
       testid="suppliers-page"
       overline="Procurement"
       title="Suppliers"
-      subtitle="Manage vendors. Use WhatsApp to send purchase orders directly."
+      subtitle="Click a supplier to view their full ledger — filter by type, status, date, total, or balance."
       endpoint="/suppliers"
+      kind="supplier"
       fields={fields}
-      columns={cols}
-      whatsappField="phone"
-      rowActions={(row) => <ViewLedgerButton row={row} kind="supplier" />}
     />
   );
 }

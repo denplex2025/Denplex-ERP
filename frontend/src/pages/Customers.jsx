@@ -1,6 +1,4 @@
-import { CrudPage, StatusBadge } from "@/components/erp/CrudPage";
-import { fmtDate } from "@/components/erp/Primitives";
-import { ViewLedgerButton } from "@/components/erp/PartyLedgerSheet";
+import { PartyDualPane } from "@/components/erp/PartyDualPane";
 
 const fields = [
   { name: "name", label: "Customer Name", required: true },
@@ -13,29 +11,17 @@ const fields = [
   { name: "address", label: "Address", type: "textarea", full: true },
 ];
 
-const cols = [
-  { key: "code", label: "Code", render: (r) => <span className="font-mono-tech text-xs">{r.code}</span> },
-  { key: "name", label: "Name" },
-  { key: "phone", label: "Phone" },
-  { key: "gstin", label: "GSTIN" },
-  { key: "customer_type", label: "Type", render: (r) => <StatusBadge status={r.customer_type} /> },
-  { key: "orders_count", label: "Orders" },
-  { key: "created_at", label: "Since", render: (r) => fmtDate(r.created_at) },
-];
-
 export default function Customers() {
   return (
-    <CrudPage
+    <PartyDualPane
       testid="customers-page"
       overline="CRM"
       title="Customers"
-      subtitle="One-time vs repeat customers — auto segregated after multiple work orders."
+      subtitle="Click a customer to view their full ledger — filter by type, status, date, total, or balance."
       endpoint="/customers"
+      kind="customer"
       fields={fields}
-      columns={cols}
       defaults={{ customer_type: "one_time" }}
-      whatsappField="phone"
-      rowActions={(row) => <ViewLedgerButton row={row} kind="customer" />}
     />
   );
 }
