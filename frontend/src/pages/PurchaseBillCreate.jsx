@@ -17,9 +17,10 @@ export default function PurchaseBillCreate() {
   const today = new Date().toISOString().slice(0, 10);
   const [suppliers, setSuppliers] = useState([]);
   const [items, setItems] = useState([]);
+  const [pos, setPos] = useState([]);
   const [saving, setSaving] = useState(false);
   const [f, setF] = useState({
-    code: "", date: today, due_date: "", reference: "",
+    code: "", date: today, due_date: "", reference: "", po_id: "",
     supplier_id: "", supplier_name: "", supplier_gstin: "", place_of_supply: "", is_interstate: false,
     terms_text: "", round_off: 0, tds: 0, tds_rate: 0, tds_section: "", tcs: 0, tcs_rate: 0, extra_charges: [], notes: "",
   });
@@ -30,8 +31,8 @@ export default function PurchaseBillCreate() {
   useEffect(() => {
     (async () => {
       try {
-        const [s, it] = await Promise.all([api.get("/suppliers"), api.get("/inventory/items")]);
-        setSuppliers(s.data || []); setItems(it.data || []);
+        const [s, it, p] = await Promise.all([api.get("/suppliers"), api.get("/inventory/items"), api.get("/purchase-orders")]);
+        setSuppliers(s.data || []); setItems(it.data || []); setPos((p.data || []).filter(po => po.status !== "cancelled"));
       } catch (e) { /* ignore */ }
     })();
     api.get("/masters").then(r => {
@@ -43,8 +44,26 @@ export default function PurchaseBillCreate() {
 
   const pickSupplier = (id) => {
     const s = suppliers.find(x => x.id === id);
-    setF(p => ({ ...p, supplier_id: id, supplier_name: s?.name || "", supplier_gstin: s?.gstin || "", place_of_supply: s?.state || p.place_of_supply }));
+    setF(p => ({ ...p, supplier_id: id, supplier_name: s?.name || "", supplier_gstin: s?.gstin || "", place_of_supply: s?.state || p.place_of_supply, po_id: "" }));
   };
+
+  const supplierPos = useMemo(() => pos.filter(po => po.supplier_id === f.supplier_id), [pos, f.supplier_id]);
+
+  const pickPo = (poId) => {
+    set("po_id", poId);
+    const po = pos.find(x => x.id === poId);
+    if (!po) return;
+    // Prefill line items from the linked PO so the bill mirrors what was ordered — user can still edit
+    // qty/rate to match what actually arrived/was invoiced (real quantities won't always match the PO).
+    setLines((po.lines || []).map(l => ({
+      item_code: l.item_code || "", description: l.description || "", hsn: l.hsn || "",
+      qty: l.qty || 1, unit: l.unit || "Nos", rate: l.rate || 0,
+      discount_pct: l.discount_pct || 0, discount_amount: l.discount_amount || 0, gst_rate: l.gst_rate ?? 18,
+    })));
+    if (po.reference && !f.reference) set("reference", po.reference);
+    if (!f.due_date && po.delivery_date) set("due_date", po.delivery_date);
+  };
+
   const setLine = (i, k, v) => setLines(ls => ls.map((l, idx) => idx === i ? { ...l, [k]: v } : l));
   const pickItem = (i, name) => {
     const it = items.find(x => x.name === name);
@@ -84,7 +103,7 @@ export default function PurchaseBillCreate() {
     setSaving(true);
     try {
       const payload = {
-        ...f, round_off: Number(f.round_off || 0), status: "unpaid",
+        ...f, round_off: Number(f.round_off || 0), status: "unpaid", po_id: f.po_id || "",
         tds: Number(f.tds || 0), tds_rate: Number(f.tds_rate || 0), tds_section: f.tds_section || "",
         tcs: Number(f.tcs || 0), tcs_rate: Number(f.tcs_rate || 0),
         extra_charges: (f.extra_charges || []).filter(c => (c.name || "").trim() || Number(c.amount || 0)).map(c => ({ name: c.name || "Charge", amount: Number(c.amount || 0) })),
@@ -97,7 +116,7 @@ export default function PurchaseBillCreate() {
       };
       const r = await api.post("/vendor-bills", payload);
       toast.success(`Purchase Bill ${r.data?.code || ""} saved`);
-      navg("/app/docs/vendor-bills");
+      navg("/app/purchase-bills");
     } catch (e) { toast.error(e?.response?.data?.detail || "Could not save purchase bill"); }
     setSaving(false);
   };
@@ -105,7 +124,7 @@ export default function PurchaseBillCreate() {
   return (
     <div data-testid="pb-create-page" className="pb-24">
       <div className="flex items-center gap-2 mb-4">
-        <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => navg("/app/docs/vendor-bills")}><ArrowLeft className="h-4 w-4" /></Button>
+        <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => navg("/app/purchase-bills")}><ArrowLeft className="h-4 w-4" /></Button>
         <h1 className="text-xl font-bold font-display">New Purchase Bill</h1>
       </div>
 
@@ -119,6 +138,18 @@ export default function PurchaseBillCreate() {
         <Fld label="Bill No (supplier's)"><Input value={f.code} onChange={e => set("code", e.target.value)} placeholder="bill no / auto" /></Fld>
         <Fld label="Bill Date"><Input type="date" value={f.date} onChange={e => set("date", e.target.value)} /></Fld>
 
+        <Fld label="Link Purchase Order (optional)">
+          <select
+            value={f.po_id}
+            onChange={e => pickPo(e.target.value)}
+            disabled={!f.supplier_id}
+            className="w-full h-9 text-sm border border-slate-200 rounded-sm px-2 bg-white disabled:bg-slate-100 disabled:text-slate-400"
+            data-testid="pb-link-po"
+          >
+            <option value="">{f.supplier_id ? "None — enter manually" : "Select supplier first"}</option>
+            {supplierPos.map(po => <option key={po.id} value={po.id}>{po.code} — {inr(po.total)}</option>)}
+          </select>
+        </Fld>
         <Fld label="Due Date"><Input type="date" value={f.due_date} onChange={e => set("due_date", e.target.value)} /></Fld>
         <Fld label="Reference / PO No"><Input value={f.reference} onChange={e => set("reference", e.target.value)} /></Fld>
         <Fld label="Place of Supply"><Input value={f.place_of_supply} onChange={e => set("place_of_supply", e.target.value)} placeholder="e.g. Gujarat" /></Fld>
@@ -128,6 +159,11 @@ export default function PurchaseBillCreate() {
           </select>
         </Fld>
       </div>
+      {f.po_id && (
+        <div className="text-xs text-slate-500 -mt-2 mb-4 px-1">
+          Linked to <span className="font-mono-tech">{pos.find(p => p.id === f.po_id)?.code}</span> — this bill will show up in Goods Receipt's GRIR Reconciliation once a delivery is logged against that PO.
+        </div>
+      )}
 
       <datalist id="pb-item-names">{items.map(it => <option key={it.id} value={it.name} />)}</datalist>
       <div className="overflow-x-auto border border-slate-200 rounded-md mb-4">
@@ -190,7 +226,7 @@ export default function PurchaseBillCreate() {
 
       <div className="fixed bottom-0 right-0 left-0 lg:left-64 bg-white border-t border-slate-200 px-6 py-3 flex items-center justify-end gap-3 z-20">
         <span className="mr-auto text-sm text-slate-500">Total: <strong className="text-slate-900">{inr(totals.grand)}</strong></span>
-        <Button variant="outline" className="rounded-sm" onClick={() => navg("/app/docs/vendor-bills")}>Cancel</Button>
+        <Button variant="outline" className="rounded-sm" onClick={() => navg("/app/purchase-bills")}>Cancel</Button>
         <Button onClick={save} disabled={saving} className="rounded-sm bg-red-600 hover:bg-red-700"><Save className="h-4 w-4 mr-1" /> {saving ? "Saving…" : "Save Purchase Bill"}</Button>
       </div>
     </div>
