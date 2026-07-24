@@ -74,6 +74,10 @@ import WorkerProduction from "./pages/worker/WorkerProduction";
 import WorkerQC from "./pages/worker/WorkerQC";
 import DocMasters from "./pages/DocMasters";
 import Assistant from "./pages/Assistant";
+import PurchaseRequisitions from "./pages/PurchaseRequisitions";
+import SourcingTendering from "./pages/SourcingTendering";
+import GoodsReceipt from "./pages/GoodsReceipt";
+import SpendAnalytics from "./pages/SpendAnalytics";
 
 function App() {
   return (
@@ -97,6 +101,10 @@ function App() {
               <Route path="sale-orders/new" element={<SalesOrderCreate />} />
               <Route path="purchase-bills" element={<PurchaseBills />} />
               <Route path="purchase-bills/new" element={<PurchaseBillCreate />} />
+              <Route path="procurement/requisitions" element={<PurchaseRequisitions />} />
+              <Route path="procurement/sourcing" element={<SourcingTendering />} />
+              <Route path="procurement/goods-receipt" element={<GoodsReceipt />} />
+              <Route path="procurement/spend-analytics" element={<SpendAnalytics />} />
               <Route path="invoices" element={<Invoices />} />
               <Route path="invoices/new" element={<InvoiceCreate />} />
               <Route path="invoices/:id/edit" element={<InvoiceCreate />} />
