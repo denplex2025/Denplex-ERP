@@ -332,6 +332,7 @@ class Supplier(BaseModel):
     email: Optional[str] = ""
     gstin: Optional[str] = ""
     address: Optional[str] = ""
+    contract_expiry: Optional[str] = ""  # Vendor & Supplier Management (Procurement tab) — contract renewal date
     created_at: str = Field(default_factory=now_iso)
 
 class PartRevision(BaseModel):
@@ -6840,6 +6841,65 @@ async def del_vendor_bill(did: str, user=Depends(require_roles("admin", "manager
 @api.get("/vendor-bills/{did}/pdf")
 async def vendor_bill_pdf(did: str, user=Depends(get_current_user)):
     return await _generic_doc_pdf(db.vendor_bills, did, "Purchase Bill", "Supplier", "supplier", db.suppliers, "vendor_bill")
+
+@api.get("/reports/purchase-spend")
+async def purchase_spend_report(date_from: str = "", date_to: str = "", user=Depends(get_current_user)):
+    """Powers Procurement > Inventory & Spend Analytics. Pure aggregation over existing vendor_bills
+    — no new schema needed. Spend by supplier, spend by month (trend), and top purchased line items
+    by amount. Reuses the same _fy_default_range/_date10/_in_range helpers as the GST reports below
+    (defined later in this file — fine, Python resolves module-level names at call time, not at
+    def time, so the forward reference is safe)."""
+    frm, to = (date_from or "", date_to or "")
+    if not frm or not to:
+        d1, d2 = _fy_default_range(); frm = frm or d1; to = to or d2
+    bills = [b for b in await db.vendor_bills.find({}, {"_id": 0}).to_list(50000) if _in_range(b.get("date"), frm, to)]
+
+    total_spend = 0.0
+    by_supplier: Dict[str, float] = {}
+    by_month: Dict[str, float] = {}
+    by_item: Dict[str, Dict[str, float]] = {}
+
+    for b in bills:
+        amt = float(b.get("total", 0) or 0)
+        total_spend += amt
+        sup = b.get("supplier_name") or "Unknown"
+        by_supplier[sup] = by_supplier.get(sup, 0) + amt
+        month = _date10(b.get("date"))[:7]
+        if month:
+            by_month[month] = by_month.get(month, 0) + amt
+        for l in (b.get("lines") or []):
+            desc = (l.get("description") or "Unspecified").strip() or "Unspecified"
+            qty = float(l.get("qty", 0) or 0)
+            rate = float(l.get("rate", 0) or 0)
+            disc = float(l.get("discount_amount", 0) or 0)
+            line_amt = max(qty * rate - disc, 0)
+            e = by_item.setdefault(desc, {"qty": 0.0, "amount": 0.0})
+            e["qty"] += qty
+            e["amount"] += line_amt
+
+    supplier_rows = sorted(
+        ({"supplier": k, "amount": round(v, 2)} for k, v in by_supplier.items()),
+        key=lambda r: -r["amount"],
+    )[:15]
+    month_rows = sorted(
+        ({"month": k, "amount": round(v, 2)} for k, v in by_month.items()),
+        key=lambda r: r["month"],
+    )
+    item_rows = sorted(
+        ({"item": k, "qty": round(v["qty"], 2), "amount": round(v["amount"], 2)} for k, v in by_item.items()),
+        key=lambda r: -r["amount"],
+    )[:15]
+
+    return {
+        "range": {"from": frm, "to": to},
+        "total_spend": round(total_spend, 2),
+        "bill_count": len(bills),
+        "supplier_count": len(by_supplier),
+        "top_supplier": supplier_rows[0] if supplier_rows else None,
+        "by_supplier": supplier_rows,
+        "by_month": month_rows,
+        "by_item": item_rows,
+    }
 
 @api.get("/sale-orders")
 async def list_sale_orders(user=Depends(get_current_user)):
