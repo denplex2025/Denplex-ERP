@@ -6,7 +6,8 @@ import {
   LayoutDashboard, Boxes, Layers, ClipboardList, FileText,
   ShoppingCart, Receipt, Users, UserPlus, Truck, ShieldCheck,
   FileBox, Settings as SettingsIcon, LogOut, Menu, Calculator, UsersRound, Megaphone, Wrench, ScrollText,
-  ArrowDownToLine, ArrowUpFromLine, Banknote, Undo2, Cog, CalendarRange, Search, Trash2, SlidersHorizontal, AlarmClock, Webhook, Library, Landmark, Wallet, Sparkles, BookOpen
+  ArrowDownToLine, ArrowUpFromLine, Banknote, Undo2, Cog, CalendarRange, Search, Trash2, SlidersHorizontal, AlarmClock, Webhook, Library, Landmark, Wallet, Sparkles, BookOpen,
+  ClipboardCheck, Gavel, PackageCheck, BarChart3
 } from "lucide-react";
 import { useState, useEffect, useRef } from "react";
 import api from "@/lib/api";
@@ -92,8 +93,6 @@ const NAV_GROUPS = [
       { to: "/app/invoices", label: "Sale Invoices", icon: Receipt, testid: "nav-invoices" },
       { to: "/app/invoices/new", label: "New Sale Invoice", icon: Receipt, testid: "nav-invoice-new", end: true },
       { to: "/app/docs/credit-notes", label: "Credit Notes", icon: Receipt, testid: "nav-credit-notes" },
-      { to: "/app/purchase-bills", label: "Purchase Bills", icon: Receipt, testid: "nav-vendor-bills" },
-      { to: "/app/purchase-bills/new", label: "New Purchase Bill", icon: Receipt, testid: "nav-pb-new", end: true },
       { to: "/app/accounting", label: "Accounting", icon: Calculator, testid: "nav-accounting" },
       { to: "/app/gst-reports", label: "GST Reports", icon: Landmark, testid: "nav-gst-reports" },
       { to: "/app/financial-statements", label: "Accounting Books (P&L / BS)", icon: BookOpen, testid: "nav-financials" },
@@ -123,15 +122,21 @@ const NAV_GROUPS = [
     ],
   },
   {
-    head: "Purchase & Expense",
+    head: "Procurement",
     roles: ["manager", "accountant", "ca", "production"],
     items: [
-      { to: "/app/suppliers", label: "Suppliers", icon: Truck, testid: "nav-suppliers" },
-      { to: "/app/purchase-orders", label: "Purchase Orders", icon: ShoppingCart, testid: "nav-purchase-orders" },
+      { to: "/app/procurement/requisitions", label: "Purchase Requisition", icon: ClipboardCheck, testid: "nav-purchase-requisition" },
+      { to: "/app/suppliers", label: "Vendor & Supplier Management", icon: Truck, testid: "nav-suppliers" },
+      { to: "/app/procurement/sourcing", label: "Sourcing & Tendering", icon: Gavel, testid: "nav-sourcing-tendering" },
+      { to: "/app/purchase-orders", label: "Purchase Order (PO) Management", icon: ShoppingCart, testid: "nav-purchase-orders" },
       { to: "/app/purchase-orders/new", label: "New Purchase Order", icon: ShoppingCart, testid: "nav-po-new", end: true },
+      { to: "/app/procurement/goods-receipt", label: "Goods Receipt", icon: PackageCheck, testid: "nav-goods-receipt" },
+      { to: "/app/purchase-bills", label: "Invoice Automation & Payment", icon: Receipt, testid: "nav-vendor-bills" },
+      { to: "/app/purchase-bills/new", label: "New Purchase Bill", icon: Receipt, testid: "nav-pb-new", end: true },
       { to: "/app/payments-out", label: "Payment-Out", icon: ArrowUpFromLine, testid: "nav-payments-out" },
-      { to: "/app/expenses", label: "Expenses", icon: Banknote, testid: "nav-expenses" },
+      { to: "/app/procurement/spend-analytics", label: "Inventory & Spend Analytics", icon: BarChart3, testid: "nav-spend-analytics" },
       { to: "/app/purchase-returns", label: "Purchase Returns", icon: Undo2, testid: "nav-purchase-returns" },
+      { to: "/app/expenses", label: "Expenses", icon: Banknote, testid: "nav-expenses" },
     ],
   },
   {
