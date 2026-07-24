@@ -25,13 +25,14 @@ function FieldEditor({ field, value, onChange }) {
     );
   }
   if (field.type === "textarea") return <Textarea {...common} rows={3} />;
+  if (field.type === "date") return <Input type="date" {...common} />;
   return <Input {...common} />;
 }
 
 /** Master-detail (left list / right ledger) layout for Customers & Suppliers, replacing the old
  * single table + slide-over drawer. The right pane reuses PartyLedgerPanel (with its built-in
  * Type/Number/Date/Total/Balance/Due-Date/Status filters) so filtering logic lives in one place. */
-export function PartyDualPane({ testid, overline, title, subtitle, endpoint, kind, fields, defaults = {} }) {
+export function PartyDualPane({ testid, overline, title, subtitle, endpoint, kind, fields, defaults = {}, headerExtra }) {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
@@ -100,6 +101,8 @@ export function PartyDualPane({ testid, overline, title, subtitle, endpoint, kin
           </Button>
         }
       />
+
+      {headerExtra && <div className="mb-4 -mt-3">{headerExtra}</div>}
 
       <div className="grid grid-cols-1 lg:grid-cols-[360px_1fr] gap-4 items-start">
         <Card className="overflow-hidden">

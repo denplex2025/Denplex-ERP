@@ -99,6 +99,12 @@ export function PartyLedgerPanel({ pid, kind, onEdit, onDelete, compact }) {
         <div><span className="text-slate-500">Phone:</span> {party.phone || "—"}</div>
         <div><span className="text-slate-500">Contact:</span> {party.contact_person || "—"}</div>
         <div><span className="text-slate-500">Email:</span> {party.email || "—"}</div>
+        {kind === "supplier" && (
+          <div>
+            <span className="text-slate-500">Contract Expiry:</span>{" "}
+            {party.contract_expiry ? fmtDate(party.contract_expiry) : "—"}
+          </div>
+        )}
         <div className="col-span-2"><span className="text-slate-500">Address:</span> {party.address || "—"}</div>
         <div className="col-span-2 pt-2 border-t border-slate-200 mt-1">
           <span className="text-slate-500">Net Outstanding{hasActiveFilters ? " (filtered)" : ""}:</span>{" "}
