@@ -684,6 +684,7 @@ class VendorBill(BaseModel):
     date: str = Field(default_factory=now_iso)
     due_date: Optional[str] = ""
     reference: Optional[str] = ""
+    po_id: Optional[str] = ""  # real link to PurchaseOrder.id (Goods Receipt / GRIR 3-way matching) — `reference` above stays free-text for manual PO No. entry
     place_of_supply: Optional[str] = ""
     is_interstate: bool = False
     terms_text: Optional[str] = ""
@@ -703,6 +704,34 @@ class VendorBill(BaseModel):
     gst_total: float = 0
     total: float = 0
     status: Literal["unpaid", "paid", "partial", "overdue"] = "unpaid"
+    notes: Optional[str] = ""
+    created_at: str = Field(default_factory=now_iso)
+
+class GoodsReceiptLine(BaseModel):
+    line_no: int                          # index into the source PO's `lines` array at receipt time
+    description: str
+    item_code: Optional[str] = ""
+    hsn: Optional[str] = ""
+    unit: Optional[str] = "Nos"
+    ordered_qty: float = 0
+    rate: float = 0
+    received_qty: float = 0
+    quality_status: Literal["accepted", "rejected", "partial"] = "accepted"
+    remarks: Optional[str] = ""
+
+class GoodsReceipt(BaseModel):
+    """GRN — a single delivery event logged against a Purchase Order. A PO can have multiple GRNs
+    (partial deliveries); GRIR matching sums received value across all of a PO's GRNs and compares
+    it against billed value from any VendorBill linked via po_id."""
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    code: Optional[str] = None
+    po_id: str
+    po_code: Optional[str] = ""
+    supplier_id: Optional[str] = ""
+    supplier_name: Optional[str] = ""
+    date: str = Field(default_factory=now_iso)
+    lines: List[GoodsReceiptLine] = []
     notes: Optional[str] = ""
     created_at: str = Field(default_factory=now_iso)
 
@@ -3474,6 +3503,121 @@ async def del_po(pid: str, user=Depends(require_roles("admin", "manager"))):
     await _recycle("purchase_orders", "Purchase Order", doc, user)
     await db.purchase_orders.delete_one({"id": pid})
     return {"ok": True}
+
+@api.get("/purchase-orders/{pid}/receipts")
+async def po_receipts_summary(pid: str, user=Depends(get_current_user)):
+    """PO lines annotated with cumulative received qty across all its Goods Receipts, plus the list
+    of those receipts. Powers the 'New Goods Receipt' form (shows remaining qty per line) and any
+    PO-level received-status display."""
+    po = await db.purchase_orders.find_one({"id": pid}, {"_id": 0})
+    if not po:
+        raise HTTPException(404, "Purchase Order not found")
+    grns = await db.goods_receipts.find({"po_id": pid}, {"_id": 0}).sort("date", -1).to_list(1000)
+    received_by_line: Dict[int, float] = {}
+    for g in grns:
+        for l in (g.get("lines") or []):
+            ln = int(l.get("line_no", -1))
+            received_by_line[ln] = received_by_line.get(ln, 0) + float(l.get("received_qty", 0) or 0)
+    lines_out = []
+    for i, l in enumerate(po.get("lines") or []):
+        ordered = float(l.get("qty", 0) or 0)
+        received = round(received_by_line.get(i, 0.0), 3)
+        lines_out.append({**l, "line_no": i, "ordered_qty": ordered, "received_qty": received,
+                           "remaining_qty": round(max(ordered - received, 0), 3)})
+    return {"po_id": pid, "po_code": po.get("code"), "supplier_id": po.get("supplier_id"),
+            "supplier_name": po.get("supplier_name"), "lines": lines_out, "receipts": grns}
+
+@api.post("/goods-receipts")
+async def create_goods_receipt(g: GoodsReceipt, user=Depends(get_current_user)):
+    po = await db.purchase_orders.find_one({"id": g.po_id}, {"_id": 0})
+    if not po:
+        raise HTTPException(404, "Purchase Order not found")
+    doc = g.model_dump()
+    doc["code"] = (g.code or "").strip() or await gen_code("GRN", "goods_receipt")
+    doc["po_code"] = po.get("code", "")
+    doc["supplier_id"] = po.get("supplier_id", "")
+    doc["supplier_name"] = po.get("supplier_name", "")
+    await db.goods_receipts.insert_one(doc)
+    return serialize(doc)
+
+@api.get("/goods-receipts")
+async def list_goods_receipts(user=Depends(get_current_user)):
+    return await list_collection(db.goods_receipts, sort_key="date")
+
+@api.get("/goods-receipts/{gid}")
+async def get_goods_receipt(gid: str, user=Depends(get_current_user)):
+    doc = await db.goods_receipts.find_one({"id": gid}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Goods Receipt not found")
+    return doc
+
+@api.delete("/goods-receipts/{gid}")
+async def del_goods_receipt(gid: str, user=Depends(require_roles("admin", "manager", "accountant", "ca", "production"))):
+    doc = await db.goods_receipts.find_one({"id": gid}, {"_id": 0})
+    await _recycle("goods_receipts", "Goods Receipt", doc, user)
+    await db.goods_receipts.delete_one({"id": gid})
+    return {"ok": True}
+
+@api.get("/reports/grir")
+async def grir_report(date_from: str = "", date_to: str = "", user=Depends(get_current_user)):
+    """3-way match: Purchase Order vs Goods Receipt vs Vendor Bill (linked via VendorBill.po_id).
+    Everything is compared on a pre-tax (subtotal) basis so GST timing doesn't distort the clearing
+    number. For each PO that has at least one Goods Receipt or one linked bill:
+      - received_value: sum(received_qty * rate) across all its GRN lines
+      - billed_value: sum(subtotal) of vendor_bills whose po_id matches this PO
+      - clearing = received_value - billed_value
+        (positive => goods received but not yet billed — an accrued-liability gap to chase down;
+         negative => billed but goods not fully received — flag before paying)
+    """
+    pos = await db.purchase_orders.find({}, {"_id": 0}).to_list(20000)
+    grns = await db.goods_receipts.find({}, {"_id": 0}).to_list(20000)
+    bills = await db.vendor_bills.find({"po_id": {"$exists": True, "$nin": ["", None]}}, {"_id": 0}).to_list(20000)
+
+    received_by_po: Dict[str, float] = {}
+    for g in grns:
+        pid = g.get("po_id")
+        if not pid:
+            continue
+        for l in (g.get("lines") or []):
+            received_by_po[pid] = received_by_po.get(pid, 0) + float(l.get("received_qty", 0) or 0) * float(l.get("rate", 0) or 0)
+
+    billed_by_po: Dict[str, float] = {}
+    for b in bills:
+        pid = b.get("po_id")
+        billed_by_po[pid] = billed_by_po.get(pid, 0) + float(b.get("subtotal", 0) or 0)
+
+    relevant_po_ids = set(received_by_po) | set(billed_by_po)
+    rows = []
+    for po in pos:
+        pid = po.get("id")
+        if pid not in relevant_po_ids:
+            continue
+        if date_from and date_to and not _in_range(po.get("date"), date_from, date_to):
+            continue
+        received_value = round(received_by_po.get(pid, 0.0), 2)
+        billed_value = round(billed_by_po.get(pid, 0.0), 2)
+        clearing = round(received_value - billed_value, 2)
+        if received_value <= 0.01 and billed_value > 0.01:
+            status = "billed_not_received"
+        elif billed_value <= 0.01 and received_value > 0.01:
+            status = "gr_not_billed"
+        elif abs(clearing) <= 1:
+            status = "matched"
+        else:
+            status = "gr_not_billed" if clearing > 0 else "billed_not_received"
+        rows.append({
+            "po_id": pid, "po_code": po.get("code"), "supplier_name": po.get("supplier_name"),
+            "po_date": po.get("date"), "ordered_value": round(float(po.get("subtotal", 0) or 0), 2),
+            "received_value": received_value, "billed_value": billed_value,
+            "clearing": clearing, "status": status,
+        })
+    rows.sort(key=lambda r: -abs(r["clearing"]))
+    totals = {
+        "received_value": round(sum(r["received_value"] for r in rows), 2),
+        "billed_value": round(sum(r["billed_value"] for r in rows), 2),
+        "clearing": round(sum(r["clearing"] for r in rows), 2),
+    }
+    return {"rows": rows, "totals": totals}
 
 # ---------------- Invoices ----------------
 def compute_invoice_totals(lines: List[Dict[str, Any]], interstate: bool, round_off: float = 0, tds: float = 0,
