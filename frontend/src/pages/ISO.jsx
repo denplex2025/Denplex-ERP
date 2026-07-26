@@ -435,9 +435,10 @@ function RegisterView({ template, onDeleted, canManage }) {
   const [locFilter, setLocFilter] = useState("All");
   const [month, setMonth] = useState("All");
   const [search, setSearch] = useState("");
+  const [chipFilters, setChipFilters] = useState({});
   const cols = template.columns || [];
   const load = async () => { setLoading(true); try { const r = await api.get(`/registers/${template.id}/entries`); setEntries(r.data || []); } catch (e) {} setLoading(false); };
-  useEffect(() => { load(); setEdit(null); setLocFilter("All"); setMonth("All"); setSearch(""); }, [template.id]); // eslint-disable-line
+  useEffect(() => { load(); setEdit(null); setLocFilter("All"); setMonth("All"); setSearch(""); setChipFilters({}); }, [template.id]); // eslint-disable-line
   const saveEntry = async ({ date, data }) => {
     try {
       if (edit) await api.put(`/registers/${template.id}/entries/${edit.id}`, { date, data });
@@ -451,12 +452,38 @@ function RegisterView({ template, onDeleted, canManage }) {
   const locCol = cols.find((c) => c.key === "location" || c.label.toLowerCase() === "location");
   const dataCols = cols.filter((c) => c !== locCol);
   const locValues = locCol ? Array.from(new Set(entries.map((e) => (e.data?.[locCol.key] || "").trim()).filter(Boolean))).sort() : [];
+
+  // Auto-detect up to 2 more low-cardinality columns (e.g. Machine, Operator, Shift, Quality Status) and
+  // expose them as quick-filter chips too, the same way Location already works — generic by design, so
+  // it picks up whatever a given department's register actually needs filtered, not just Production's.
+  const norm = (v) => String(v ?? "").trim();
+  const extraFilterCols = dataCols
+    .filter((c) => c.type !== "textarea")
+    .map((c) => {
+      const vals = entries.map((e) => norm(e.data?.[c.key])).filter(Boolean);
+      const uniq = new Set(vals.map((v) => v.toLowerCase()));
+      return { col: c, uniqCount: uniq.size, filled: vals.length };
+    })
+    .filter((s) => s.uniqCount >= 2 && s.uniqCount <= 12 && s.filled >= Math.max(4, entries.length * 0.4))
+    .sort((a, b) => a.uniqCount - b.uniqCount)
+    .slice(0, 2)
+    .map((s) => s.col);
+  const chipValuesFor = (col) => {
+    const seen = new Map();
+    entries.forEach((e) => { const raw = norm(e.data?.[col.key]); if (!raw) return; const k = raw.toLowerCase(); if (!seen.has(k)) seen.set(k, raw); });
+    return Array.from(seen.values()).sort((a, b) => a.localeCompare(b));
+  };
+
   // Months present in the data
   const months = Array.from(new Set(entries.map((e) => (e.date || "").slice(0, 7)).filter((m) => /^\d{4}-\d{2}$/.test(m)))).sort();
   const monthLabel = (m) => { const [y, mm] = m.split("-"); return `${MONTH_NAMES[parseInt(mm, 10) - 1]} ${y.slice(2)}`; };
 
   const filtered = entries.filter((e) => {
     if (locCol && locFilter !== "All" && (e.data?.[locCol.key] || "").trim() !== locFilter) return false;
+    for (const c of extraFilterCols) {
+      const active = chipFilters[c.key];
+      if (active && active !== "All" && norm(e.data?.[c.key]).toLowerCase() !== active.toLowerCase()) return false;
+    }
     if (month !== "All" && (e.date || "").slice(0, 7) !== month) return false;
     if (search) {
       const hay = `${e.date || ""} ${cols.map((c) => e.data?.[c.key] ?? "").join(" ")}`.toLowerCase();
@@ -464,13 +491,17 @@ function RegisterView({ template, onDeleted, canManage }) {
     }
     return true;
   });
-  const chip = (active) => `px-2.5 py-1 text-xs rounded-sm font-medium border transition-colors ${active ? "bg-red-600 text-white border-red-600" : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50"}`;
+  const chip = (active) => `px-2.5 py-1 text-xs rounded-sm font-medium border transition-colors whitespace-nowrap ${active ? "bg-red-600 text-white border-red-600" : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50"}`;
+  const anyChipActive = Object.values(chipFilters).some((v) => v && v !== "All");
   // Build export query + filename so downloads reflect the active filter, not the whole register
   const exportQuery = () => {
     const p = new URLSearchParams();
     if (locCol && locFilter !== "All") p.set("location", locFilter);
     if (month !== "All") p.set("month", month);
     if (search) p.set("q", search);
+    const extra = {};
+    extraFilterCols.forEach((c) => { if (chipFilters[c.key] && chipFilters[c.key] !== "All") extra[c.key] = chipFilters[c.key]; });
+    if (Object.keys(extra).length) p.set("extra", JSON.stringify(extra));
     const s = p.toString();
     return s ? `?${s}` : "";
   };
@@ -478,8 +509,32 @@ function RegisterView({ template, onDeleted, canManage }) {
     const bits = [];
     if (locCol && locFilter !== "All") bits.push(locFilter);
     if (month !== "All") bits.push(monthLabel(month).replace(" ", ""));
+    extraFilterCols.forEach((c) => { if (chipFilters[c.key] && chipFilters[c.key] !== "All") bits.push(chipFilters[c.key]); });
     return bits.length ? "-" + bits.join("-") : "";
   };
+
+  // Does this column need line-wrapping? Driven by actual content length rather than a hardcoded key
+  // list, so any long free-text column (whatever it's called) never forces the table into horizontal
+  // overflow — that "everything on one unreadable wide line" look is most of what made this look wrong.
+  const isLongCol = (c) => {
+    if (c.type === "textarea") return true;
+    for (const e of entries) { if (String(e.data?.[c.key] ?? "").length > 18) return true; }
+    return false;
+  };
+
+  // Per-column totals footer. Many registers store quantity fields as free text (e.g. "Running" or
+  // "3&3" for a combined job) rather than the "number" column type, so this sums a column whenever most
+  // of its (currently filtered) non-empty values are plain numbers, and quietly notes how many rows it
+  // had to skip rather than showing a misleading total.
+  const summable = dataCols.map((c) => {
+    const raw = filtered.map((e) => e.data?.[c.key]).map((v) => (v === undefined || v === null ? "" : String(v).trim())).filter(Boolean);
+    if (raw.length < Math.max(3, filtered.length * 0.5)) return null;
+    const numeric = raw.filter((v) => /^-?\d+(\.\d+)?$/.test(v));
+    if (numeric.length < raw.length * 0.6) return null;
+    const sum = Math.round(numeric.reduce((s, v) => s + parseFloat(v), 0) * 100) / 100;
+    return { key: c.key, sum, skipped: raw.length - numeric.length };
+  });
+  const hasTotals = summable.some(Boolean);
 
   return (
     <div className="space-y-3">
@@ -498,7 +553,7 @@ function RegisterView({ template, onDeleted, canManage }) {
       </div>
 
       {/* Filter bar */}
-      {(locCol || months.length > 1 || entries.length > 8) && (
+      {(locCol || extraFilterCols.length > 0 || months.length > 1 || entries.length > 8) && (
         <div className="flex items-center gap-2 flex-wrap bg-slate-50 border border-slate-200 rounded-md p-2">
           {locCol && (
             <div className="flex items-center gap-1.5 flex-wrap">
@@ -507,6 +562,13 @@ function RegisterView({ template, onDeleted, canManage }) {
               {locValues.map((v) => <button key={v} className={chip(locFilter === v)} onClick={() => setLocFilter(v)}>{v}</button>)}
             </div>
           )}
+          {extraFilterCols.map((c) => (
+            <div key={c.key} className="flex items-center gap-1.5 flex-wrap border-l border-slate-200 pl-2 first:border-l-0 first:pl-0">
+              <span className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold mr-0.5">{c.label}</span>
+              <button className={chip(!chipFilters[c.key] || chipFilters[c.key] === "All")} onClick={() => setChipFilters((f) => ({ ...f, [c.key]: "All" }))}>All</button>
+              {chipValuesFor(c).map((v) => <button key={v} className={chip(chipFilters[c.key] === v)} onClick={() => setChipFilters((f) => ({ ...f, [c.key]: v }))}>{v}</button>)}
+            </div>
+          ))}
           {months.length > 1 && (
             <div className="flex items-center gap-1.5 ml-1">
               <span className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">Month</span>
@@ -520,37 +582,54 @@ function RegisterView({ template, onDeleted, canManage }) {
             <Search className="w-3.5 h-3.5 absolute left-2 top-2.5 text-slate-400" />
             <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search rows…" className="pl-7 h-8 text-xs w-44" />
           </div>
-          {(locFilter !== "All" || month !== "All" || search) && (
-            <button className="text-xs text-slate-500 hover:text-red-600 inline-flex items-center gap-1" onClick={() => { setLocFilter("All"); setMonth("All"); setSearch(""); }}><X className="w-3.5 h-3.5" /> Clear</button>
+          {(locFilter !== "All" || month !== "All" || search || anyChipActive) && (
+            <button className="text-xs text-slate-500 hover:text-red-600 inline-flex items-center gap-1" onClick={() => { setLocFilter("All"); setMonth("All"); setSearch(""); setChipFilters({}); }}><X className="w-3.5 h-3.5" /> Clear</button>
           )}
         </div>
       )}
 
-      <Card><CardContent className="p-0 overflow-x-auto">
-        <table className="w-full text-sm border-collapse">
-          <thead><tr className="border-b bg-slate-100 text-left text-[11px] uppercase tracking-wider text-slate-500">
-            <th className="p-2 font-semibold whitespace-nowrap">Date</th>
-            {locCol && <th className="p-2 font-semibold whitespace-nowrap">{locCol.label}</th>}
-            {dataCols.map((c) => <th key={c.key} className="p-2 font-semibold">{c.label}</th>)}
-            <th className="p-2 w-16"></th>
-          </tr></thead>
-          <tbody>
-            {loading && <tr><td colSpan={cols.length + 2} className="p-4 text-slate-400">Loading…</td></tr>}
-            {!loading && entries.length === 0 && <tr><td colSpan={cols.length + 2} className="p-4 text-slate-400">No entries yet. Click “Add entry”.</td></tr>}
-            {!loading && entries.length > 0 && filtered.length === 0 && <tr><td colSpan={cols.length + 2} className="p-4 text-slate-400">No rows match the current filter.</td></tr>}
-            {filtered.map((e, i) => (
-              <tr key={e.id} className={`border-b border-slate-100 hover:bg-amber-50/60 align-top ${i % 2 ? "bg-slate-50/50" : ""}`}>
-                <td className="p-2 whitespace-nowrap text-slate-600 tabular-nums">{(e.date || "").slice(0, 10) || "—"}</td>
-                {locCol && <td className="p-2 whitespace-nowrap"><span className="inline-block px-1.5 py-0.5 rounded-sm text-[11px] font-medium bg-slate-100 text-slate-600">{String(e.data?.[locCol.key] ?? "")}</span></td>}
-                {dataCols.map((c) => <td key={c.key} className={`p-2 ${["remarks", "description", "drg_no", "part_name", "item"].includes(c.key) ? "min-w-[140px] max-w-[260px] whitespace-pre-wrap break-words" : "whitespace-nowrap"}`}>{String(e.data?.[c.key] ?? "")}</td>)}
-                <td className="p-2 text-right whitespace-nowrap">
-                  <button className="text-slate-400 hover:text-slate-700 mr-2" onClick={() => { setEdit(e); setOpen(true); }}><Pencil className="w-3.5 h-3.5 inline" /></button>
-                  <button className="text-slate-400 hover:text-red-600" onClick={() => delEntry(e.id)}><Trash2 className="w-3.5 h-3.5 inline" /></button>
-                </td>
+      <Card><CardContent className="p-0">
+        <div className="overflow-auto rounded-b-md" style={{ maxHeight: "65vh" }}>
+          <table className="w-full text-sm border-collapse">
+            <thead className="sticky top-0 z-10">
+              <tr className="text-left text-[11px] uppercase tracking-wider text-slate-500">
+                <th className="p-2 font-semibold whitespace-nowrap bg-slate-100 border-b border-r border-slate-200">Date</th>
+                {locCol && <th className="p-2 font-semibold whitespace-nowrap bg-slate-100 border-b border-r border-slate-200">{locCol.label}</th>}
+                {dataCols.map((c) => <th key={c.key} className="p-2 font-semibold bg-slate-100 border-b border-r border-slate-200 last:border-r-0">{c.label}</th>)}
+                <th className="p-2 w-16 bg-slate-100 border-b border-slate-200"></th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {loading && <tr><td colSpan={cols.length + 2} className="p-4 text-slate-400">Loading…</td></tr>}
+              {!loading && entries.length === 0 && <tr><td colSpan={cols.length + 2} className="p-4 text-slate-400">No entries yet. Click “Add entry”.</td></tr>}
+              {!loading && entries.length > 0 && filtered.length === 0 && <tr><td colSpan={cols.length + 2} className="p-4 text-slate-400">No rows match the current filter.</td></tr>}
+              {filtered.map((e, i) => (
+                <tr key={e.id} className={`border-b border-slate-100 hover:bg-amber-50/60 align-top ${i % 2 ? "bg-slate-50/50" : ""}`}>
+                  <td className="p-2 whitespace-nowrap text-slate-600 tabular-nums border-r border-slate-100">{(e.date || "").slice(0, 10) || "—"}</td>
+                  {locCol && <td className="p-2 whitespace-nowrap border-r border-slate-100"><span className="inline-block px-1.5 py-0.5 rounded-sm text-[11px] font-medium bg-slate-100 text-slate-600">{String(e.data?.[locCol.key] ?? "")}</span></td>}
+                  {dataCols.map((c) => <td key={c.key} className={`p-2 border-r border-slate-100 last:border-r-0 ${isLongCol(c) ? "min-w-[140px] max-w-[280px] whitespace-pre-wrap break-words" : "whitespace-nowrap"}`}>{String(e.data?.[c.key] ?? "")}</td>)}
+                  <td className="p-2 text-right whitespace-nowrap">
+                    <button className="text-slate-400 hover:text-slate-700 mr-2" onClick={() => { setEdit(e); setOpen(true); }}><Pencil className="w-3.5 h-3.5 inline" /></button>
+                    <button className="text-slate-400 hover:text-red-600" onClick={() => delEntry(e.id)}><Trash2 className="w-3.5 h-3.5 inline" /></button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+            {hasTotals && filtered.length > 0 && (
+              <tfoot>
+                <tr className="bg-slate-100 border-t-2 border-slate-300 font-semibold text-slate-700">
+                  <td className="p-2 whitespace-nowrap border-r border-slate-200">Total</td>
+                  {locCol && <td className="p-2 border-r border-slate-200"></td>}
+                  {dataCols.map((c) => {
+                    const s = summable.find((x) => x && x.key === c.key);
+                    return <td key={c.key} className="p-2 border-r border-slate-200 last:border-r-0 whitespace-nowrap">{s ? `${s.sum}${s.skipped ? ` (+${s.skipped} mixed)` : ""}` : ""}</td>;
+                  })}
+                  <td className="p-2"></td>
+                </tr>
+              </tfoot>
+            )}
+          </table>
+        </div>
       </CardContent></Card>
       <div className="text-[11px] text-slate-400 px-1">{filtered.length === entries.length ? `${entries.length} rows` : `${filtered.length} of ${entries.length} rows`}</div>
       <RegisterEntryDialog open={open} onClose={() => { setOpen(false); setEdit(null); }} template={template} entry={edit} onSave={saveEntry} />
