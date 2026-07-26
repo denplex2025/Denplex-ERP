@@ -6062,15 +6062,22 @@ async def _register_rows(tid: str):
     cols = t.get("columns", [])
     return t, cols, entries
 
-def _filter_register_entries(cols, entries, location: str = "", month: str = "", q: str = ""):
-    """Apply the same filters the UI shows (location chip / month / search) so an
-    export reflects exactly what the user is looking at, not the whole register."""
+def _filter_register_entries(cols, entries, location: str = "", month: str = "", q: str = "", extra: str = ""):
+    """Apply the same filters the UI shows (location chip / month / search / the auto-detected quick-filter
+    chips like Machine or Operator) so an export reflects exactly what the user is looking at, not the
+    whole register."""
     loc_col = next((c for c in cols if c.get("key") == "location" or str(c.get("label", "")).lower() == "location"), None)
     location = (location or "").strip(); month = (month or "").strip(); q = (q or "").strip().lower()
+    extra_filters = {}
+    if extra:
+        try: extra_filters = json.loads(extra) or {}
+        except Exception: extra_filters = {}
     out = []
     for e in entries:
         data = e.get("data", {}) or {}
         if loc_col and location and str(data.get(loc_col.get("key"), "")).strip() != location:
+            continue
+        if extra_filters and any(str(data.get(k, "")).strip().lower() != str(v).strip().lower() for k, v in extra_filters.items()):
             continue
         if month and str(e.get("date", ""))[:7] != month:
             continue
@@ -6082,11 +6089,11 @@ def _filter_register_entries(cols, entries, location: str = "", month: str = "",
     return out
 
 @api.get("/registers/{tid}/export/xlsx")
-async def register_export_xlsx(tid: str, location: str = "", month: str = "", q: str = "", user=Depends(get_current_user)):
+async def register_export_xlsx(tid: str, location: str = "", month: str = "", q: str = "", extra: str = "", user=Depends(get_current_user)):
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     t, cols, entries = await _register_rows(tid)
-    entries = _filter_register_entries(cols, entries, location, month, q)
+    entries = _filter_register_entries(cols, entries, location, month, q, extra)
     wb = Workbook(); ws = wb.active
     ws.title = re.sub(r"[\\/*?:\[\]]", "-", (t.get("code") or t.get("name") or "Register"))[:31]
     RED = "CC0000"; thin = Side(style="thin", color="CCCCCC"); border = Border(thin, thin, thin, thin)
@@ -6115,13 +6122,14 @@ async def register_export_xlsx(tid: str, location: str = "", month: str = "", q:
         headers={"Content-Disposition": f'attachment; filename="{fn}.xlsx"'})
 
 @api.get("/registers/{tid}/export/pdf")
-async def register_export_pdf(tid: str, location: str = "", month: str = "", q: str = "", user=Depends(get_current_user)):
+async def register_export_pdf(tid: str, location: str = "", month: str = "", q: str = "", extra: str = "", user=Depends(get_current_user)):
     from reportlab.lib.pagesizes import A4, landscape
     from reportlab.lib.units import mm
     from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
     from reportlab.lib import colors
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     t, cols, entries = await _register_rows(tid)
+    entries = _filter_register_entries(cols, entries, location, month, q, extra)  # was previously never applied — PDF export ignored all on-screen filters
     buf = BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=landscape(A4), topMargin=27*mm, bottomMargin=18*mm, leftMargin=10*mm, rightMargin=10*mm, title=t.get("name", "Register"))
     styles = getSampleStyleSheet()
