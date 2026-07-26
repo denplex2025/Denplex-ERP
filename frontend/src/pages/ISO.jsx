@@ -11,7 +11,7 @@ import { Plus, Pencil, Trash2, ShieldCheck, ClipboardList, FileDown, Wrench, Tru
 import StatusBadge from "@/components/erp/StatusBadge";
 import { useAuth } from "@/lib/auth";
 import { toast } from "sonner";
-import { DATE_CATEGORIES, matchesDate, ColumnFilterPopover, CategoryFilterContent } from "@/components/erp/TableFilters";
+import { ColumnFilterPopover } from "@/components/erp/TableFilters";
 
 const Sel = ({ value, onChange, options }) => (
   <select value={value} onChange={(e) => onChange(e.target.value)} className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm bg-white h-10">
@@ -396,14 +396,29 @@ const FREQUENCIES = ["daily", "weekly", "monthly", "quarterly", "yearly", "as_re
 const COL_TYPES = ["text", "number", "date", "select", "textarea", "customer"];
 
 // ---- Register: "customer" column type — suggest-as-you-type against the Customer master, but
-// never forces a pick; typing freely and saving whatever text is there always works. ----
+// never forces a pick; typing freely and saving whatever text is there always works. A trailing
+// "+ Add as new customer" row creates the customer in the master on the spot when there's no match. ----
 function CustomerTypeahead({ value, onChange }) {
   const [customers, setCustomers] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [open, setOpen] = useState(false);
+  const [adding, setAdding] = useState(false);
   const load = () => { if (loaded) return; setLoaded(true); api.get("/customers").then((r) => setCustomers(r.data || [])).catch(() => {}); };
   const q = (value || "").trim().toLowerCase();
   const matches = q.length > 0 ? customers.filter((c) => (c.name || "").toLowerCase().includes(q)).slice(0, 8) : [];
+  const exactMatch = q.length > 0 && customers.some((c) => (c.name || "").toLowerCase() === q);
+  const addAsNewCustomer = async () => {
+    const name = (value || "").trim();
+    if (!name || adding) return;
+    setAdding(true);
+    try {
+      const r = await api.post("/customers", { name });
+      setCustomers((cs) => [...cs, r.data]);
+      onChange(r.data.name || name);
+      toast.success(`Added "${name}" to Customers`);
+    } catch (e) { toast.error("Could not add customer"); }
+    setAdding(false); setOpen(false);
+  };
   return (
     <div className="relative">
       <Input
@@ -414,20 +429,62 @@ function CustomerTypeahead({ value, onChange }) {
         placeholder="Start typing a customer name…"
         className="h-9"
       />
-      {open && matches.length > 0 && (
-        <div className="absolute z-20 mt-1 w-full bg-white border border-slate-200 rounded-md shadow-md max-h-48 overflow-y-auto">
+      {open && q.length > 0 && (matches.length > 0 || !exactMatch) && (
+        <div className="absolute z-20 mt-1 w-full bg-white border border-slate-200 rounded-md shadow-md max-h-56 overflow-y-auto">
           {matches.map((c) => (
             <button type="button" key={c.id} onMouseDown={(e) => { e.preventDefault(); onChange(c.name); setOpen(false); }}
               className="block w-full text-left px-3 py-1.5 text-sm hover:bg-slate-50">{c.name}</button>
           ))}
+          {!exactMatch && (
+            <button type="button" onMouseDown={(e) => { e.preventDefault(); addAsNewCustomer(); }} disabled={adding}
+              className="block w-full text-left px-3 py-1.5 text-sm text-red-600 font-medium hover:bg-red-50 border-t border-slate-100">
+              <Plus className="w-3.5 h-3.5 inline mr-1" /> {adding ? "Adding…" : `Add "${value.trim()}" as new customer`}
+            </button>
+          )}
         </div>
       )}
     </div>
   );
 }
 
+// ---- Register: "select" column type — normal dropdown, plus a "+ Add new…" row that lets the user
+// type a brand-new option inline. The new value is selected immediately and persisted onto the
+// register's column definition (via onAddOption) so it's there for everyone next time. ----
+function SelectWithAdd({ value, options, onChange, onAddOption }) {
+  const [adding, setAdding] = useState(false);
+  const [newVal, setNewVal] = useState("");
+  const commit = () => {
+    const v = newVal.trim();
+    setAdding(false); setNewVal("");
+    if (!v) return;
+    onChange(v);
+    onAddOption && onAddOption(v);
+  };
+  if (adding) {
+    return (
+      <div className="flex gap-1.5">
+        <Input autoFocus value={newVal} onChange={(e) => setNewVal(e.target.value)} placeholder="New value…" className="h-9 flex-1"
+          onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commit(); } if (e.key === "Escape") { setAdding(false); setNewVal(""); } }} />
+        <Button type="button" size="sm" onClick={commit}>Add</Button>
+        <Button type="button" size="sm" variant="outline" onClick={() => { setAdding(false); setNewVal(""); }}>Cancel</Button>
+      </div>
+    );
+  }
+  return (
+    <select
+      value={value || ""}
+      onChange={(e) => { if (e.target.value === "__add__") setAdding(true); else onChange(e.target.value); }}
+      className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm bg-white h-10"
+    >
+      <option value="">—</option>
+      {(options || []).map((o) => <option key={o} value={o}>{o}</option>)}
+      <option value="__add__">+ Add new…</option>
+    </select>
+  );
+}
+
 // ---- Register: add/edit a single entry (row), fields driven by the template columns ----
-function RegisterEntryDialog({ open, onClose, template, entry, onSave }) {
+function RegisterEntryDialog({ open, onClose, template, entry, onSave, onAddOption }) {
   const cols = template?.columns || [];
   const [date, setDate] = useState("");
   const [data, setData] = useState({});
@@ -445,7 +502,7 @@ function RegisterEntryDialog({ open, onClose, template, entry, onSave }) {
           {cols.map((c) => (
             <Field key={c.key} label={c.label} className={c.type === "textarea" ? "md:col-span-2" : ""}>
               {c.type === "textarea" ? <Textarea value={data[c.key] || ""} onChange={(e) => set(c.key, e.target.value)} rows={2} />
-                : c.type === "select" ? <Sel value={data[c.key] || ""} onChange={(v) => set(c.key, v)} options={[{ value: "", label: "—" }, ...(c.options || []).map((o) => ({ value: o, label: o }))]} />
+                : c.type === "select" ? <SelectWithAdd value={data[c.key] || ""} options={c.options} onChange={(v) => set(c.key, v)} onAddOption={(v) => onAddOption && onAddOption(c, v)} />
                 : c.type === "customer" ? <CustomerTypeahead value={data[c.key] || ""} onChange={(v) => set(c.key, v)} />
                 : <Input type={c.type === "number" ? "number" : c.type === "date" ? "date" : "text"} value={data[c.key] || ""} onChange={(e) => set(c.key, e.target.value)} className="h-9" />}
             </Field>
@@ -460,18 +517,49 @@ function RegisterEntryDialog({ open, onClose, template, entry, onSave }) {
 // ---- Register: the live data table (free data entry) + Excel/PDF export ----
 const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
-function RegisterView({ template, onDeleted, canManage }) {
+// From–To date range filter, opened from the Date column's funnel icon (same chrome as the other
+// per-column filters), applied only on demand via the Apply button.
+function DateRangeFilterContent({ committed, onApply, onClear, close }) {
+  const [from, setFrom] = useState(committed.from || "");
+  const [to, setTo] = useState(committed.to || "");
+  return (
+    <div className="space-y-2.5">
+      <div>
+        <Label className="text-xs text-slate-500">From</Label>
+        <Input type="date" value={from} onChange={(e) => setFrom(e.target.value)} className="rounded-sm h-8 text-sm mt-1" />
+      </div>
+      <div>
+        <Label className="text-xs text-slate-500">To</Label>
+        <Input type="date" value={to} onChange={(e) => setTo(e.target.value)} className="rounded-sm h-8 text-sm mt-1" />
+      </div>
+      <div className="flex gap-2 pt-1">
+        <Button type="button" variant="outline" size="sm" className="rounded-sm flex-1 h-7 text-xs" onClick={() => { onClear(); close(); }}>Clear</Button>
+        <Button type="button" size="sm" className="rounded-sm flex-1 h-7 text-xs bg-red-600 hover:bg-red-700" onClick={() => { onApply({ from, to }); close(); }}>Apply</Button>
+      </div>
+    </div>
+  );
+}
+const matchesDateRange = (dateVal, { from, to }) => {
+  if (!from && !to) return true;
+  if (!dateVal) return false;
+  const d = String(dateVal).slice(0, 10);
+  if (from && d < from) return false;
+  if (to && d > to) return false;
+  return true;
+};
+
+function RegisterView({ template, onDeleted, canManage, onColumnsChanged }) {
   const [entries, setEntries] = useState([]);
   const [loading, setLoading] = useState(false);
   const [open, setOpen] = useState(false);
   const [edit, setEdit] = useState(null);
   const [locFilter, setLocFilter] = useState("All");
-  const [dateFilter, setDateFilter] = useState({ category: "equal", value: "" });
+  const [dateFilter, setDateFilter] = useState({ from: "", to: "" });
   const [search, setSearch] = useState("");
   const [chipFilters, setChipFilters] = useState({});
   const cols = template.columns || [];
   const load = async () => { setLoading(true); try { const r = await api.get(`/registers/${template.id}/entries`); setEntries(r.data || []); } catch (e) {} setLoading(false); };
-  useEffect(() => { load(); setEdit(null); setLocFilter("All"); setDateFilter({ category: "equal", value: "" }); setSearch(""); setChipFilters({}); }, [template.id]); // eslint-disable-line
+  useEffect(() => { load(); setEdit(null); setLocFilter("All"); setDateFilter({ from: "", to: "" }); setSearch(""); setChipFilters({}); }, [template.id]); // eslint-disable-line
   const saveEntry = async ({ date, data }) => {
     try {
       if (edit) await api.put(`/registers/${template.id}/entries/${edit.id}`, { date, data });
@@ -480,6 +568,18 @@ function RegisterView({ template, onDeleted, canManage }) {
     } catch (e) { toast.error("Could not save entry"); }
   };
   const delEntry = async (id) => { if (!window.confirm("Delete this entry?")) return; try { await api.delete(`/registers/${template.id}/entries/${id}`); await load(); } catch (e) { toast.error("Delete failed"); } };
+  // "+ Add new…" from a select field — persists the new option onto the register's column definition
+  // so it shows up for everyone next time, then refreshes the register list to pick it up.
+  const addColumnOption = async (col, newValue) => {
+    const v = (newValue || "").trim();
+    if (!v) return;
+    const updatedCols = cols.map((c) => c.key === col.key ? { ...c, options: Array.from(new Set([...(c.options || []), v])) } : c);
+    try {
+      await api.put(`/registers/${template.id}`, { columns: updatedCols });
+      toast.success(`Added "${v}" to ${col.label}`);
+      if (onColumnsChanged) await onColumnsChanged();
+    } catch (e) { toast.error("Could not save new option"); }
+  };
 
   // Location column auto-detect (e.g. Vatva / Santej split)
   const locCol = cols.find((c) => c.key === "location" || c.label.toLowerCase() === "location");
@@ -513,7 +613,7 @@ function RegisterView({ template, onDeleted, canManage }) {
       const active = chipFilters[c.key];
       if (active && active !== "All" && norm(e.data?.[c.key]).toLowerCase() !== active.toLowerCase()) return false;
     }
-    if (!matchesDate(e.date, dateFilter)) return false;
+    if (!matchesDateRange(e.date, dateFilter)) return false;
     if (search) {
       const hay = `${e.date || ""} ${cols.map((c) => e.data?.[c.key] ?? "").join(" ")}`.toLowerCase();
       if (!hay.includes(search.toLowerCase())) return false;
@@ -521,12 +621,13 @@ function RegisterView({ template, onDeleted, canManage }) {
     return true;
   });
   const anyChipActive = Object.values(chipFilters).some((v) => v && v !== "All");
-  const clearAll = () => { setLocFilter("All"); setDateFilter({ category: "equal", value: "" }); setSearch(""); setChipFilters({}); };
+  const clearAll = () => { setLocFilter("All"); setDateFilter({ from: "", to: "" }); setSearch(""); setChipFilters({}); };
   // Build export query + filename so downloads reflect the active filter, not the whole register
   const exportQuery = () => {
     const p = new URLSearchParams();
     if (locCol && locFilter !== "All") p.set("location", locFilter);
-    if (dateFilter.value) { p.set("date_category", dateFilter.category); p.set("date_value", dateFilter.value); }
+    if (dateFilter.from) p.set("date_from", dateFilter.from);
+    if (dateFilter.to) p.set("date_to", dateFilter.to);
     if (search) p.set("q", search);
     const extra = {};
     extraFilterCols.forEach((c) => { if (chipFilters[c.key] && chipFilters[c.key] !== "All") extra[c.key] = chipFilters[c.key]; });
@@ -537,7 +638,7 @@ function RegisterView({ template, onDeleted, canManage }) {
   const exportSuffix = () => {
     const bits = [];
     if (locCol && locFilter !== "All") bits.push(locFilter);
-    if (dateFilter.value) bits.push(dateFilter.value);
+    if (dateFilter.from || dateFilter.to) bits.push([dateFilter.from, dateFilter.to].filter(Boolean).join("_to_"));
     extraFilterCols.forEach((c) => { if (chipFilters[c.key] && chipFilters[c.key] !== "All") bits.push(chipFilters[c.key]); });
     return bits.length ? "-" + bits.join("-") : "";
   };
@@ -607,7 +708,7 @@ function RegisterView({ template, onDeleted, canManage }) {
             <Search className="w-3.5 h-3.5 absolute left-2 top-2.5 text-slate-400" />
             <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search rows…" className="pl-7 h-8 text-xs w-44" />
           </div>
-          {(locFilter !== "All" || dateFilter.value || search || anyChipActive) && (
+          {(locFilter !== "All" || dateFilter.from || dateFilter.to || search || anyChipActive) && (
             <button className="text-xs text-slate-500 hover:text-red-600 inline-flex items-center gap-1" onClick={clearAll}><X className="w-3.5 h-3.5" /> Clear</button>
           )}
         </div>
@@ -622,15 +723,12 @@ function RegisterView({ template, onDeleted, canManage }) {
                   <div className="flex items-center gap-1">
                     Date
                     <ColumnFilterPopover
-                      active={!!dateFilter.value}
+                      active={!!(dateFilter.from || dateFilter.to)}
                       renderContent={(close) => (
-                        <CategoryFilterContent
-                          categoryOptions={DATE_CATEGORIES}
-                          inputType="date"
-                          valueLabel="Select Date"
+                        <DateRangeFilterContent
                           committed={dateFilter}
                           onApply={(v) => setDateFilter(v)}
-                          onClear={() => setDateFilter({ category: "equal", value: "" })}
+                          onClear={() => setDateFilter({ from: "", to: "" })}
                           close={close}
                         />
                       )}
@@ -675,7 +773,7 @@ function RegisterView({ template, onDeleted, canManage }) {
         </div>
       </CardContent></Card>
       <div className="text-[11px] text-slate-400 px-1">{filtered.length === entries.length ? `${entries.length} rows` : `${filtered.length} of ${entries.length} rows`}</div>
-      <RegisterEntryDialog open={open} onClose={() => { setOpen(false); setEdit(null); }} template={template} entry={edit} onSave={saveEntry} />
+      <RegisterEntryDialog open={open} onClose={() => { setOpen(false); setEdit(null); }} template={template} entry={edit} onSave={saveEntry} onAddOption={addColumnOption} />
     </div>
   );
 }
@@ -787,7 +885,7 @@ function DocumentsLibrary() {
 
         <Card><CardContent className="p-3">
           {!sel && <div className="h-[60vh] flex flex-col items-center justify-center text-center text-slate-400 gap-2"><FileText className="w-10 h-10" /><div className="text-sm">Select a register to enter data, or a document to view/edit.</div></div>}
-          {selReg && <RegisterView template={selReg} onDeleted={deleteRegister} canManage={isApprover} />}
+          {selReg && <RegisterView template={selReg} onDeleted={deleteRegister} canManage={isApprover} onColumnsChanged={loadAll} />}
           {sel?.kind === "doc" && selDoc && selDoc.doc_type === "file" && (
             <div className="space-y-4">
               <div><div className="text-xs uppercase tracking-wider text-red-600 font-semibold">{selDoc.category}{selDoc.code ? ` · ${selDoc.code}` : ""}</div><h2 className="text-lg font-bold">{selDoc.title}</h2></div>
