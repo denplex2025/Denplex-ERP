@@ -5931,7 +5931,8 @@ class RegisterColumn(BaseModel):
     model_config = ConfigDict(extra="ignore")
     key: str
     label: str
-    type: Literal["text", "number", "date", "select", "textarea"] = "text"
+    # "customer" renders a typeahead against the Customer master (suggest-as-you-type, free text still allowed)
+    type: Literal["text", "number", "date", "select", "textarea", "customer"] = "text"
     options: List[str] = []
 
 class RegisterTemplate(BaseModel):
@@ -6062,12 +6063,24 @@ async def _register_rows(tid: str):
     cols = t.get("columns", [])
     return t, cols, entries
 
-def _filter_register_entries(cols, entries, location: str = "", month: str = "", q: str = "", extra: str = ""):
-    """Apply the same filters the UI shows (location chip / month / search / the auto-detected quick-filter
-    chips like Machine or Operator) so an export reflects exactly what the user is looking at, not the
-    whole register."""
+def _matches_date_filter(date_val: str, category: str, value: str) -> bool:
+    """Mirrors the frontend's matchesDate() (TableFilters.jsx) so exports agree with the on-screen
+    Sales-Invoice-style Date column filter (Equal To / Before / After, applied on demand)."""
+    if not value:
+        return True
+    if not date_val:
+        return False
+    d = str(date_val)[:10]
+    if category == "before": return d < value
+    if category == "after": return d > value
+    return d == value  # "equal" / default
+
+def _filter_register_entries(cols, entries, location: str = "", date_category: str = "", date_value: str = "", q: str = "", extra: str = ""):
+    """Apply the same filters the UI shows (location / date category+value / search / the auto-detected
+    quick-filter selects like Machine or Operator) so an export reflects exactly what the user is looking
+    at, not the whole register."""
     loc_col = next((c for c in cols if c.get("key") == "location" or str(c.get("label", "")).lower() == "location"), None)
-    location = (location or "").strip(); month = (month or "").strip(); q = (q or "").strip().lower()
+    location = (location or "").strip(); date_value = (date_value or "").strip(); q = (q or "").strip().lower()
     extra_filters = {}
     if extra:
         try: extra_filters = json.loads(extra) or {}
@@ -6079,7 +6092,7 @@ def _filter_register_entries(cols, entries, location: str = "", month: str = "",
             continue
         if extra_filters and any(str(data.get(k, "")).strip().lower() != str(v).strip().lower() for k, v in extra_filters.items()):
             continue
-        if month and str(e.get("date", ""))[:7] != month:
+        if not _matches_date_filter(e.get("date", ""), date_category or "equal", date_value):
             continue
         if q:
             hay = (str(e.get("date", "")) + " " + " ".join(str(data.get(c.get("key"), "")) for c in cols)).lower()
@@ -6089,11 +6102,11 @@ def _filter_register_entries(cols, entries, location: str = "", month: str = "",
     return out
 
 @api.get("/registers/{tid}/export/xlsx")
-async def register_export_xlsx(tid: str, location: str = "", month: str = "", q: str = "", extra: str = "", user=Depends(get_current_user)):
+async def register_export_xlsx(tid: str, location: str = "", date_category: str = "", date_value: str = "", q: str = "", extra: str = "", user=Depends(get_current_user)):
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     t, cols, entries = await _register_rows(tid)
-    entries = _filter_register_entries(cols, entries, location, month, q, extra)
+    entries = _filter_register_entries(cols, entries, location, date_category, date_value, q, extra)
     wb = Workbook(); ws = wb.active
     ws.title = re.sub(r"[\\/*?:\[\]]", "-", (t.get("code") or t.get("name") or "Register"))[:31]
     RED = "CC0000"; thin = Side(style="thin", color="CCCCCC"); border = Border(thin, thin, thin, thin)
@@ -6122,14 +6135,14 @@ async def register_export_xlsx(tid: str, location: str = "", month: str = "", q:
         headers={"Content-Disposition": f'attachment; filename="{fn}.xlsx"'})
 
 @api.get("/registers/{tid}/export/pdf")
-async def register_export_pdf(tid: str, location: str = "", month: str = "", q: str = "", extra: str = "", user=Depends(get_current_user)):
+async def register_export_pdf(tid: str, location: str = "", date_category: str = "", date_value: str = "", q: str = "", extra: str = "", user=Depends(get_current_user)):
     from reportlab.lib.pagesizes import A4, landscape
     from reportlab.lib.units import mm
     from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
     from reportlab.lib import colors
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     t, cols, entries = await _register_rows(tid)
-    entries = _filter_register_entries(cols, entries, location, month, q, extra)  # was previously never applied — PDF export ignored all on-screen filters
+    entries = _filter_register_entries(cols, entries, location, date_category, date_value, q, extra)  # was previously never applied — PDF export ignored all on-screen filters
     buf = BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=landscape(A4), topMargin=27*mm, bottomMargin=18*mm, leftMargin=10*mm, rightMargin=10*mm, title=t.get("name", "Register"))
     styles = getSampleStyleSheet()
