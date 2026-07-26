@@ -11,6 +11,7 @@ import { Plus, Pencil, Trash2, ShieldCheck, ClipboardList, FileDown, Wrench, Tru
 import StatusBadge from "@/components/erp/StatusBadge";
 import { useAuth } from "@/lib/auth";
 import { toast } from "sonner";
+import { DATE_CATEGORIES, matchesDate, ColumnFilterPopover, CategoryFilterContent } from "@/components/erp/TableFilters";
 
 const Sel = ({ value, onChange, options }) => (
   <select value={value} onChange={(e) => onChange(e.target.value)} className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm bg-white h-10">
@@ -392,7 +393,38 @@ function RichEditor({ value, onInput }) {
 
 const DEPARTMENTS = ["Production", "QC", "Design", "Purchase", "Store", "HR", "Marketing", "Maintenance", "Management"];
 const FREQUENCIES = ["daily", "weekly", "monthly", "quarterly", "yearly", "as_required"];
-const COL_TYPES = ["text", "number", "date", "select", "textarea"];
+const COL_TYPES = ["text", "number", "date", "select", "textarea", "customer"];
+
+// ---- Register: "customer" column type — suggest-as-you-type against the Customer master, but
+// never forces a pick; typing freely and saving whatever text is there always works. ----
+function CustomerTypeahead({ value, onChange }) {
+  const [customers, setCustomers] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  const [open, setOpen] = useState(false);
+  const load = () => { if (loaded) return; setLoaded(true); api.get("/customers").then((r) => setCustomers(r.data || [])).catch(() => {}); };
+  const q = (value || "").trim().toLowerCase();
+  const matches = q.length > 0 ? customers.filter((c) => (c.name || "").toLowerCase().includes(q)).slice(0, 8) : [];
+  return (
+    <div className="relative">
+      <Input
+        value={value || ""}
+        onFocus={() => { load(); setOpen(true); }}
+        onChange={(e) => { onChange(e.target.value); setOpen(true); }}
+        onBlur={() => setTimeout(() => setOpen(false), 150)}
+        placeholder="Start typing a customer name…"
+        className="h-9"
+      />
+      {open && matches.length > 0 && (
+        <div className="absolute z-20 mt-1 w-full bg-white border border-slate-200 rounded-md shadow-md max-h-48 overflow-y-auto">
+          {matches.map((c) => (
+            <button type="button" key={c.id} onMouseDown={(e) => { e.preventDefault(); onChange(c.name); setOpen(false); }}
+              className="block w-full text-left px-3 py-1.5 text-sm hover:bg-slate-50">{c.name}</button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 // ---- Register: add/edit a single entry (row), fields driven by the template columns ----
 function RegisterEntryDialog({ open, onClose, template, entry, onSave }) {
@@ -414,6 +446,7 @@ function RegisterEntryDialog({ open, onClose, template, entry, onSave }) {
             <Field key={c.key} label={c.label} className={c.type === "textarea" ? "md:col-span-2" : ""}>
               {c.type === "textarea" ? <Textarea value={data[c.key] || ""} onChange={(e) => set(c.key, e.target.value)} rows={2} />
                 : c.type === "select" ? <Sel value={data[c.key] || ""} onChange={(v) => set(c.key, v)} options={[{ value: "", label: "—" }, ...(c.options || []).map((o) => ({ value: o, label: o }))]} />
+                : c.type === "customer" ? <CustomerTypeahead value={data[c.key] || ""} onChange={(v) => set(c.key, v)} />
                 : <Input type={c.type === "number" ? "number" : c.type === "date" ? "date" : "text"} value={data[c.key] || ""} onChange={(e) => set(c.key, e.target.value)} className="h-9" />}
             </Field>
           ))}
@@ -433,12 +466,12 @@ function RegisterView({ template, onDeleted, canManage }) {
   const [open, setOpen] = useState(false);
   const [edit, setEdit] = useState(null);
   const [locFilter, setLocFilter] = useState("All");
-  const [month, setMonth] = useState("All");
+  const [dateFilter, setDateFilter] = useState({ category: "equal", value: "" });
   const [search, setSearch] = useState("");
   const [chipFilters, setChipFilters] = useState({});
   const cols = template.columns || [];
   const load = async () => { setLoading(true); try { const r = await api.get(`/registers/${template.id}/entries`); setEntries(r.data || []); } catch (e) {} setLoading(false); };
-  useEffect(() => { load(); setEdit(null); setLocFilter("All"); setMonth("All"); setSearch(""); setChipFilters({}); }, [template.id]); // eslint-disable-line
+  useEffect(() => { load(); setEdit(null); setLocFilter("All"); setDateFilter({ category: "equal", value: "" }); setSearch(""); setChipFilters({}); }, [template.id]); // eslint-disable-line
   const saveEntry = async ({ date, data }) => {
     try {
       if (edit) await api.put(`/registers/${template.id}/entries/${edit.id}`, { date, data });
@@ -474,30 +507,26 @@ function RegisterView({ template, onDeleted, canManage }) {
     return Array.from(seen.values()).sort((a, b) => a.localeCompare(b));
   };
 
-  // Months present in the data
-  const months = Array.from(new Set(entries.map((e) => (e.date || "").slice(0, 7)).filter((m) => /^\d{4}-\d{2}$/.test(m)))).sort();
-  const monthLabel = (m) => { const [y, mm] = m.split("-"); return `${MONTH_NAMES[parseInt(mm, 10) - 1]} ${y.slice(2)}`; };
-
   const filtered = entries.filter((e) => {
     if (locCol && locFilter !== "All" && (e.data?.[locCol.key] || "").trim() !== locFilter) return false;
     for (const c of extraFilterCols) {
       const active = chipFilters[c.key];
       if (active && active !== "All" && norm(e.data?.[c.key]).toLowerCase() !== active.toLowerCase()) return false;
     }
-    if (month !== "All" && (e.date || "").slice(0, 7) !== month) return false;
+    if (!matchesDate(e.date, dateFilter)) return false;
     if (search) {
       const hay = `${e.date || ""} ${cols.map((c) => e.data?.[c.key] ?? "").join(" ")}`.toLowerCase();
       if (!hay.includes(search.toLowerCase())) return false;
     }
     return true;
   });
-  const chip = (active) => `px-2.5 py-1 text-xs rounded-sm font-medium border transition-colors whitespace-nowrap ${active ? "bg-red-600 text-white border-red-600" : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50"}`;
   const anyChipActive = Object.values(chipFilters).some((v) => v && v !== "All");
+  const clearAll = () => { setLocFilter("All"); setDateFilter({ category: "equal", value: "" }); setSearch(""); setChipFilters({}); };
   // Build export query + filename so downloads reflect the active filter, not the whole register
   const exportQuery = () => {
     const p = new URLSearchParams();
     if (locCol && locFilter !== "All") p.set("location", locFilter);
-    if (month !== "All") p.set("month", month);
+    if (dateFilter.value) { p.set("date_category", dateFilter.category); p.set("date_value", dateFilter.value); }
     if (search) p.set("q", search);
     const extra = {};
     extraFilterCols.forEach((c) => { if (chipFilters[c.key] && chipFilters[c.key] !== "All") extra[c.key] = chipFilters[c.key]; });
@@ -508,7 +537,7 @@ function RegisterView({ template, onDeleted, canManage }) {
   const exportSuffix = () => {
     const bits = [];
     if (locCol && locFilter !== "All") bits.push(locFilter);
-    if (month !== "All") bits.push(monthLabel(month).replace(" ", ""));
+    if (dateFilter.value) bits.push(dateFilter.value);
     extraFilterCols.forEach((c) => { if (chipFilters[c.key] && chipFilters[c.key] !== "All") bits.push(chipFilters[c.key]); });
     return bits.length ? "-" + bits.join("-") : "";
   };
@@ -552,38 +581,34 @@ function RegisterView({ template, onDeleted, canManage }) {
         </div>
       </div>
 
-      {/* Filter bar */}
-      {(locCol || extraFilterCols.length > 0 || months.length > 1 || entries.length > 8) && (
-        <div className="flex items-center gap-2 flex-wrap bg-slate-50 border border-slate-200 rounded-md p-2">
+      {/* Filter bar — compact dropdowns rather than a wall of per-value buttons; the Date column's own
+          funnel icon (below, Sales-Invoice style) handles date filtering with an explicit Apply. */}
+      {(locCol || extraFilterCols.length > 0 || entries.length > 8) && (
+        <div className="flex items-center gap-3 flex-wrap bg-slate-50 border border-slate-200 rounded-md p-2">
           {locCol && (
-            <div className="flex items-center gap-1.5 flex-wrap">
-              <span className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold mr-0.5">{locCol.label}</span>
-              <button className={chip(locFilter === "All")} onClick={() => setLocFilter("All")}>All</button>
-              {locValues.map((v) => <button key={v} className={chip(locFilter === v)} onClick={() => setLocFilter(v)}>{v}</button>)}
-            </div>
-          )}
-          {extraFilterCols.map((c) => (
-            <div key={c.key} className="flex items-center gap-1.5 flex-wrap border-l border-slate-200 pl-2 first:border-l-0 first:pl-0">
-              <span className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold mr-0.5">{c.label}</span>
-              <button className={chip(!chipFilters[c.key] || chipFilters[c.key] === "All")} onClick={() => setChipFilters((f) => ({ ...f, [c.key]: "All" }))}>All</button>
-              {chipValuesFor(c).map((v) => <button key={v} className={chip(chipFilters[c.key] === v)} onClick={() => setChipFilters((f) => ({ ...f, [c.key]: v }))}>{v}</button>)}
-            </div>
-          ))}
-          {months.length > 1 && (
-            <div className="flex items-center gap-1.5 ml-1">
-              <span className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">Month</span>
-              <select value={month} onChange={(e) => setMonth(e.target.value)} className="h-8 text-xs border border-slate-200 rounded-sm px-2 bg-white">
+            <div className="flex items-center gap-1.5">
+              <span className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">{locCol.label}</span>
+              <select value={locFilter} onChange={(e) => setLocFilter(e.target.value)} className="h-8 text-xs border border-slate-200 rounded-sm px-2 bg-white max-w-[160px]">
                 <option value="All">All</option>
-                {months.map((m) => <option key={m} value={m}>{monthLabel(m)}</option>)}
+                {locValues.map((v) => <option key={v} value={v}>{v}</option>)}
               </select>
             </div>
           )}
+          {extraFilterCols.map((c) => (
+            <div key={c.key} className="flex items-center gap-1.5">
+              <span className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">{c.label}</span>
+              <select value={chipFilters[c.key] || "All"} onChange={(e) => setChipFilters((f) => ({ ...f, [c.key]: e.target.value }))} className="h-8 text-xs border border-slate-200 rounded-sm px-2 bg-white max-w-[160px]">
+                <option value="All">All</option>
+                {chipValuesFor(c).map((v) => <option key={v} value={v}>{v}</option>)}
+              </select>
+            </div>
+          ))}
           <div className="relative ml-auto">
             <Search className="w-3.5 h-3.5 absolute left-2 top-2.5 text-slate-400" />
             <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search rows…" className="pl-7 h-8 text-xs w-44" />
           </div>
-          {(locFilter !== "All" || month !== "All" || search || anyChipActive) && (
-            <button className="text-xs text-slate-500 hover:text-red-600 inline-flex items-center gap-1" onClick={() => { setLocFilter("All"); setMonth("All"); setSearch(""); setChipFilters({}); }}><X className="w-3.5 h-3.5" /> Clear</button>
+          {(locFilter !== "All" || dateFilter.value || search || anyChipActive) && (
+            <button className="text-xs text-slate-500 hover:text-red-600 inline-flex items-center gap-1" onClick={clearAll}><X className="w-3.5 h-3.5" /> Clear</button>
           )}
         </div>
       )}
@@ -593,7 +618,25 @@ function RegisterView({ template, onDeleted, canManage }) {
           <table className="w-full text-sm border-collapse">
             <thead className="sticky top-0 z-10">
               <tr className="text-left text-[11px] uppercase tracking-wider text-slate-500">
-                <th className="p-2 font-semibold whitespace-nowrap bg-slate-100 border-b border-r border-slate-200">Date</th>
+                <th className="p-2 font-semibold whitespace-nowrap bg-slate-100 border-b border-r border-slate-200">
+                  <div className="flex items-center gap-1">
+                    Date
+                    <ColumnFilterPopover
+                      active={!!dateFilter.value}
+                      renderContent={(close) => (
+                        <CategoryFilterContent
+                          categoryOptions={DATE_CATEGORIES}
+                          inputType="date"
+                          valueLabel="Select Date"
+                          committed={dateFilter}
+                          onApply={(v) => setDateFilter(v)}
+                          onClear={() => setDateFilter({ category: "equal", value: "" })}
+                          close={close}
+                        />
+                      )}
+                    />
+                  </div>
+                </th>
                 {locCol && <th className="p-2 font-semibold whitespace-nowrap bg-slate-100 border-b border-r border-slate-200">{locCol.label}</th>}
                 {dataCols.map((c) => <th key={c.key} className="p-2 font-semibold bg-slate-100 border-b border-r border-slate-200 last:border-r-0">{c.label}</th>)}
                 <th className="p-2 w-16 bg-slate-100 border-b border-slate-200"></th>
