@@ -393,7 +393,7 @@ function RichEditor({ value, onInput }) {
 
 const DEPARTMENTS = ["Production", "QC", "Design", "Purchase", "Store", "HR", "Marketing", "Maintenance", "Management"];
 const FREQUENCIES = ["daily", "weekly", "monthly", "quarterly", "yearly", "as_required"];
-const COL_TYPES = ["text", "number", "date", "select", "textarea", "customer"];
+const COL_TYPES = ["text", "number", "date", "select", "textarea", "customer", "supplier", "suggest"];
 
 // ---- Register: "customer" column type — suggest-as-you-type against the Customer master, but
 // never forces a pick; typing freely and saving whatever text is there always works. A trailing
@@ -447,6 +447,86 @@ function CustomerTypeahead({ value, onChange }) {
   );
 }
 
+// ---- Register: "supplier" column type — identical behavior to CustomerTypeahead, but suggests
+// against the Supplier master (/suppliers) and adds new ones there instead. ----
+function SupplierTypeahead({ value, onChange }) {
+  const [suppliers, setSuppliers] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  const [open, setOpen] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const load = () => { if (loaded) return; setLoaded(true); api.get("/suppliers").then((r) => setSuppliers(r.data || [])).catch(() => {}); };
+  const q = (value || "").trim().toLowerCase();
+  const matches = q.length > 0 ? suppliers.filter((s) => (s.name || "").toLowerCase().includes(q)).slice(0, 8) : [];
+  const exactMatch = q.length > 0 && suppliers.some((s) => (s.name || "").toLowerCase() === q);
+  const addAsNewSupplier = async () => {
+    const name = (value || "").trim();
+    if (!name || adding) return;
+    setAdding(true);
+    try {
+      const r = await api.post("/suppliers", { name });
+      setSuppliers((ss) => [...ss, r.data]);
+      onChange(r.data.name || name);
+      toast.success(`Added "${name}" to Suppliers`);
+    } catch (e) { toast.error("Could not add supplier"); }
+    setAdding(false); setOpen(false);
+  };
+  return (
+    <div className="relative">
+      <Input
+        value={value || ""}
+        onFocus={() => { load(); setOpen(true); }}
+        onChange={(e) => { onChange(e.target.value); setOpen(true); }}
+        onBlur={() => setTimeout(() => setOpen(false), 150)}
+        placeholder="Start typing a supplier name…"
+        className="h-9"
+      />
+      {open && q.length > 0 && (matches.length > 0 || !exactMatch) && (
+        <div className="absolute z-20 mt-1 w-full bg-white border border-slate-200 rounded-md shadow-md max-h-56 overflow-y-auto">
+          {matches.map((s) => (
+            <button type="button" key={s.id} onMouseDown={(e) => { e.preventDefault(); onChange(s.name); setOpen(false); }}
+              className="block w-full text-left px-3 py-1.5 text-sm hover:bg-slate-50">{s.name}</button>
+          ))}
+          {!exactMatch && (
+            <button type="button" onMouseDown={(e) => { e.preventDefault(); addAsNewSupplier(); }} disabled={adding}
+              className="block w-full text-left px-3 py-1.5 text-sm text-red-600 font-medium hover:bg-red-50 border-t border-slate-100">
+              <Plus className="w-3.5 h-3.5 inline mr-1" /> {adding ? "Adding…" : `Add "${value.trim()}" as new supplier`}
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---- Register: "suggest" column type — free-text field that suggests from this same column's own
+// historical values across the register's entries (no master collection, nothing forced). Handy for
+// fields like "Item Description" where there's no fixed vocabulary but repeats are common. ----
+function SuggestInput({ value, onChange, sourceValues }) {
+  const [open, setOpen] = useState(false);
+  const q = (value || "").trim().toLowerCase();
+  const matches = q.length > 0 ? (sourceValues || []).filter((v) => v.toLowerCase().includes(q) && v.toLowerCase() !== q).slice(0, 8) : [];
+  return (
+    <div className="relative">
+      <Input
+        value={value || ""}
+        onFocus={() => setOpen(true)}
+        onChange={(e) => { onChange(e.target.value); setOpen(true); }}
+        onBlur={() => setTimeout(() => setOpen(false), 150)}
+        placeholder="Start typing…"
+        className="h-9"
+      />
+      {open && matches.length > 0 && (
+        <div className="absolute z-20 mt-1 w-full bg-white border border-slate-200 rounded-md shadow-md max-h-56 overflow-y-auto">
+          {matches.map((v) => (
+            <button type="button" key={v} onMouseDown={(e) => { e.preventDefault(); onChange(v); setOpen(false); }}
+              className="block w-full text-left px-3 py-1.5 text-sm hover:bg-slate-50">{v}</button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ---- Register: "select" column type — normal dropdown, plus a "+ Add new…" row that lets the user
 // type a brand-new option inline. The new value is selected immediately and persisted onto the
 // register's column definition (via onAddOption) so it's there for everyone next time. ----
@@ -484,7 +564,7 @@ function SelectWithAdd({ value, options, onChange, onAddOption }) {
 }
 
 // ---- Register: add/edit a single entry (row), fields driven by the template columns ----
-function RegisterEntryDialog({ open, onClose, template, entry, onSave, onAddOption }) {
+function RegisterEntryDialog({ open, onClose, template, entry, onSave, onAddOption, entries }) {
   const cols = template?.columns || [];
   const [date, setDate] = useState("");
   const [data, setData] = useState({});
@@ -494,6 +574,8 @@ function RegisterEntryDialog({ open, onClose, template, entry, onSave, onAddOpti
   }, [open, entry]);
   const set = (k, v) => setData((d) => ({ ...d, [k]: v }));
   const submit = async () => { setSaving(true); await onSave({ date, data }); setSaving(false); };
+  // For "suggest" columns: distinct historical values of that same column across the register's entries.
+  const suggestValues = (key) => Array.from(new Set((entries || []).map((e) => (e.data?.[key] || "").trim()).filter(Boolean)));
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-w-2xl"><DialogHeader><DialogTitle>{entry ? "Edit entry" : "New entry"} · {template?.name}</DialogTitle></DialogHeader>
@@ -504,6 +586,8 @@ function RegisterEntryDialog({ open, onClose, template, entry, onSave, onAddOpti
               {c.type === "textarea" ? <Textarea value={data[c.key] || ""} onChange={(e) => set(c.key, e.target.value)} rows={2} />
                 : c.type === "select" ? <SelectWithAdd value={data[c.key] || ""} options={c.options} onChange={(v) => set(c.key, v)} onAddOption={(v) => onAddOption && onAddOption(c, v)} />
                 : c.type === "customer" ? <CustomerTypeahead value={data[c.key] || ""} onChange={(v) => set(c.key, v)} />
+                : c.type === "supplier" ? <SupplierTypeahead value={data[c.key] || ""} onChange={(v) => set(c.key, v)} />
+                : c.type === "suggest" ? <SuggestInput value={data[c.key] || ""} onChange={(v) => set(c.key, v)} sourceValues={suggestValues(c.key)} />
                 : <Input type={c.type === "number" ? "number" : c.type === "date" ? "date" : "text"} value={data[c.key] || ""} onChange={(e) => set(c.key, e.target.value)} className="h-9" />}
             </Field>
           ))}
@@ -773,7 +857,7 @@ function RegisterView({ template, onDeleted, canManage, onColumnsChanged }) {
         </div>
       </CardContent></Card>
       <div className="text-[11px] text-slate-400 px-1">{filtered.length === entries.length ? `${entries.length} rows` : `${filtered.length} of ${entries.length} rows`}</div>
-      <RegisterEntryDialog open={open} onClose={() => { setOpen(false); setEdit(null); }} template={template} entry={edit} onSave={saveEntry} onAddOption={addColumnOption} />
+      <RegisterEntryDialog open={open} onClose={() => { setOpen(false); setEdit(null); }} template={template} entry={edit} onSave={saveEntry} onAddOption={addColumnOption} entries={entries} />
     </div>
   );
 }
