@@ -5932,7 +5932,9 @@ class RegisterColumn(BaseModel):
     key: str
     label: str
     # "customer" renders a typeahead against the Customer master (suggest-as-you-type, free text still allowed)
-    type: Literal["text", "number", "date", "select", "textarea", "customer"] = "text"
+    # "supplier" renders a typeahead against the Supplier master (same behavior, points at /suppliers)
+    # "suggest" renders a typeahead sourced from this column's own historical values in the register (no master, no forced pick)
+    type: Literal["text", "number", "date", "select", "textarea", "customer", "supplier", "suggest"] = "text"
     options: List[str] = []
 
 class RegisterTemplate(BaseModel):
