@@ -12,6 +12,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     freecad-python3 freecad-common \
     && rm -rf /var/lib/apt/lists/*
 
+# freecad-python3's Part/App/.so extension modules are installed at /usr/lib/freecad-python3/lib
+# (confirmed by downloading and inspecting the actual .deb — `dpkg -c libfreecad-python3-0.19...deb`
+# — since this sandbox has no root to apt-get install it directly). That directory is NOT on
+# Python's default sys.path, so a plain `import Part` fails with ModuleNotFoundError even though
+# apt install succeeded and pulled in every runtime dependency (libocct-*, libcoin80c, PySide2,
+# etc. — all declared as hard Depends, so --no-install-recommends above does not skip them).
+ENV PYTHONPATH=/usr/lib/freecad-python3/lib
+
 WORKDIR /app
 COPY requirements.txt .
 RUN pip3 install --no-cache-dir -r requirements.txt
