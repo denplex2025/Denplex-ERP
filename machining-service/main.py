@@ -112,6 +112,14 @@ def _detect_holes(shape) -> List[dict]:
 
 
 def _analyze(step_bytes: bytes) -> dict:
+    # FreeCAD must be imported before Part: Part's Python types inherit from FreeCAD's own base
+    # types (App::DocumentObject etc.), and importing Part first crashes with a hard segfault
+    # (PyType_Ready() on a subtype whose base type pointer is still NULL) rather than a catchable
+    # Python error. Reproduced and root-caused locally (gdb backtrace showed a null-pointer type
+    # check inside Part.so's module init) after two blind Railway deploys mis-attributed this to
+    # a headless-display/Coin3D issue. Importing FreeCAD once here (before Part, and before the
+    # try/except below) is the actual fix — no xvfb or virtual display needed at all.
+    import FreeCAD  # noqa: F401
     import Part  # noqa: F401  (import here so a missing FreeCAD install fails inside the try/except below, not at module load)
 
     tmp = tempfile.mkdtemp()
