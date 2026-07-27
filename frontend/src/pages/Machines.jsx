@@ -12,10 +12,14 @@ import { Plus, Cog, Pencil, Trash2 } from "lucide-react";
 import StatusBadge from "@/components/erp/StatusBadge";
 
 const STATUSES = ["available", "running", "maintenance", "idle"];
+const AXES_OPTIONS = [3, 4, 5];
+const CONTROLLER_TYPES = ["Fanuc", "Siemens", "Haas", "Mach3", "LinuxCNC", "GRBL", "Heidenhain", "Mitsubishi", "Other"];
 
 const emptyForm = {
   name: "", machine_type: "", group: "", status: "available",
   hourly_rate: "", location: "", notes: "",
+  axes: "3", controller_type: "", travel_x_mm: "", travel_y_mm: "", travel_z_mm: "",
+  turning_dia_mm: "", turning_length_mm: "", rotary_axis: "", spindle_max_rpm: "", rapid_feed_mm_min: "10000",
 };
 
 export default function Machines() {
@@ -47,6 +51,11 @@ export default function Machines() {
       name: m.name || "", machine_type: m.machine_type || "", group: m.group || "",
       status: m.status || "available", hourly_rate: m.hourly_rate ?? "",
       location: m.location || "", notes: m.notes || "",
+      axes: String(m.axes || 3), controller_type: m.controller_type || "",
+      travel_x_mm: m.travel_x_mm || "", travel_y_mm: m.travel_y_mm || "", travel_z_mm: m.travel_z_mm || "",
+      turning_dia_mm: m.turning_dia_mm || "", turning_length_mm: m.turning_length_mm || "",
+      rotary_axis: m.rotary_axis || "", spindle_max_rpm: m.spindle_max_rpm || "",
+      rapid_feed_mm_min: m.rapid_feed_mm_min || "10000",
     });
     setError(""); setOpen(true);
   };
@@ -65,6 +74,16 @@ export default function Machines() {
         hourly_rate: parseFloat(form.hourly_rate) || 0,
         location: form.location.trim(),
         notes: form.notes.trim(),
+        axes: parseInt(form.axes) || 3,
+        controller_type: form.controller_type.trim(),
+        travel_x_mm: parseFloat(form.travel_x_mm) || 0,
+        travel_y_mm: parseFloat(form.travel_y_mm) || 0,
+        travel_z_mm: parseFloat(form.travel_z_mm) || 0,
+        turning_dia_mm: parseFloat(form.turning_dia_mm) || 0,
+        turning_length_mm: parseFloat(form.turning_length_mm) || 0,
+        rotary_axis: form.rotary_axis.trim(),
+        spindle_max_rpm: parseFloat(form.spindle_max_rpm) || 0,
+        rapid_feed_mm_min: parseFloat(form.rapid_feed_mm_min) || 10000,
       };
       if (editingId) await api.put(`/machines/${editingId}`, payload);
       else await api.post("/machines", payload);
@@ -111,6 +130,8 @@ export default function Machines() {
                     <th className="text-left px-4 py-2">Name</th>
                     <th className="text-left px-4 py-2">Type</th>
                     <th className="text-left px-4 py-2">Group</th>
+                    <th className="text-left px-4 py-2">Axes</th>
+                    <th className="text-left px-4 py-2">Controller</th>
                     <th className="text-right px-4 py-2">₹/hr</th>
                     <th className="text-left px-4 py-2">Status</th>
                     <th className="text-right px-4 py-2">Actions</th>
@@ -123,6 +144,8 @@ export default function Machines() {
                       <td className="px-4 py-2">{m.name}</td>
                       <td className="px-4 py-2">{m.machine_type || "—"}</td>
                       <td className="px-4 py-2">{m.group || "—"}</td>
+                      <td className="px-4 py-2">{m.axes ? `${m.axes}-axis` : "—"}</td>
+                      <td className="px-4 py-2">{m.controller_type || "—"}</td>
                       <td className="px-4 py-2 text-right">{m.hourly_rate ? m.hourly_rate : "—"}</td>
                       <td className="px-4 py-2"><StatusBadge status={m.status || "available"} /></td>
                       <td className="px-4 py-2 text-right whitespace-nowrap">
@@ -188,6 +211,66 @@ export default function Machines() {
                 <Input id="m-loc" value={form.location} onChange={(e) => change("location", e.target.value)}
                   placeholder="Shop floor bay / shed" />
               </div>
+
+              <div className="col-span-2 pt-2 mt-1 border-t text-xs font-semibold uppercase tracking-wider text-slate-500">
+                Machining specs (for STEP quoting)
+              </div>
+              <div>
+                <Label htmlFor="m-axes">Axes</Label>
+                <select id="m-axes" value={form.axes} onChange={(e) => change("axes", e.target.value)}
+                  className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm bg-white h-10">
+                  {AXES_OPTIONS.map((a) => (<option key={a} value={a}>{a}-axis{a > 3 ? " (indexed)" : ""}</option>))}
+                </select>
+              </div>
+              <div>
+                <Label htmlFor="m-controller">Controller Type</Label>
+                <select id="m-controller" value={form.controller_type} onChange={(e) => change("controller_type", e.target.value)}
+                  className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm bg-white h-10">
+                  <option value="">—</option>
+                  {CONTROLLER_TYPES.map((c) => (<option key={c} value={c}>{c}</option>))}
+                </select>
+              </div>
+              <div>
+                <Label htmlFor="m-tx">Travel X (mm)</Label>
+                <Input id="m-tx" type="number" min="0" value={form.travel_x_mm}
+                  onChange={(e) => change("travel_x_mm", e.target.value)} placeholder="mill work envelope" />
+              </div>
+              <div>
+                <Label htmlFor="m-ty">Travel Y (mm)</Label>
+                <Input id="m-ty" type="number" min="0" value={form.travel_y_mm}
+                  onChange={(e) => change("travel_y_mm", e.target.value)} />
+              </div>
+              <div>
+                <Label htmlFor="m-tz">Travel Z (mm)</Label>
+                <Input id="m-tz" type="number" min="0" value={form.travel_z_mm}
+                  onChange={(e) => change("travel_z_mm", e.target.value)} />
+              </div>
+              <div>
+                <Label htmlFor="m-rpm">Spindle Max RPM</Label>
+                <Input id="m-rpm" type="number" min="0" value={form.spindle_max_rpm}
+                  onChange={(e) => change("spindle_max_rpm", e.target.value)} />
+              </div>
+              <div>
+                <Label htmlFor="m-tdia">Turning Dia (mm)</Label>
+                <Input id="m-tdia" type="number" min="0" value={form.turning_dia_mm}
+                  onChange={(e) => change("turning_dia_mm", e.target.value)} placeholder="lathe swing (0 if mill)" />
+              </div>
+              <div>
+                <Label htmlFor="m-tlen">Turning Length (mm)</Label>
+                <Input id="m-tlen" type="number" min="0" value={form.turning_length_mm}
+                  onChange={(e) => change("turning_length_mm", e.target.value)} placeholder="between centers" />
+              </div>
+              <div>
+                <Label htmlFor="m-rapid">Rapid Feed (mm/min)</Label>
+                <Input id="m-rapid" type="number" min="0" value={form.rapid_feed_mm_min}
+                  onChange={(e) => change("rapid_feed_mm_min", e.target.value)} />
+              </div>
+              <div className="col-span-2">
+                <Label htmlFor="m-rotary">Rotary / Indexed Axis Details</Label>
+                <Input id="m-rotary" value={form.rotary_axis} onChange={(e) => change("rotary_axis", e.target.value)}
+                  placeholder="e.g. A-axis trunnion table, 300mm dia, ±110°  (leave blank if none)" />
+              </div>
+
               <div className="col-span-2">
                 <Label htmlFor="m-notes">Notes</Label>
                 <Textarea id="m-notes" rows={2} value={form.notes}
