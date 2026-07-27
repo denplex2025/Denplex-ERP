@@ -117,15 +117,26 @@ def _detect_holes(shape) -> List[dict]:
 def _suggest_axes(shape) -> dict:
     """Heuristic axis-requirement classifier: groups planar-face normals and cylindrical-face axis
     directions into distinct orientations (opposite-facing normals count as the SAME orientation,
-    since a plain 3-axis mill reaches both — just from two setups/flips). The number of distinct
-    orientations then maps to a suggested axis count:
-      1 orientation  -> 3-axis (flat/prismatic part; a second flip/setup covers the back side)
-      2 orientations -> 4-axis (a single rotary/indexed move reaches the second orientation —
-                        this is exactly the case a "4+1" machine like a trunnion-table VMC covers)
-      3+ orientations or non-rotary-reducible compound angles -> 5-axis-simultaneous recommended
+    since a plain 3-axis mill reaches both — just from two setups/flips).
+
+    The key distinction is NOT "how many distinct orientations" but "how many are OBLIQUE (not
+    aligned to any single principal X/Y/Z axis)". A plain prismatic part (a box, an L-bracket, a
+    plate with side holes) has faces/holes along up to three PRINCIPAL directions (X, Y, Z) — that
+    is completely normal 3-axis-with-flips work, never a reason for 4 or 5 axis. Only when a face or
+    hole axis is tilted at a compound angle (not itself X, Y, or Z) does a rotary/tilting axis
+    actually help:
+      0 oblique orientations                  -> 3-axis (prismatic; extra setups/flips cover any
+                                                  number of the 3 principal directions)
+      1 oblique orientation (or several oblique
+        orientations that share one common axis) -> 4-axis (one rotary/indexed move reaches it —
+                                                  exactly the case a "4+1" trunnion-table VMC covers)
+      2+ independent oblique orientations       -> 5-axis-simultaneous recommended (not reducible
+                                                  to a single rotary indexer)
     This is intentionally a suggestion with visible reasoning, not a hard rule — see README/UI:
     the shop always confirms and can pick any machine regardless of what's suggested here.
     """
+    PRINCIPAL = [(1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)]
+
     def _canon_dir(vec):
         n = vec.Length
         if n < 1e-6:
@@ -138,7 +149,10 @@ def _suggest_axes(shape) -> dict:
                 if c < 0:
                     x, y, z = -x, -y, -z
                 break
-        return (round(x, 2), round(y, 2), round(z, 2))
+        return (round(x, 3), round(y, 3), round(z, 3))
+
+    def _is_principal(d):
+        return any(abs(sum(a * b for a, b in zip(d, p))) > 0.999 for p in PRINCIPAL)
 
     dir_counts = Counter()
     for f in shape.Faces:
@@ -159,33 +173,42 @@ def _suggest_axes(shape) -> dict:
     # Ignore orientations backed by only a single face — usually a stray chamfer/fillet, not a
     # real machined feature direction, so they'd otherwise inflate the suggestion unnecessarily.
     significant = [d for d, c in dir_counts.items() if c >= 2] or list(dir_counts.keys())
-    n_axes = len(significant)
+    principal_dirs = [d for d in significant if _is_principal(d)]
+    oblique_dirs = [d for d in significant if not _is_principal(d)]
 
     reasoning = []
-    if n_axes <= 1:
+    if not oblique_dirs:
         suggested = 3
+        n_principal = len(principal_dirs)
         reasoning.append(
-            "All detected faces share a single feature-axis orientation — a 3-axis mill reaches "
-            "every feature (a second setup/flip only if features exist on the opposite face)."
+            f"All detected faces/holes are axis-aligned ({n_principal} principal direction"
+            f"{'s' if n_principal != 1 else ''} — a prismatic part) — 3-axis milling reaches every "
+            "feature (extra setups/flips as needed for faces on different sides)."
         )
-    elif n_axes == 2:
-        d1, d2 = significant[0], significant[1]
-        dot = max(-1.0, min(1.0, sum(a * b for a, b in zip(d1, d2))))
-        angle_deg = math.degrees(math.acos(dot))
+    elif len(oblique_dirs) == 1 or all(
+        abs(sum(a * b for a, b in zip(oblique_dirs[0], d))) > 0.999 for d in oblique_dirs
+    ):
         suggested = 4
+        ref_dir = oblique_dirs[0]
+        # angle vs the closest principal axis, just for a concrete, readable number in the reasoning
+        closest = max(abs(sum(a * b for a, b in zip(ref_dir, p))) for p in PRINCIPAL)
+        angle_deg = math.degrees(math.acos(max(-1.0, min(1.0, closest))))
         reasoning.append(
-            f"Detected 2 distinct feature-axis orientations (~{angle_deg:.0f} degrees apart) — "
-            "reachable with one rotary/indexed move, so a 4-axis machine (including a '4+1' "
-            "4-simultaneous + indexed-5th configuration) should cover this part in a single setup."
+            f"Detected a compound-angle feature orientation (~{angle_deg:.0f} degrees off the "
+            "nearest principal axis) alongside the part's flat/prismatic faces — reachable with "
+            "one rotary/indexed move, so a 4-axis machine (including a '4+1' 4-simultaneous + "
+            "indexed-5th configuration) should cover this part in a single setup."
         )
     else:
         suggested = 5
         reasoning.append(
-            f"Detected {n_axes} distinct feature-axis orientations — not reducible to a single "
-            "rotary indexer, so true 5-axis-simultaneous machining (or several manual setups on a "
-            "3/4-axis machine) is recommended for continuous-orientation access to all features."
+            f"Detected {len(oblique_dirs)} independent compound-angle feature orientations — not "
+            "reducible to a single rotary indexer, so true 5-axis-simultaneous machining (or "
+            "several manual setups on a 3/4-axis machine) is recommended for continuous-orientation "
+            "access to all features."
         )
 
+    n_axes = len(significant)
     return {"suggested_axes": suggested, "distinct_axis_count": n_axes, "reasoning": reasoning}
 
 
