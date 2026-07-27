@@ -68,6 +68,7 @@ import BankCash from "./pages/BankCash";
 import FinancialStatements from "./pages/FinancialStatements";
 import FixtureConcept from "./pages/FixtureConcept";
 import CADViewer from "./pages/CADViewer";
+import MachiningQuote from "./pages/MachiningQuote";
 import WorkerLayout from "./pages/worker/WorkerLayout";
 import WorkerHome from "./pages/worker/WorkerHome";
 import WorkerProduction from "./pages/worker/WorkerProduction";
@@ -133,6 +134,7 @@ function App() {
               <Route path="part-library" element={<PartLibrary />} />
               <Route path="fixture-concept" element={<FixtureConcept />} />
               <Route path="cad-viewer" element={<CADViewer />} />
+              <Route path="machining-quote" element={<MachiningQuote />} />
               <Route path="machines" element={<Machines />} />
               <Route path="planning" element={<Planning />} />
               <Route path="costing" element={<Costing />} />
