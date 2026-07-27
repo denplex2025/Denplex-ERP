@@ -1148,6 +1148,7 @@ def validate_inspection(doc):
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 ANTHROPIC_BASE_URL = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
 CAD_SERVICE_URL = os.environ.get("CAD_SERVICE_URL", "").rstrip("/")   # optional STEP geometry microservice
+MACHINING_SERVICE_URL = os.environ.get("MACHINING_SERVICE_URL", "").rstrip("/")   # optional FreeCAD-based machining-quote microservice
 QC_VISION_MODEL = os.environ.get("QC_VISION_MODEL", "claude-sonnet-4-5")
 
 QC_EXTRACT_PROMPT = (
@@ -2926,10 +2927,21 @@ class Machine(BaseModel):
     machine_type: Optional[str] = ""        # CNC Turning, VMC, Surface Grinder, Bandsaw ...
     group: Optional[str] = ""               # work-center group (for future capacity planning)
     status: Literal["available", "running", "maintenance", "idle"] = "available"
-    hourly_rate: float = 0                  # machine-hour cost (for future job costing)
+    hourly_rate: float = 0                  # machine-hour cost (used as default $/hr for machining quotes)
     location: Optional[str] = ""
     is_active: bool = True
     notes: Optional[str] = ""
+    # ---- Machining-quote fields (added for STEP-upload cycle-time/cost estimator) ----
+    axes: int = 3                           # 3, 4 (indexed 4th), or 5 (indexed 5th) — indexed positioning, not simultaneous
+    controller_type: Optional[str] = ""     # Fanuc, Siemens, Haas, Mach3, LinuxCNC, GRBL, Heidenhain ...
+    travel_x_mm: float = 0                  # mill work envelope; 0 = not set
+    travel_y_mm: float = 0
+    travel_z_mm: float = 0
+    turning_dia_mm: float = 0               # lathe swing/turning diameter; 0 = not a lathe
+    turning_length_mm: float = 0            # lathe between-centers length
+    rotary_axis: Optional[str] = ""         # e.g. "A-axis trunnion table, 300mm dia, +-110deg" or "" if none
+    spindle_max_rpm: float = 0
+    rapid_feed_mm_min: float = 10000        # rapid traverse rate, used for non-cutting move time in cycle estimate
     created_at: str = Field(default_factory=now_iso)
 
 @api.post("/machines")
@@ -2954,6 +2966,27 @@ async def update_machine(mid: str, m: Machine, user=Depends(get_current_user)):
 async def del_machine(mid: str, user=Depends(require_roles("admin", "manager"))):
     await db.machines.delete_one({"id": mid})
     return {"ok": True}
+
+# ---------------- Machining-quote cutting parameters (per material) ----------------
+# Conservative carbide-tooling assumptions for a small job shop; NOT a substitute for real
+# feeds/speeds tuning per job. Deliberately kept in the main backend (not the machining-service
+# microservice) so the numbers can be tuned without touching/redeploying the FreeCAD service.
+# vc = cutting speed (surface speed, m/min). fz = feed per tooth (mm, milling).
+# f_drill / f_turn = feed per revolution (mm, drilling / turning). density = g/cm3 (for weight est.).
+MATERIAL_CUTTING_PARAMS: Dict[str, Dict[str, float]] = {
+    "MS":         {"vc_mill": 90,  "vc_drill": 25, "vc_turn": 110, "fz_mill": 0.08, "f_drill": 0.15, "f_turn": 0.20, "density": 7.85},
+    "Mild Steel": {"vc_mill": 90,  "vc_drill": 25, "vc_turn": 110, "fz_mill": 0.08, "f_drill": 0.15, "f_turn": 0.20, "density": 7.85},
+    "SS304":      {"vc_mill": 60,  "vc_drill": 18, "vc_turn": 80,  "fz_mill": 0.06, "f_drill": 0.12, "f_turn": 0.15, "density": 8.00},
+    "SS316":      {"vc_mill": 55,  "vc_drill": 15, "vc_turn": 70,  "fz_mill": 0.06, "f_drill": 0.10, "f_turn": 0.13, "density": 8.00},
+    "Aluminium":  {"vc_mill": 300, "vc_drill": 90, "vc_turn": 350, "fz_mill": 0.12, "f_drill": 0.20, "f_turn": 0.25, "density": 2.70},
+    "Brass":      {"vc_mill": 200, "vc_drill": 60, "vc_turn": 250, "fz_mill": 0.10, "f_drill": 0.18, "f_turn": 0.22, "density": 8.50},
+    "Gun Metal":  {"vc_mill": 150, "vc_drill": 45, "vc_turn": 180, "fz_mill": 0.10, "f_drill": 0.15, "f_turn": 0.20, "density": 8.72},
+    "Nylon":      {"vc_mill": 250, "vc_drill": 80, "vc_turn": 300, "fz_mill": 0.15, "f_drill": 0.20, "f_turn": 0.25, "density": 1.15},
+    "Teflon":     {"vc_mill": 180, "vc_drill": 60, "vc_turn": 220, "fz_mill": 0.12, "f_drill": 0.18, "f_turn": 0.22, "density": 2.20},
+    "Delrin":     {"vc_mill": 250, "vc_drill": 80, "vc_turn": 300, "fz_mill": 0.15, "f_drill": 0.20, "f_turn": 0.25, "density": 1.41},
+    "Titanium":   {"vc_mill": 35,  "vc_drill": 12, "vc_turn": 45,  "fz_mill": 0.05, "f_drill": 0.08, "f_turn": 0.10, "density": 4.43},
+}
+MATERIAL_TYPES = list(MATERIAL_CUTTING_PARAMS.keys())
 
 
 # ---------------- Work Order Operations (MES routing) ----------------
@@ -9242,6 +9275,90 @@ async def cad_glb(inp: CadGlbIn, user=Depends(get_current_user)):
         raise HTTPException(502, f"CAD service error {rr.status_code}: {rr.text[:200]}")
     data = rr.json()
     return {"mesh_base64": data.get("mesh_base64", ""), "mesh_format": data.get("mesh_format", "stl"), "geometry": data.get("geometry", {})}
+
+# ---------------- Machining quote (STEP upload -> geometry-based cost/time estimate) ----------------
+class MachiningQuoteIn(BaseModel):
+    step_base64: str
+    machine_id: str
+    material: str                    # key into MATERIAL_CUTTING_PARAMS
+    part_name: Optional[str] = ""
+    hourly_rate: Optional[float] = None    # overrides the machine's own hourly_rate if provided
+    stock_margin_mm: float = 3
+    mill_diameter_mm: float = 10
+    flutes: int = 4
+
+@api.get("/machining/materials")
+async def machining_materials(user=Depends(get_current_user)):
+    """Material options for the Machining Quote picker, mirrors the vocabulary already used across
+    ISO registers (MS/Aluminium/SS304/SS316/etc.) plus a few common additions (Brass, Titanium...)."""
+    return {"materials": MATERIAL_TYPES}
+
+@api.post("/machining/quote")
+async def machining_quote(inp: MachiningQuoteIn, user=Depends(get_current_user)):
+    if not MACHINING_SERVICE_URL:
+        raise HTTPException(503, "Machining quote service not configured. Set MACHINING_SERVICE_URL in the backend environment.")
+    if not inp.step_base64:
+        raise HTTPException(400, "No STEP file provided")
+
+    machine = await db.machines.find_one({"id": inp.machine_id}, {"_id": 0})
+    if not machine:
+        raise HTTPException(404, "Machine not found")
+
+    mat_params = MATERIAL_CUTTING_PARAMS.get(inp.material)
+    if not mat_params:
+        raise HTTPException(400, f"Unknown material '{inp.material}'. Options: {', '.join(MATERIAL_TYPES)}")
+
+    hourly_rate = inp.hourly_rate if inp.hourly_rate is not None else machine.get("hourly_rate", 0)
+
+    payload = {
+        "step_base64": inp.step_base64,
+        "stock_margin_mm": inp.stock_margin_mm,
+        "machine": {
+            "axes": machine.get("axes", 3),
+            "travel_x_mm": machine.get("travel_x_mm", 0),
+            "travel_y_mm": machine.get("travel_y_mm", 0),
+            "travel_z_mm": machine.get("travel_z_mm", 0),
+            "turning_dia_mm": machine.get("turning_dia_mm", 0),
+            "turning_length_mm": machine.get("turning_length_mm", 0),
+            "rapid_feed_mm_min": machine.get("rapid_feed_mm_min", 10000),
+        },
+        "material": {
+            "vc_mill": mat_params["vc_mill"], "vc_drill": mat_params["vc_drill"],
+            "fz_mill": mat_params["fz_mill"], "f_drill": mat_params["f_drill"],
+            "density": mat_params["density"],
+        },
+        "tool": {"mill_diameter_mm": inp.mill_diameter_mm, "flutes": inp.flutes},
+        "hourly_rate": hourly_rate,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=180) as cx:
+            rr = await cx.post(f"{MACHINING_SERVICE_URL}/quote", json=payload)
+    except Exception as e:
+        raise HTTPException(502, f"Could not reach the machining service: {e}")
+    if rr.status_code >= 400:
+        raise HTTPException(502, f"Machining service error {rr.status_code}: {rr.text[:300]}")
+    result = rr.json()
+
+    # Save a lightweight history record (not a full job/quote link yet — just enough to review past estimates).
+    record = {
+        "id": new_id(), "part_name": inp.part_name or "", "machine_id": inp.machine_id,
+        "machine_name": machine.get("name", ""), "material": inp.material, "hourly_rate": hourly_rate,
+        "geometry": result.get("geometry", {}), "time_breakdown_min": result.get("time_breakdown_min", {}),
+        "cost": result.get("cost", 0), "warnings": result.get("warnings", []),
+        "created_by": (user.get("name") or user.get("email", "")) if isinstance(user, dict) else "",
+        "created_at": now_iso(),
+    }
+    try:
+        await db.machining_quotes.insert_one(dict(record))
+    except Exception:
+        pass
+
+    return result
+
+@api.get("/machining/quotes")
+async def list_machining_quotes(user=Depends(get_current_user)):
+    return await list_collection(db.machining_quotes)
 
 SKETCH_SYSTEM = (
     "You are a jig & fixture designer. Produce a CLEAN, LABELLED pseudo-3D ISOMETRIC concept sketch of the "
