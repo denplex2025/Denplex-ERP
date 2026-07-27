@@ -2932,14 +2932,22 @@ class Machine(BaseModel):
     is_active: bool = True
     notes: Optional[str] = ""
     # ---- Machining-quote fields (added for STEP-upload cycle-time/cost estimator) ----
-    axes: int = 3                           # 3, 4 (indexed 4th), or 5 (indexed 5th) — indexed positioning, not simultaneous
-    controller_type: Optional[str] = ""     # Fanuc, Siemens, Haas, Mach3, LinuxCNC, GRBL, Heidenhain ...
+    axes: int = 3                           # TOTAL physical axes: 3, 4, or 5 (indexed positioning count, not simultaneous)
+    simultaneous_axes: int = 3              # how many of those axes interpolate together in one continuous cut.
+                                             # axes=5, simultaneous_axes=4 = a "4+1" machine (4-axis simultaneous +
+                                             # 5th-axis indexed-only, e.g. COSMOS VMC 1370 w/ AUTOCAM rotary table).
+                                             # axes==simultaneous_axes = true N-axis-simultaneous.
+    controller_type: Optional[str] = ""     # Fanuc, Siemens, Haas, Mach3, LinuxCNC, GRBL, Heidenhain, Mitsubishi ...
     travel_x_mm: float = 0                  # mill work envelope; 0 = not set
     travel_y_mm: float = 0
     travel_z_mm: float = 0
     turning_dia_mm: float = 0               # lathe swing/turning diameter; 0 = not a lathe
     turning_length_mm: float = 0            # lathe between-centers length
-    rotary_axis: Optional[str] = ""         # e.g. "A-axis trunnion table, 300mm dia, +-110deg" or "" if none
+    rotary_axis: Optional[str] = ""         # free-text notes, e.g. "trunnion table" or "" if none
+    rotary_table_model: Optional[str] = ""  # e.g. "AUTOCAM ROTARY 250 ACR"
+    rotary_table_dia_mm: float = 0          # rotary/indexing table diameter, 0 = not set
+    rotary_angle_min_deg: float = 0         # e.g. -30
+    rotary_angle_max_deg: float = 0         # e.g. 110
     spindle_max_rpm: float = 0
     rapid_feed_mm_min: float = 10000        # rapid traverse rate, used for non-cutting move time in cycle estimate
     created_at: str = Field(default_factory=now_iso)
@@ -9287,6 +9295,31 @@ class MachiningQuoteIn(BaseModel):
     mill_diameter_mm: float = 10
     flutes: int = 4
 
+def _axis_capability_note(suggested_axes: int, m_name: str, m_axes: int, m_simult: int) -> Optional[str]:
+    """Compare the machining-service's geometry-based axis suggestion against the SELECTED machine's
+    actual capability and return a non-blocking warning string if there's a mismatch, or None if the
+    machine covers it. Never used to auto-pick or restrict the machine — see /machining/quote below,
+    which always quotes using the machine the shop actually chose (per user's 'auto-suggest, user
+    confirms' requirement: this only surfaces a suggestion, it never overrides the manual selection)."""
+    if not suggested_axes or suggested_axes <= 3:
+        return None
+    if suggested_axes == 4:
+        if m_axes < 4:
+            return (f"Part geometry suggests a 4th-axis (indexed) rotary move would reach all features in one "
+                     f"setup, but '{m_name}' is {m_axes}-axis — expect an extra manual fixturing/setup instead.")
+        return None
+    # suggested_axes == 5
+    if m_simult >= 5:
+        return None
+    if m_axes >= 5:
+        return (f"Part geometry suggests compound/freeform orientations needing true 5-axis-simultaneous "
+                 f"machining, but '{m_name}'s 5th axis is indexed-only ({m_simult}-axis simultaneous, e.g. a "
+                 f"'4+1' configuration) — plan on multiple indexed positioning passes rather than continuous "
+                 f"5-axis cutting.")
+    return (f"Part geometry suggests compound/freeform orientations needing 5-axis capability, but '{m_name}' "
+             f"is only {m_axes}-axis — expect multiple manual setups.")
+
+
 @api.get("/machining/materials")
 async def machining_materials(user=Depends(get_current_user)):
     """Material options for the Machining Quote picker, mirrors the vocabulary already used across
@@ -9315,6 +9348,7 @@ async def machining_quote(inp: MachiningQuoteIn, user=Depends(get_current_user))
         "stock_margin_mm": inp.stock_margin_mm,
         "machine": {
             "axes": machine.get("axes", 3),
+            "simultaneous_axes": machine.get("simultaneous_axes") or machine.get("axes", 3),
             "travel_x_mm": machine.get("travel_x_mm", 0),
             "travel_y_mm": machine.get("travel_y_mm", 0),
             "travel_z_mm": machine.get("travel_z_mm", 0),
@@ -9340,12 +9374,24 @@ async def machining_quote(inp: MachiningQuoteIn, user=Depends(get_current_user))
         raise HTTPException(502, f"Machining service error {rr.status_code}: {rr.text[:300]}")
     result = rr.json()
 
+    # Non-blocking suggestion: compare the machining-service's geometry-based axis suggestion
+    # against the SELECTED machine's actual capability. This only ever appends a warning — the
+    # quote itself is always computed against the machine the shop chose, never auto-switched.
+    axis_analysis = result.get("axis_analysis") or {}
+    note = _axis_capability_note(
+        axis_analysis.get("suggested_axes"), machine.get("name", "selected machine"),
+        machine.get("axes", 3), machine.get("simultaneous_axes") or machine.get("axes", 3),
+    )
+    if note:
+        result.setdefault("warnings", []).append(note)
+
     # Save a lightweight history record (not a full job/quote link yet — just enough to review past estimates).
     record = {
         "id": new_id(), "part_name": inp.part_name or "", "machine_id": inp.machine_id,
         "machine_name": machine.get("name", ""), "material": inp.material, "hourly_rate": hourly_rate,
         "geometry": result.get("geometry", {}), "time_breakdown_min": result.get("time_breakdown_min", {}),
         "cost": result.get("cost", 0), "warnings": result.get("warnings", []),
+        "axis_analysis": axis_analysis,
         "created_by": (user.get("name") or user.get("email", "")) if isinstance(user, dict) else "",
         "created_at": now_iso(),
     }
