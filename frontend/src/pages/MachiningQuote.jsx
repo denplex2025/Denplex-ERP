@@ -83,11 +83,18 @@ export default function MachiningQuote() {
               <select value={machineId} onChange={(e) => setMachineId(e.target.value)}
                 className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm bg-white h-10">
                 <option value="">— Select machine —</option>
-                {machines.map((m) => (
-                  <option key={m._id || m.id} value={m._id || m.id}>
-                    {m.name} {m.axes ? `(${m.axes}-axis)` : ""} {m.code ? `· ${m.code}` : ""}
-                  </option>
-                ))}
+                {machines.map((m) => {
+                  const axesLabel = m.axes
+                    ? (m.simultaneous_axes && m.simultaneous_axes < m.axes
+                        ? `(${m.simultaneous_axes}+${m.axes - m.simultaneous_axes})`
+                        : `(${m.axes}-axis)`)
+                    : "";
+                  return (
+                    <option key={m._id || m.id} value={m._id || m.id}>
+                      {m.name} {axesLabel} {m.code ? `· ${m.code}` : ""}
+                    </option>
+                  );
+                })}
               </select>
               {machines.length === 0 && (
                 <p className="text-xs text-amber-600 mt-1">No machines set up yet — add one under Production → Machines first.</p>
@@ -148,6 +155,25 @@ export default function MachiningQuote() {
                     </div>
                   </div>
                 </div>
+
+                {result.axis_analysis?.suggested_axes && (
+                  <div>
+                    <div className="text-xs uppercase tracking-wider text-slate-500 mb-1">Suggested machining strategy</div>
+                    <div className="bg-blue-50 border border-blue-200 rounded-md p-3">
+                      <div className="text-sm font-semibold text-blue-800 mb-1">
+                        {result.axis_analysis.suggested_axes}-axis
+                        {result.axis_analysis.suggested_axes === 4 ? " (indexed 4th — e.g. a 4+1 machine)" : ""}
+                        {result.axis_analysis.suggested_axes >= 5 ? " (simultaneous)" : ""}
+                      </div>
+                      <ul className="text-xs text-blue-700 list-disc pl-4 space-y-0.5">
+                        {(result.axis_analysis.reasoning || []).map((r, i) => (<li key={i}>{r}</li>))}
+                      </ul>
+                      <div className="text-[11px] text-blue-600 mt-1.5">
+                        Suggestion only, based on part geometry — you already picked the machine above; nothing is changed automatically.
+                      </div>
+                    </div>
+                  </div>
+                )}
 
                 {result.holes?.length > 0 && (
                   <div>

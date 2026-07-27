@@ -18,8 +18,22 @@ const CONTROLLER_TYPES = ["Fanuc", "Siemens", "Haas", "Mach3", "LinuxCNC", "GRBL
 const emptyForm = {
   name: "", machine_type: "", group: "", status: "available",
   hourly_rate: "", location: "", notes: "",
-  axes: "3", controller_type: "", travel_x_mm: "", travel_y_mm: "", travel_z_mm: "",
-  turning_dia_mm: "", turning_length_mm: "", rotary_axis: "", spindle_max_rpm: "", rapid_feed_mm_min: "10000",
+  axes: "3", simultaneous_axes: "3", controller_type: "", travel_x_mm: "", travel_y_mm: "", travel_z_mm: "",
+  turning_dia_mm: "", turning_length_mm: "", rotary_axis: "",
+  rotary_table_model: "", rotary_table_dia_mm: "", rotary_angle_min_deg: "", rotary_angle_max_deg: "",
+  spindle_max_rpm: "", rapid_feed_mm_min: "10000",
+};
+
+// For a given total axis count, which "simultaneous" values are possible, and how to label each
+// (surfaces the "4+1" terminology the shop actually uses, e.g. COSMOS VMC 1370 + AUTOCAM rotary).
+const simulOptionsFor = (totalAxes) => {
+  const opts = [];
+  for (let i = 3; i <= totalAxes; i++) opts.push(i);
+  return opts;
+};
+const simulLabel = (simul, totalAxes) => {
+  if (simul >= totalAxes) return `${totalAxes} (true ${totalAxes}-axis simultaneous)`;
+  return `${simul} (${simul}+${totalAxes - simul} — ${simul}-axis simultaneous, ${totalAxes - simul} indexed)`;
 };
 
 export default function Machines() {
@@ -51,10 +65,14 @@ export default function Machines() {
       name: m.name || "", machine_type: m.machine_type || "", group: m.group || "",
       status: m.status || "available", hourly_rate: m.hourly_rate ?? "",
       location: m.location || "", notes: m.notes || "",
-      axes: String(m.axes || 3), controller_type: m.controller_type || "",
+      axes: String(m.axes || 3), simultaneous_axes: String(m.simultaneous_axes || m.axes || 3),
+      controller_type: m.controller_type || "",
       travel_x_mm: m.travel_x_mm || "", travel_y_mm: m.travel_y_mm || "", travel_z_mm: m.travel_z_mm || "",
       turning_dia_mm: m.turning_dia_mm || "", turning_length_mm: m.turning_length_mm || "",
-      rotary_axis: m.rotary_axis || "", spindle_max_rpm: m.spindle_max_rpm || "",
+      rotary_axis: m.rotary_axis || "",
+      rotary_table_model: m.rotary_table_model || "", rotary_table_dia_mm: m.rotary_table_dia_mm || "",
+      rotary_angle_min_deg: m.rotary_angle_min_deg ?? "", rotary_angle_max_deg: m.rotary_angle_max_deg ?? "",
+      spindle_max_rpm: m.spindle_max_rpm || "",
       rapid_feed_mm_min: m.rapid_feed_mm_min || "10000",
     });
     setError(""); setOpen(true);
@@ -75,6 +93,7 @@ export default function Machines() {
         location: form.location.trim(),
         notes: form.notes.trim(),
         axes: parseInt(form.axes) || 3,
+        simultaneous_axes: Math.min(parseInt(form.simultaneous_axes) || 3, parseInt(form.axes) || 3),
         controller_type: form.controller_type.trim(),
         travel_x_mm: parseFloat(form.travel_x_mm) || 0,
         travel_y_mm: parseFloat(form.travel_y_mm) || 0,
@@ -82,6 +101,10 @@ export default function Machines() {
         turning_dia_mm: parseFloat(form.turning_dia_mm) || 0,
         turning_length_mm: parseFloat(form.turning_length_mm) || 0,
         rotary_axis: form.rotary_axis.trim(),
+        rotary_table_model: form.rotary_table_model.trim(),
+        rotary_table_dia_mm: parseFloat(form.rotary_table_dia_mm) || 0,
+        rotary_angle_min_deg: form.rotary_angle_min_deg === "" ? 0 : parseFloat(form.rotary_angle_min_deg) || 0,
+        rotary_angle_max_deg: form.rotary_angle_max_deg === "" ? 0 : parseFloat(form.rotary_angle_max_deg) || 0,
         spindle_max_rpm: parseFloat(form.spindle_max_rpm) || 0,
         rapid_feed_mm_min: parseFloat(form.rapid_feed_mm_min) || 10000,
       };
@@ -144,7 +167,13 @@ export default function Machines() {
                       <td className="px-4 py-2">{m.name}</td>
                       <td className="px-4 py-2">{m.machine_type || "—"}</td>
                       <td className="px-4 py-2">{m.group || "—"}</td>
-                      <td className="px-4 py-2">{m.axes ? `${m.axes}-axis` : "—"}</td>
+                      <td className="px-4 py-2">
+                        {m.axes
+                          ? (m.simultaneous_axes && m.simultaneous_axes < m.axes
+                              ? `${m.simultaneous_axes}+${m.axes - m.simultaneous_axes}`
+                              : `${m.axes}-axis`)
+                          : "—"}
+                      </td>
                       <td className="px-4 py-2">{m.controller_type || "—"}</td>
                       <td className="px-4 py-2 text-right">{m.hourly_rate ? m.hourly_rate : "—"}</td>
                       <td className="px-4 py-2"><StatusBadge status={m.status || "available"} /></td>
@@ -216,12 +245,29 @@ export default function Machines() {
                 Machining specs (for STEP quoting)
               </div>
               <div>
-                <Label htmlFor="m-axes">Axes</Label>
-                <select id="m-axes" value={form.axes} onChange={(e) => change("axes", e.target.value)}
-                  className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm bg-white h-10">
+                <Label htmlFor="m-axes">Axes (total)</Label>
+                <select id="m-axes" value={form.axes} onChange={(e) => {
+                  const total = e.target.value;
+                  change("axes", total);
+                  if ((parseInt(form.simultaneous_axes) || 3) > (parseInt(total) || 3)) change("simultaneous_axes", total);
+                }} className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm bg-white h-10">
                   {AXES_OPTIONS.map((a) => (<option key={a} value={a}>{a}-axis{a > 3 ? " (indexed)" : ""}</option>))}
                 </select>
               </div>
+              {parseInt(form.axes) > 3 && (
+                <div>
+                  <Label htmlFor="m-simul">Simultaneous axes</Label>
+                  <select id="m-simul" value={form.simultaneous_axes} onChange={(e) => change("simultaneous_axes", e.target.value)}
+                    className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm bg-white h-10">
+                    {simulOptionsFor(parseInt(form.axes) || 3).map((s) => (
+                      <option key={s} value={s}>{simulLabel(s, parseInt(form.axes) || 3)}</option>
+                    ))}
+                  </select>
+                  <p className="text-[11px] text-slate-400 mt-1">
+                    e.g. COSMOS VMC 1370 + AUTOCAM rotary = 5 total, 4 simultaneous ("4+1").
+                  </p>
+                </div>
+              )}
               <div>
                 <Label htmlFor="m-controller">Controller Type</Label>
                 <select id="m-controller" value={form.controller_type} onChange={(e) => change("controller_type", e.target.value)}
@@ -265,10 +311,37 @@ export default function Machines() {
                 <Input id="m-rapid" type="number" min="0" value={form.rapid_feed_mm_min}
                   onChange={(e) => change("rapid_feed_mm_min", e.target.value)} />
               </div>
+              {parseInt(form.axes) > 3 && (
+                <>
+                  <div className="col-span-2">
+                    <Label htmlFor="m-rotary-model">Rotary/Indexing Table Model</Label>
+                    <Input id="m-rotary-model" value={form.rotary_table_model}
+                      onChange={(e) => change("rotary_table_model", e.target.value)}
+                      placeholder="e.g. AUTOCAM ROTARY 250 ACR" />
+                  </div>
+                  <div>
+                    <Label htmlFor="m-rotary-dia">Table Diameter (mm)</Label>
+                    <Input id="m-rotary-dia" type="number" min="0" value={form.rotary_table_dia_mm}
+                      onChange={(e) => change("rotary_table_dia_mm", e.target.value)} placeholder="250" />
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <Label htmlFor="m-rotary-min">Angle Min (deg)</Label>
+                      <Input id="m-rotary-min" type="number" value={form.rotary_angle_min_deg}
+                        onChange={(e) => change("rotary_angle_min_deg", e.target.value)} placeholder="-30" />
+                    </div>
+                    <div>
+                      <Label htmlFor="m-rotary-max">Angle Max (deg)</Label>
+                      <Input id="m-rotary-max" type="number" value={form.rotary_angle_max_deg}
+                        onChange={(e) => change("rotary_angle_max_deg", e.target.value)} placeholder="110" />
+                    </div>
+                  </div>
+                </>
+              )}
               <div className="col-span-2">
-                <Label htmlFor="m-rotary">Rotary / Indexed Axis Details</Label>
+                <Label htmlFor="m-rotary">Rotary Axis Notes (optional)</Label>
                 <Input id="m-rotary" value={form.rotary_axis} onChange={(e) => change("rotary_axis", e.target.value)}
-                  placeholder="e.g. A-axis trunnion table, 300mm dia, ±110°  (leave blank if none)" />
+                  placeholder="any extra detail not captured above (leave blank if none)" />
               </div>
 
               <div className="col-span-2">
