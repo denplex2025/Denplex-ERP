@@ -34,6 +34,9 @@ app = FastAPI(title="Denplex Machining-Quote Service", version="1.0")
 # ---------------- Request/response models ----------------
 class MachineIn(BaseModel):
     axes: int = 3
+    simultaneous_axes: int = 3   # not yet used in the time/cost formulas below; kept in sync with the
+                                  # ERP's Machine master (e.g. a "4+1" machine: axes=5, simultaneous_axes=4)
+                                  # for when a future cycle-time refinement wants it.
     travel_x_mm: float = 0
     travel_y_mm: float = 0
     travel_z_mm: float = 0
@@ -111,6 +114,81 @@ def _detect_holes(shape) -> List[dict]:
     return holes
 
 
+def _suggest_axes(shape) -> dict:
+    """Heuristic axis-requirement classifier: groups planar-face normals and cylindrical-face axis
+    directions into distinct orientations (opposite-facing normals count as the SAME orientation,
+    since a plain 3-axis mill reaches both — just from two setups/flips). The number of distinct
+    orientations then maps to a suggested axis count:
+      1 orientation  -> 3-axis (flat/prismatic part; a second flip/setup covers the back side)
+      2 orientations -> 4-axis (a single rotary/indexed move reaches the second orientation —
+                        this is exactly the case a "4+1" machine like a trunnion-table VMC covers)
+      3+ orientations or non-rotary-reducible compound angles -> 5-axis-simultaneous recommended
+    This is intentionally a suggestion with visible reasoning, not a hard rule — see README/UI:
+    the shop always confirms and can pick any machine regardless of what's suggested here.
+    """
+    def _canon_dir(vec):
+        n = vec.Length
+        if n < 1e-6:
+            return None
+        x, y, z = vec.x / n, vec.y / n, vec.z / n
+        # Canonicalize sign so opposite-facing normals (e.g. top face vs bottom face) collapse to
+        # the same orientation key — a 3-axis mill reaches both with a single flip, not a rotary axis.
+        for c in (x, y, z):
+            if abs(c) > 1e-6:
+                if c < 0:
+                    x, y, z = -x, -y, -z
+                break
+        return (round(x, 2), round(y, 2), round(z, 2))
+
+    dir_counts = Counter()
+    for f in shape.Faces:
+        try:
+            surf = f.Surface
+            cname = surf.__class__.__name__
+            if cname == "Plane":
+                key = _canon_dir(surf.Axis)
+            elif cname == "Cylinder":
+                key = _canon_dir(surf.Axis)
+            else:
+                continue
+            if key:
+                dir_counts[key] += 1
+        except Exception:
+            continue
+
+    # Ignore orientations backed by only a single face — usually a stray chamfer/fillet, not a
+    # real machined feature direction, so they'd otherwise inflate the suggestion unnecessarily.
+    significant = [d for d, c in dir_counts.items() if c >= 2] or list(dir_counts.keys())
+    n_axes = len(significant)
+
+    reasoning = []
+    if n_axes <= 1:
+        suggested = 3
+        reasoning.append(
+            "All detected faces share a single feature-axis orientation — a 3-axis mill reaches "
+            "every feature (a second setup/flip only if features exist on the opposite face)."
+        )
+    elif n_axes == 2:
+        d1, d2 = significant[0], significant[1]
+        dot = max(-1.0, min(1.0, sum(a * b for a, b in zip(d1, d2))))
+        angle_deg = math.degrees(math.acos(dot))
+        suggested = 4
+        reasoning.append(
+            f"Detected 2 distinct feature-axis orientations (~{angle_deg:.0f} degrees apart) — "
+            "reachable with one rotary/indexed move, so a 4-axis machine (including a '4+1' "
+            "4-simultaneous + indexed-5th configuration) should cover this part in a single setup."
+        )
+    else:
+        suggested = 5
+        reasoning.append(
+            f"Detected {n_axes} distinct feature-axis orientations — not reducible to a single "
+            "rotary indexer, so true 5-axis-simultaneous machining (or several manual setups on a "
+            "3/4-axis machine) is recommended for continuous-orientation access to all features."
+        )
+
+    return {"suggested_axes": suggested, "distinct_axis_count": n_axes, "reasoning": reasoning}
+
+
 def _analyze(step_bytes: bytes) -> dict:
     # FreeCAD must be imported before Part: Part's Python types inherit from FreeCAD's own base
     # types (App::DocumentObject etc.), and importing Part first crashes with a hard segfault
@@ -135,7 +213,8 @@ def _analyze(step_bytes: bytes) -> dict:
         "surface_area_cm2": round(shape.Area / 100.0, 2),
     }
     holes = _detect_holes(shape)
-    return {"geometry": geometry, "holes": holes}
+    axis_analysis = _suggest_axes(shape)
+    return {"geometry": geometry, "holes": holes, "axis_analysis": axis_analysis}
 
 
 def _time_breakdown(geom: dict, holes: List[dict], inp: QuoteIn) -> dict:
@@ -250,4 +329,7 @@ def quote(inp: QuoteIn):
     except Exception as e:
         raise HTTPException(500, f"Geometry read OK but time/cost calculation failed: {e}")
 
-    return {"ok": True, "geometry": analysis["geometry"], "holes": analysis["holes"], **breakdown}
+    return {
+        "ok": True, "geometry": analysis["geometry"], "holes": analysis["holes"],
+        "axis_analysis": analysis["axis_analysis"], **breakdown,
+    }
