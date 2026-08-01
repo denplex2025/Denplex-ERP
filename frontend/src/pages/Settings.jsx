@@ -128,6 +128,23 @@ export default function Settings() {
               <Fld label="Address (single — fallback if no units below)"><Textarea rows={3} value={s.company_address || ""} onChange={e=>setF("company_address", e.target.value)} className="rounded-sm" /></Fld>
             </div>
 
+            <h3 className="font-display text-lg font-semibold mt-8 mb-4">Header logos</h3>
+            <p className="text-sm text-slate-600 mb-3">Size is clamped on the PDF automatically, so these can't distort or overflow the header no matter what you enter.</p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="grid grid-cols-2 gap-3">
+                <Fld label="Denplex logo width (mm, 10–35)"><Input type="number" min={10} max={35} step={0.5} value={s.denplex_logo_width_mm ?? 22} onChange={e=>setF("denplex_logo_width_mm", Number(e.target.value))} className="rounded-sm" /></Fld>
+                <Fld label="Denplex logo height (mm, 10–35)"><Input type="number" min={10} max={35} step={0.5} value={s.denplex_logo_height_mm ?? 18.9} onChange={e=>setF("denplex_logo_height_mm", Number(e.target.value))} className="rounded-sm" /></Fld>
+              </div>
+              <IsoLogoUpload
+                value={s.iso_logo_b64 || ""}
+                onChange={(v)=>setF("iso_logo_b64", v)}
+                width={s.iso_logo_width_mm ?? 18}
+                height={s.iso_logo_height_mm ?? 18}
+                onWidth={(v)=>setF("iso_logo_width_mm", v)}
+                onHeight={(v)=>setF("iso_logo_height_mm", v)}
+              />
+            </div>
+
             <h3 className="font-display text-lg font-semibold mt-8 mb-2">Manufacturing units</h3>
             <p className="text-sm text-slate-600 mb-3">Add each unit/factory. The PDF header will render every unit listed here. If empty, falls back to the single address above.</p>
             <UnitsEditor units={s.company_units || []} onChange={(arr)=>setF("company_units", arr)} />
@@ -586,6 +603,36 @@ function SignatoryUpload({ value, onChange }) {
   );
 }
 
+function IsoLogoUpload({ value, onChange, width, height, onWidth, onHeight }) {
+  const onPick = (e) => {
+    const f = e.target.files?.[0]; if (!f) return;
+    if (f.size > 1024 * 1024) { toast.error("Image must be < 1 MB"); return; }
+    const r = new FileReader();
+    r.onload = () => onChange(String(r.result));
+    r.readAsDataURL(f);
+  };
+  return (
+    <Fld label="ISO / Certification logo (optional — prints next to the address)">
+      <div className="flex items-center gap-3 mb-2">
+        {value ? (
+          <img src={value} alt="ISO logo" className="h-12 border border-slate-200 bg-white p-1 rounded-sm" />
+        ) : (
+          <div className="h-12 w-24 border border-dashed border-slate-300 grid place-items-center text-xs text-slate-400 rounded-sm">No logo</div>
+        )}
+        <label className="inline-flex items-center gap-2 cursor-pointer px-3 py-1.5 text-sm border border-slate-300 rounded-sm hover:bg-slate-50">
+          <Upload className="h-3.5 w-3.5" /> Upload
+          <input type="file" accept="image/png,image/jpeg" className="hidden" onChange={onPick} data-testid="iso-logo-upload" />
+        </label>
+        {value && <Button size="sm" variant="outline" className="rounded-sm text-red-600 border-red-300" onClick={()=>onChange("")}>Remove</Button>}
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Fld label="Width (mm, 10–30)"><Input type="number" min={10} max={30} step={0.5} value={width} onChange={e=>onWidth(Number(e.target.value))} className="rounded-sm" /></Fld>
+        <Fld label="Height (mm, 10–30)"><Input type="number" min={10} max={30} step={0.5} value={height} onChange={e=>onHeight(Number(e.target.value))} className="rounded-sm" /></Fld>
+      </div>
+    </Fld>
+  );
+}
+
 // Sectioned print settings toggles
 const TEMPLATE_SECTIONS = [
   {
@@ -597,6 +644,7 @@ const TEMPLATE_SECTIONS = [
       { key: "show_company_email",       label: "Print company email" },
       { key: "show_company_phone",       label: "Print company phone" },
       { key: "show_company_udyam",       label: "Print UDYAM / MSME number" },
+      { key: "show_iso_logo",            label: "Print ISO / certification logo" },
       { key: "print_original_duplicate", label: "Print 'Original / Duplicate / Triplicate' label" },
     ],
   },

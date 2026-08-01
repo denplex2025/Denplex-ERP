@@ -29,7 +29,7 @@ export default function InvoiceCreate() {
     invoice_type: "gst",
     payment_mode: "Credit", godown: "", code: "", date: today, payment_terms: "30", due_date: addDays(today, 30),
     customer_id: "", customer_name: "", customer_gstin: "", place_of_supply: "", is_interstate: false,
-    purchaser_name: "", po_number: "", po_date: "", eway_bill_no: "", eway_distance_km: 0,
+    purchaser_name: "", purchaser_phone: "", po_number: "", po_date: "", eway_bill_no: "", eway_distance_km: 0,
     terms_text: DEFAULT_TC, round_off: 0, tds: 0, tds_rate: 0, tds_section: "", tcs: 0, tcs_rate: 0, extra_charges: [], custom_fields: {}, notes: "",
   });
   const [lines, setLines] = useState([blankLine()]);
@@ -173,6 +173,7 @@ export default function InvoiceCreate() {
           </select>
         </Fld>
         <Fld label="Purchaser Name"><Input value={f.purchaser_name} onChange={e => set("purchaser_name", e.target.value)} /></Fld>
+        <Fld label="Purchaser Phone"><Input value={f.purchaser_phone} onChange={e => set("purchaser_phone", e.target.value)} placeholder="Contact no. (optional)" /></Fld>
         <Fld label="Invoice No (blank = auto)"><Input value={f.code} onChange={e => set("code", e.target.value)} placeholder="auto" /></Fld>
         <Fld label="Invoice Date"><Input type="date" value={f.date} onChange={e => setDate(e.target.value)} /></Fld>
 
