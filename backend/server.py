@@ -770,6 +770,7 @@ class Invoice(BaseModel):
     po_number: Optional[str] = ""
     po_date: Optional[str] = ""
     purchaser_name: Optional[str] = ""
+    purchaser_phone: Optional[str] = ""
     payment_mode: Optional[str] = ""
     eway_bill_no: Optional[str] = ""
     eway_generated_at: Optional[str] = ""      # date the e-way bill was generated
@@ -827,6 +828,7 @@ class ProformaInvoice(BaseModel):
     po_number: Optional[str] = ""
     po_date: Optional[str] = ""
     purchaser_name: Optional[str] = ""
+    purchaser_phone: Optional[str] = ""
     payment_mode: Optional[str] = ""
     lines: List[InvoiceLine] = []
     subtotal: float = 0
@@ -4608,6 +4610,17 @@ class IntegrationSettingsIn(BaseModel):
     company_phone: Optional[str] = ""
     company_email: Optional[str] = ""
     company_udyam: Optional[str] = ""  # UDYAM / MSME registration shown on letterhead
+    # Logo sizing (mm), editable in Settings > Invoice Template. Clamped to safe min/max at render
+    # time in _build_doc_pdf so a bad value can never distort or blow out the header layout.
+    # Denplex logo defaults preserve the source file's real 767x658 aspect ratio (was hardcoded
+    # to a stretched 22x22 square before).
+    denplex_logo_width_mm: Optional[float] = 22.0
+    denplex_logo_height_mm: Optional[float] = 18.9
+    # ISO 9001:2015 (or other) certification logo — optional, printed to the right of the
+    # company address once uploaded. Stored as base64 (same pattern as signatory_image_b64).
+    iso_logo_b64: Optional[str] = ""
+    iso_logo_width_mm: Optional[float] = 18.0
+    iso_logo_height_mm: Optional[float] = 18.0
     # Bank / UPI block (printed on every invoice per standard tax-invoice layout)
     bank_name: Optional[str] = ""
     bank_account_no: Optional[str] = ""
@@ -4645,6 +4658,7 @@ class InvoiceTemplateIn(BaseModel):
     show_company_email: bool = True
     show_company_phone: bool = True
     show_company_udyam: bool = True
+    show_iso_logo: bool = True               # Print ISO/certification logo next to address (if uploaded)
     show_ship_to: bool = True
     show_bill_from: bool = False             # Off by default; auto-on when invoice has explicit bill_from
     show_ship_from: bool = False             # Off by default; auto-on when invoice has explicit ship_from
@@ -6240,6 +6254,33 @@ def _hsn_tax_summary(lines: List[Dict[str, Any]], is_interstate: bool) -> List[D
         rows.append({"hsn": hsn, **v, "total_tax": v["cgst_amt"] + v["sgst_amt"] + v["igst_amt"]})
     return rows
 
+def _clamp_mm(v, lo: float, hi: float, default: float) -> float:
+    """Clamp a Settings-supplied logo width/height (mm) to a safe range so a bad value can
+    never distort or blow out the PDF header layout. Falls back to `default` if missing/invalid."""
+    try:
+        v = float(v)
+        if v <= 0:
+            return default
+    except (TypeError, ValueError):
+        return default
+    return max(lo, min(hi, v))
+
+def _fmt_ddmmyyyy(s) -> str:
+    """Normalize a date string (ISO 'YYYY-MM-DD', or already 'DD/MM/YYYY' etc — invoice data
+    comes from both the ERP's own ISO dates and Vyapar-imported records in mixed formats) into
+    a consistent 'DD-MM-YYYY' for printing. Returns the original string unparsed if it doesn't
+    match any known format, so we never blank out a value we can't confidently reformat."""
+    raw = str(s or "").strip()
+    if not raw:
+        return raw
+    for cand in dict.fromkeys([raw, raw[:10]]):
+        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d", "%d %b %Y", "%d-%b-%Y", "%d %B %Y"):
+            try:
+                return datetime.strptime(cand, fmt).strftime("%d-%m-%Y")
+            except ValueError:
+                continue
+    return raw
+
 def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, date_s: str,
                    lines: List[Dict[str, Any]], totals: Dict[str, float], gst_breakup: Optional[Dict[str, float]] = None,
                    company: Optional[Dict[str, Any]] = None, notes: str = "",
@@ -6331,22 +6372,38 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
     if _is_modern:
         # Accent line beneath the title
         from reportlab.platypus import HRFlowable
-        flow.append(HRFlowable(width="100%", thickness=1.2, color=_accent, spaceBefore=2, spaceAfter=4))
+        flow.append(HRFlowable(width="100%", thickness=1.2, color=_accent, spaceBefore=1, spaceAfter=2))
     else:
-        flow.append(Spacer(1, 3*mm))
+        flow.append(Spacer(1, 1.5*mm))
 
     # ---------- Company header card ----------
     logo_cell = ""
     if show("show_company_logo"):
         logo_path = str(ROOT_DIR / "logo.png")
         try:
-            logo_cell = RLImage(logo_path, width=22*mm, height=22*mm)
+            _denplex_lw = _clamp_mm(company.get("denplex_logo_width_mm"), 10, 35, 22)
+            _denplex_lh = _clamp_mm(company.get("denplex_logo_height_mm"), 10, 35, 18.9)
+            logo_cell = RLImage(logo_path, width=_denplex_lw*mm, height=_denplex_lh*mm)
         except Exception:
             logo_cell = Paragraph("<b>DENPLEX</b>", h2_style)
+    # Optional ISO/certification logo — prints to the right of the address once uploaded in
+    # Settings > Invoice Template. Width/height come from Settings, clamped to a safe range.
+    iso_cell = None
+    if show("show_iso_logo") and company.get("iso_logo_b64"):
+        try:
+            _iso_raw = company["iso_logo_b64"]
+            if isinstance(_iso_raw, str) and _iso_raw.startswith("data:") and "," in _iso_raw:
+                _iso_raw = _iso_raw.split(",", 1)[1]
+            _iso_bytes = base64.b64decode(_iso_raw)
+            _iso_w = _clamp_mm(company.get("iso_logo_width_mm"), 10, 30, 18)
+            _iso_h = _clamp_mm(company.get("iso_logo_height_mm"), 10, 30, 18)
+            iso_cell = RLImage(io.BytesIO(_iso_bytes), width=_iso_w*mm, height=_iso_h*mm)
+        except Exception:
+            iso_cell = None
     company_lines = [Paragraph(f"<font size=11><b>{company.get('company_name','Denplex Engineering Company')}</b></font>", smallb)]
     if show("show_company_udyam") and company.get("company_udyam"):
         company_lines.append(Spacer(1, 1.5*mm))
-        company_lines.append(Paragraph(f"<font size=8 color='#475569'>™ UDYAM REGISTRATION NUMBER - <b>{company['company_udyam']}</b></font>", tiny))
+        company_lines.append(Paragraph(f"<font size=8 color='#475569'>UDYAM REGISTRATION NUMBER - <b>{company['company_udyam']}</b></font>", tiny))
         company_lines.append(Spacer(1, 1*mm))
     # Multi-unit address takes priority; fall back to single company_address
     _units = company.get("company_units") or []
@@ -6380,9 +6437,13 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
     if contact2:
         company_lines.append(Paragraph(" &nbsp;&nbsp; ".join(contact2), tiny))
 
-    header_tbl = Table([[logo_cell, company_lines]], colWidths=[28*mm, 162*mm])
+    if iso_cell is not None:
+        header_tbl = Table([[logo_cell, company_lines, iso_cell]], colWidths=[28*mm, 136*mm, 26*mm])
+    else:
+        header_tbl = Table([[logo_cell, company_lines]], colWidths=[28*mm, 162*mm])
     header_tbl.setStyle(TableStyle([
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("ALIGN", (-1, 0), (-1, -1), "CENTER"),
         ("BOX", (0, 0), (-1, -1), _border_w, BORDER) if _border_w > 0 else
         ("LINEBELOW", (0, 0), (-1, -1), 0.5, BORDER),
         ("LEFTPADDING", (0, 0), (-1, -1), 6),
@@ -6412,19 +6473,34 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
         flow.append(einv_tbl)
 
     # ---------- Bill To / Invoice Details (two-column box) ----------
+    # Slightly looser line spacing than the default `tiny` style so multi-line addresses
+    # don't look cramped underneath the (bold) party name.
+    tiny_addr = ParagraphStyle("tiAddr", parent=tiny, leading=tiny.leading + 1.5)
     bill_lines = [Paragraph(f"<b>{party_label}:</b>", box_label),
                   Paragraph(f"<font size=10><b>{party_name}</b></font>", smallb)]
-    if party_extra.get("address"): bill_lines.append(Paragraph(party_extra["address"], tiny))
+    if party_extra.get("address"): bill_lines.append(Paragraph(party_extra["address"], tiny_addr))
     if party_extra.get("phone"):   bill_lines.append(Paragraph(f"Contact No.: <b>{party_extra['phone']}</b>", tiny))
     if party_extra.get("gstin"):   bill_lines.append(Paragraph(f"GSTIN: <b>{party_extra['gstin']}</b>", tiny))
     if party_extra.get("state"):   bill_lines.append(Paragraph(f"State: <b>{party_extra['state']}</b>", tiny))
 
+    # The right-hand meta box's noun ("Invoice", "Order", "Bill", ...) used to come from
+    # title.split()[0] — which mangled two-word titles like "Tax Invoice" -> "Tax Details:" /
+    # "Tax No.:" instead of "Invoice Details:" / "Invoice No.:". Map known titles explicitly;
+    # fall back to the title's last word (still better than the first for "Purchase Order" ->
+    # "Order", "Purchase Bill" -> "Bill", etc.) for any doc type not listed.
+    _DOC_NOUN = {
+        "Tax Invoice": "Invoice", "Export Invoice": "Invoice", "Bill of Supply": "Invoice",
+        "Proforma Invoice": "Invoice", "Purchase Order": "Order", "Purchase Bill": "Bill",
+        "Sale Order": "Order", "Delivery Challan": "Challan", "Credit Note": "Note",
+    }
+    _doc_noun = _DOC_NOUN.get(title, title.split()[-1] if title.split() else title)
+
     # 2-column meta: main fields on left, PO/purchaser on right
-    meta_main = [Paragraph(f"<b>{title.split()[0]} Details:</b>", box_label),
-                 Paragraph(f"{title.split()[0]} No.: <b>{code}</b>", smallb),
-                 Paragraph(f"Date: <b>{date_s}</b>", smallb)]
+    meta_main = [Paragraph(f"<b>{_doc_noun} Details:</b>", box_label),
+                 Paragraph(f"{_doc_noun} No.: <b>{code}</b>", smallb),
+                 Paragraph(f"{_doc_noun} Date: <b>{_fmt_ddmmyyyy(date_s)}</b>", smallb)]
     if show("show_due_date") and doc_meta.get("due_date"):
-        meta_main.append(Paragraph(f"Due Date: <b>{doc_meta['due_date']}</b>", smallb))
+        meta_main.append(Paragraph(f"{_doc_noun} Due Date: <b>{_fmt_ddmmyyyy(doc_meta['due_date'])}</b>", smallb))
     if show("show_place_of_supply") and doc_meta.get("place_of_supply"):
         meta_main.append(Paragraph(f"Place of Supply: <b>{doc_meta['place_of_supply']}</b>", smallb))
     if doc_meta.get("eway_bill_no"):
@@ -6438,8 +6514,18 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
             meta_po.append(Paragraph(f"PO Date: <b>{doc_meta['po_date']}</b>", smallb))
         if doc_meta.get("po_number") or doc_meta.get("po_no"):
             meta_po.append(Paragraph(f"PO No: <b>{doc_meta.get('po_number') or doc_meta.get('po_no')}</b>", smallb))
+        # Purchaser Details get their own sub-heading, separate from PO Date/No above, so
+        # they read as a distinct block rather than being buried in the PO meta.
+        _purch_bits = []
         if doc_meta.get("purchaser_name"):
-            meta_po.append(Paragraph(f"Purchaser Name: <b>{doc_meta['purchaser_name']}</b>", smallb))
+            _purch_bits.append(Paragraph(f"Name: <b>{doc_meta['purchaser_name']}</b>", smallb))
+        if doc_meta.get("purchaser_phone"):
+            _purch_bits.append(Paragraph(f"Phone: <b>{doc_meta['purchaser_phone']}</b>", smallb))
+        if _purch_bits:
+            if meta_po:
+                meta_po.append(Spacer(1, 1.5*mm))
+            meta_po.append(Paragraph("<b>Purchaser Details:</b>", box_label))
+            meta_po.extend(_purch_bits)
     # Compose meta_lines: either flat list or nested 2-column table when PO meta is present
     if meta_po:
         meta_inner = Table([[meta_main, meta_po]], colWidths=[46*mm, 47*mm])
@@ -6921,6 +7007,7 @@ async def invoice_pdf(iid: str, copy: Optional[str] = "ORIGINAL FOR RECIPIENT", 
         "po_number": inv.get("po_number",""),
         "po_date": inv.get("po_date",""),
         "purchaser_name": inv.get("purchaser_name",""),
+        "purchaser_phone": inv.get("purchaser_phone",""),
         "eway_bill_no": inv.get("eway_bill_no",""),
         "custom_fields": inv.get("custom_fields", {}),
         "is_interstate": bool(inv.get("is_interstate")),
@@ -10656,6 +10743,7 @@ async def proforma_pdf(pid: str, user=Depends(get_current_user)):
         "po_number": pf.get("po_number", ""),
         "po_date": pf.get("po_date", ""),
         "purchaser_name": pf.get("purchaser_name", ""),
+        "purchaser_phone": pf.get("purchaser_phone", ""),
         "payment_mode": pf.get("payment_mode", ""),
         "is_interstate": bool(pf.get("is_interstate")),
     }
