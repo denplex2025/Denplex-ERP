@@ -53,70 +53,172 @@ load_dotenv(ROOT_DIR / '.env')
 _PDF_FONT_REGULAR = "Helvetica"
 _PDF_FONT_BOLD = "Helvetica-Bold"
 
+# Selectable invoice font catalog (Settings > Invoice Template > Font). Each entry is tried
+# in order: local system path(s) first (fast, no network), then a CDN download into
+# backend/fonts/ as a fallback for environments (like a minimal Railway container) that don't
+# ship these font packages. All CDN sources are Google Fonts' own OFL-licensed static TTFs,
+# fetched via jsdelivr's GitHub mirror (same CDN domain already used for DejaVuSans below).
+# Every font here was verified to include the ₹ (U+20B9) glyph except LiberationSans, which
+# is kept only because it's the closest metric match to the old Vyapar look; DejaVuSans is
+# aliased over Helvetica as a global safety net regardless of which one is picked.
+_FONT_CATALOG = {
+    "liberation_sans": {
+        "label": "Liberation Sans (Arial-style) — current default",
+        "system": [("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+                    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"),
+                   ("/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+                    "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf")],
+        "cdn": None,
+    },
+    "liberation_serif": {
+        "label": "Liberation Serif (Times New Roman-style)",
+        "system": [("/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
+                    "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf"),
+                   ("/usr/share/fonts/truetype/liberation2/LiberationSerif-Regular.ttf",
+                    "/usr/share/fonts/truetype/liberation2/LiberationSerif-Bold.ttf")],
+        # No reliable public CDN for Liberation fonts (Red Hat's family, not on Google Fonts),
+        # so this ships bundled directly in backend/fonts/ instead of being fetched at runtime.
+        "cdn": [("LiberationSerif-Regular.ttf", ""), ("LiberationSerif-Bold.ttf", "")],
+    },
+    "carlito": {
+        "label": "Carlito (Calibri-style)",
+        "system": [("/usr/share/fonts/truetype/crosextra/Carlito-Regular.ttf",
+                    "/usr/share/fonts/truetype/crosextra/Carlito-Bold.ttf")],
+        "cdn": [("Carlito-Regular.ttf", "https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/carlito/Carlito-Regular.ttf"),
+                ("Carlito-Bold.ttf", "https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/carlito/Carlito-Bold.ttf")],
+    },
+    "caladea": {
+        "label": "Caladea (Cambria-style, modern serif)",
+        "system": [("/usr/share/fonts/truetype/crosextra/Caladea-Regular.ttf",
+                    "/usr/share/fonts/truetype/crosextra/Caladea-Bold.ttf")],
+        "cdn": [("Caladea-Regular.ttf", "https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/caladea/Caladea-Regular.ttf"),
+                ("Caladea-Bold.ttf", "https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/caladea/Caladea-Bold.ttf")],
+    },
+    "lato_light": {
+        "label": "Lato Light (closest open equivalent to Calibri Light) — recommended",
+        "system": [("/usr/share/fonts/truetype/lato/Lato-Light.ttf",
+                    "/usr/share/fonts/truetype/lato/Lato-Bold.ttf")],
+        "cdn": [("Lato-Light.ttf", "https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/lato/Lato-Light.ttf"),
+                ("Lato-Bold.ttf", "https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/lato/Lato-Bold.ttf")],
+    },
+    "lato_regular": {
+        "label": "Lato Regular",
+        "system": [("/usr/share/fonts/truetype/lato/Lato-Regular.ttf",
+                    "/usr/share/fonts/truetype/lato/Lato-Bold.ttf")],
+        "cdn": [("Lato-Regular.ttf", "https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/lato/Lato-Regular.ttf"),
+                ("Lato-Bold.ttf", "https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/lato/Lato-Bold.ttf")],
+    },
+    "dejavu_sans": {
+        "label": "DejaVu Sans",
+        "system": [("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")],
+        "cdn": [("DejaVuSans.ttf", "https://cdn.jsdelivr.net/npm/dejavu-fonts-ttf@2.37.3/ttf/DejaVuSans.ttf"),
+                ("DejaVuSans-Bold.ttf", "https://cdn.jsdelivr.net/npm/dejavu-fonts-ttf@2.37.3/ttf/DejaVuSans-Bold.ttf")],
+    },
+    "noto_sans": {
+        "label": "Noto Sans",
+        "system": [(str(Path(__file__).parent / "fonts" / "NotoSans-Regular.ttf"),
+                    str(Path(__file__).parent / "fonts" / "NotoSans-Bold.ttf"))],
+        "cdn": None,
+    },
+}
+_DEFAULT_FONT_KEY = "lato_light"
+_registered_font_names: Dict[str, tuple] = {}  # font_key -> (regular_name, bold_name), cached per process
+_registered_font_paths: Dict[str, tuple] = {}  # font_key -> (regular_path, bold_path) actually used
+
 def _ensure_font_files_on_disk():
-    """Best-effort: if backend/fonts/DejaVu*.ttf is missing, fetch from CDN.
-    Runs once at startup; idempotent. Failures are non-fatal (we fall back to Helvetica)."""
+    """Best-effort: fetch any CDN-sourced catalog fonts not already present in backend/fonts/.
+    Runs once at startup; idempotent. Failures are non-fatal (falls back to Helvetica/DejaVu)."""
     try:
         import urllib.request
         target_dir = Path(__file__).parent / "fonts"
         target_dir.mkdir(parents=True, exist_ok=True)
-        urls = {
-            "DejaVuSans.ttf": "https://cdn.jsdelivr.net/npm/dejavu-fonts-ttf@2.37.3/ttf/DejaVuSans.ttf",
-            "DejaVuSans-Bold.ttf": "https://cdn.jsdelivr.net/npm/dejavu-fonts-ttf@2.37.3/ttf/DejaVuSans-Bold.ttf",
-        }
-        for name, url in urls.items():
-            tgt = target_dir / name
-            if tgt.exists() and tgt.stat().st_size > 100_000:
-                continue
-            try:
-                urllib.request.urlretrieve(url, str(tgt))
-            except Exception:
-                pass
+        for entry in _FONT_CATALOG.values():
+            for fname, url in (entry.get("cdn") or []):
+                tgt = target_dir / fname
+                if tgt.exists() and tgt.stat().st_size > 20_000:
+                    continue
+                try:
+                    urllib.request.urlretrieve(url, str(tgt))
+                except Exception:
+                    pass
     except Exception:
         pass
 
-def _try_register_pdf_fonts():
-    global _PDF_FONT_REGULAR, _PDF_FONT_BOLD
-    candidates = [
-        # Liberation Sans is metric-compatible with Arial/Helvetica (matches the Vyapar look)
-        # and includes the ₹ glyph. Preferred when present; otherwise fall back to DejaVu.
-        ("LiberationSans", "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-         "LiberationSans-Bold", "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"),
-        ("LiberationSans", "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-         "LiberationSans-Bold", "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf"),
-        ("DejaVuSans", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-         "DejaVuSans-Bold", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
-        ("DejaVuSans", str(Path(__file__).parent / "fonts" / "DejaVuSans.ttf"),
-         "DejaVuSans-Bold", str(Path(__file__).parent / "fonts" / "DejaVuSans-Bold.ttf")),
-        ("NotoSans", str(Path(__file__).parent / "fonts" / "NotoSans-Regular.ttf"),
-         "NotoSans-Bold", str(Path(__file__).parent / "fonts" / "NotoSans-Bold.ttf")),
-    ]
-    import os as _os
-    for name, path, name_b, path_b in candidates:
+def _register_font_by_key(key: str, alias_helvetica: bool = False):
+    """Register (if needed) and return (regular_name, bold_name) for a catalog font key.
+    Tries system paths first, then the CDN-downloaded copy in backend/fonts/. Returns None
+    if nothing for this key could be found, so the caller can fall back to the process default.
+    If alias_helvetica=True, also re-registers the same TTF files under reportlab's built-in
+    "Helvetica"/"Helvetica-Bold" names, so code paths that hardcode those names (e.g. table
+    cell styles that inherit reportlab defaults) still pick up a ₹-capable font."""
+    if key in _registered_font_names:
+        names = _registered_font_names[key]
+    else:
+        entry = _FONT_CATALOG.get(key)
+        if not entry:
+            return None
+        import os as _os
+        candidates = list(entry.get("system") or [])
+        if entry.get("cdn"):
+            fonts_dir = Path(__file__).parent / "fonts"
+            cdn_names = [fname for fname, _url in entry["cdn"]]
+            if len(cdn_names) == 2:
+                candidates.append((str(fonts_dir / cdn_names[0]), str(fonts_dir / cdn_names[1])))
+        reg_name, bold_name = f"Inv_{key}", f"Inv_{key}_B"
+        names = None
+        for reg_path, bold_path in candidates:
+            try:
+                if _os.path.exists(reg_path) and _os.path.exists(bold_path):
+                    pdfmetrics.registerFont(TTFont(reg_name, reg_path))
+                    pdfmetrics.registerFont(TTFont(bold_name, bold_path))
+                    names = (reg_name, bold_name)
+                    _registered_font_names[key] = names
+                    _registered_font_paths[key] = (reg_path, bold_path)
+                    break
+            except Exception:
+                continue
+        if not names:
+            return None
+    if alias_helvetica and key in _registered_font_paths:
         try:
-            if _os.path.exists(path) and _os.path.exists(path_b):
-                pdfmetrics.registerFont(TTFont(name, path))
-                pdfmetrics.registerFont(TTFont(name_b, path_b))
-                # Override Helvetica so table body cells (which inherit reportlab's default)
-                # also pick up ₹ and other Unicode glyphs.
-                try:
-                    pdfmetrics.registerFont(TTFont("Helvetica", path))
-                    pdfmetrics.registerFont(TTFont("Helvetica-Bold", path_b))
-                except Exception:
-                    pass
-                _PDF_FONT_REGULAR = name
-                _PDF_FONT_BOLD = name_b
-                try:
-                    import logging as _l
-                    _l.getLogger(__name__).info("PDF fonts registered: %s / %s (also aliased as Helvetica)", name, name_b)
-                except Exception:
-                    pass
-                return name
+            reg_path, bold_path = _registered_font_paths[key]
+            pdfmetrics.registerFont(TTFont("Helvetica", reg_path))
+            pdfmetrics.registerFont(TTFont("Helvetica-Bold", bold_path))
         except Exception:
+            pass
+    return names
+
+def _try_register_pdf_fonts():
+    """Startup default: register whichever catalog font is actually available on this host,
+    in priority order, and alias it over Helvetica so any code path using the reportlab
+    built-in name still gets a ₹-capable font. This sets the process-wide fallback used
+    whenever a specific invoice's chosen font_family isn't available on this host."""
+    global _PDF_FONT_REGULAR, _PDF_FONT_BOLD
+    for key in ("liberation_sans", "dejavu_sans", "lato_light", "noto_sans"):
+        names = _register_font_by_key(key, alias_helvetica=True)
+        if not names:
             continue
+        _PDF_FONT_REGULAR, _PDF_FONT_BOLD = names
+        try:
+            import logging as _l
+            _l.getLogger(__name__).info("PDF fonts registered (default): %s / %s", *names)
+        except Exception:
+            pass
+        return names[0]
     return _PDF_FONT_REGULAR
 
-# Order matters: try to download then register
+def _font_for_invoice(font_key: Optional[str]):
+    """Resolve the (regular, bold) font names to use for one PDF render: the Settings-chosen
+    font_family if it's available on this host, else the process-wide default resolved at
+    startup by _try_register_pdf_fonts(). Never raises — always returns a usable pair."""
+    if font_key:
+        names = _register_font_by_key(font_key)
+        if names:
+            return names
+    return (_PDF_FONT_REGULAR, _PDF_FONT_BOLD)
+
+# Order matters: try to download then register the startup default
 _ensure_font_files_on_disk()
 _try_register_pdf_fonts()
 
@@ -4621,6 +4723,10 @@ class IntegrationSettingsIn(BaseModel):
     iso_logo_b64: Optional[str] = ""
     iso_logo_width_mm: Optional[float] = 18.0
     iso_logo_height_mm: Optional[float] = 18.0
+    # PDF font choice — see _FONT_CATALOG in the PDF-generation section for the full list
+    # of keys/labels. Falls back to whatever _try_register_pdf_fonts() resolved at startup
+    # if the chosen font's files aren't available on this host.
+    font_family: Optional[str] = "lato_light"
     # Bank / UPI block (printed on every invoice per standard tax-invoice layout)
     bank_name: Optional[str] = ""
     bank_account_no: Optional[str] = ""
@@ -6333,9 +6439,9 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
         _margin = 10*mm; _body = 7.5; _title_sz = 13.5; _company_sz = 11; _border_w = 0.4
         _accent = RED
 
-    # Pick fonts: use registered TTF (e.g. DejaVuSans) for proper ₹ rendering
-    _FONT = _PDF_FONT_REGULAR
-    _FONT_B = _PDF_FONT_BOLD
+    # Pick fonts: the company's chosen font_family (Settings > Invoice Template > Font) if
+    # available on this host, else the process-wide default resolved at startup.
+    _FONT, _FONT_B = _font_for_invoice((company or {}).get("font_family"))
     _TITLE_FONT = _FONT_B if style_preset != "modern" else (_FONT_B)  # serif if available later
 
     buf = io.BytesIO()
