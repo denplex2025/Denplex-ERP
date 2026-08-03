@@ -6584,7 +6584,9 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
     tiny_addr = ParagraphStyle("tiAddr", parent=tiny, leading=tiny.leading + 1.5)
     bill_lines = [Paragraph(f"<b>{party_label}:</b>", box_label),
                   Paragraph(f"<font size=10><b>{party_name}</b></font>", smallb)]
-    if party_extra.get("address"): bill_lines.append(Paragraph(party_extra["address"], tiny_addr))
+    if party_extra.get("address"):
+        bill_lines.append(Spacer(1, 1*mm))
+        bill_lines.append(Paragraph(party_extra["address"], tiny_addr))
     if party_extra.get("phone"):   bill_lines.append(Paragraph(f"Contact No.: <b>{party_extra['phone']}</b>", tiny))
     if party_extra.get("gstin"):   bill_lines.append(Paragraph(f"GSTIN: <b>{party_extra['gstin']}</b>", tiny))
     if party_extra.get("state"):   bill_lines.append(Paragraph(f"State: <b>{party_extra['state']}</b>", tiny))
@@ -6809,7 +6811,11 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
                     gt_taxable += r["taxable"]; ct += r["igst_amt"]; gt_total_tax += r["total_tax"]
                     t_data.append([r["hsn"] or "—", f"₹ {r['taxable']:,.2f}", f"{r['igst_rate']:g}%", f"₹ {r['igst_amt']:,.2f}", f"₹ {r['total_tax']:,.2f}"])
                 t_data.append(["Total", f"₹ {gt_taxable:,.2f}", "", f"₹ {ct:,.2f}", f"₹ {gt_total_tax:,.2f}"])
-                widths_ts = [22*mm, 28*mm, 18*mm, 28*mm, 30*mm]
+                # Widths must sum to <=125mm (the left column of the Tax Summary / Totals
+                # sidebar split below) — Taxable/Amount columns widened vs. the old
+                # [22,28,18,28,30]=126mm (itself already 1mm over) to stop values overflowing
+                # their cell border, borrowed from the Rate column which only ever holds "18%".
+                widths_ts = [20*mm, 32*mm, 14*mm, 28*mm, 28*mm]
             else:
                 # Nested header: HSN/SAC | Taxable | CGST(Rate|Amt) | SGST(Rate|Amt) | Total Tax
                 hdr1 = ["HSN/SAC", "Taxable Amount (₹)", "CGST", "", "SGST", "", "Total Tax (₹)"]
@@ -6820,7 +6826,11 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
                     gt_taxable += r["taxable"]; gt_c += r["cgst_amt"]; gt_s += r["sgst_amt"]; gt_total_tax += r["total_tax"]
                     t_data.append([r["hsn"] or "—", f"{r['taxable']:,.2f}", f"{r['cgst_rate']:g}", f"{r['cgst_amt']:,.2f}", f"{r['sgst_rate']:g}", f"{r['sgst_amt']:,.2f}", f"{r['total_tax']:,.2f}"])
                 t_data.append(["Total", f"{gt_taxable:,.2f}", "", f"{gt_c:,.2f}", "", f"{gt_s:,.2f}", f"{gt_total_tax:,.2f}"])
-                widths_ts = [18*mm, 24*mm, 12*mm, 18*mm, 12*mm, 18*mm, 20*mm]
+                # Widths must sum to <=125mm (the left column of the Tax Summary / Totals
+                # sidebar split below) — Taxable Amount widened vs. the old
+                # [18,24,12,18,12,18,20]=122mm to stop it overflowing its cell border,
+                # borrowed from the Rate(%) columns which only ever hold "9" or similar.
+                widths_ts = [16*mm, 30*mm, 9*mm, 20*mm, 9*mm, 20*mm, 18*mm]
             ts = Table(t_data, colWidths=widths_ts)
             ts_style = [
                 ("BACKGROUND", (0,0), (-1,1), LIGHTGREY) if not is_interstate else ("BACKGROUND", (0,0), (-1,0), LIGHTGREY),
@@ -6835,6 +6845,8 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
                 ("FONTNAME", (0,-1), (-1,-1), _PDF_FONT_BOLD),
                 ("TOPPADDING", (0,0), (-1,-1), 3),
                 ("BOTTOMPADDING", (0,0), (-1,-1), 3),
+                ("LEFTPADDING", (0,0), (-1,-1), 3),
+                ("RIGHTPADDING", (0,0), (-1,-1), 3),
             ]
             # For intrastate, span the nested headers
             if not is_interstate:
