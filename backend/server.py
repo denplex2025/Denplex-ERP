@@ -6446,10 +6446,7 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
 
     buf = io.BytesIO()
     page_size = A4
-    doc = SimpleDocTemplate(buf, pagesize=page_size,
-                            rightMargin=_margin, leftMargin=_margin,
-                            topMargin=max(_margin - 2*mm, 6*mm),
-                            bottomMargin=_margin)
+    _base_top_margin = max(_margin - 2*mm, 6*mm)
     styles = getSampleStyleSheet()
     title_style = ParagraphStyle("ttl", parent=styles["Heading1"], fontName=_TITLE_FONT,
                                  fontSize=_title_sz, textColor=BLACK, leading=_title_sz+2,
@@ -6469,18 +6466,21 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
     _is_modern = (style_preset == "modern")
     _is_compact = (style_preset == "compact")
 
-    # ---------- Top right "Original for Recipient" ----------
+    # ---------- Page header (repeats identically on every page — see _draw_repeating_header
+    # below). Built into `_page_header_flow` instead of `flow` so it isn't drawn twice; the
+    # rest of the document (Bill To onward) just continues flowing under it on every page. ----------
+    _page_header_flow = []
     if show("print_original_duplicate") and copy_label:
-        flow.append(Paragraph(copy_label.upper(), copy_lbl))
+        _page_header_flow.append(Paragraph(copy_label.upper(), copy_lbl))
 
     # ---------- Title ----------
-    flow.append(Paragraph(f"<b>{title}</b>", title_style))
+    _page_header_flow.append(Paragraph(f"<b>{title}</b>", title_style))
     if _is_modern:
         # Accent line beneath the title
         from reportlab.platypus import HRFlowable
-        flow.append(HRFlowable(width="100%", thickness=1.2, color=_accent, spaceBefore=1, spaceAfter=2))
+        _page_header_flow.append(HRFlowable(width="100%", thickness=1.2, color=_accent, spaceBefore=1, spaceAfter=2))
     else:
-        flow.append(Spacer(1, 1.5*mm))
+        _page_header_flow.append(Spacer(1, 1.5*mm))
 
     # ---------- Company header card ----------
     logo_cell = ""
@@ -6557,7 +6557,51 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
         ("TOPPADDING", (0, 0), (-1, -1), 6),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
     ]))
-    flow.append(header_tbl)
+    _page_header_flow.append(header_tbl)
+    _page_header_flow.append(Spacer(1, 3*mm))
+
+    # ---------- Document + repeating page header ----------
+    # The header above (title + company card) is measured once and redrawn on the canvas at
+    # the top of every page via onFirstPage/onLaterPages, so a multi-page invoice repeats the
+    # same letterhead on page 2, 3, etc. instead of leaving continuation pages bare. The main
+    # `flow` (Bill To onward) then just continues under it — topMargin is grown by the header's
+    # measured height so the body Frame never overlaps it, on every page uniformly.
+    _content_width = page_size[0] - 2*_margin
+    _header_total_h = 0.0
+    for _hf in _page_header_flow:
+        try:
+            _, _fh = _hf.wrap(_content_width, page_size[1])
+            _header_total_h += _fh
+        except Exception:
+            pass
+
+    def _draw_repeating_header(canvas, _doc):
+        canvas.saveState()
+        y = page_size[1] - _base_top_margin
+        for _hf in _page_header_flow:
+            try:
+                _, _fh = _hf.wrap(_content_width, page_size[1])
+                _hf.drawOn(canvas, _margin, y - _fh)
+                y -= _fh
+            except Exception:
+                pass
+        # Page number — only meaningful now that content can genuinely span multiple pages.
+        canvas.setFont(_FONT, 7)
+        canvas.setFillColor(GREY)
+        canvas.drawRightString(page_size[0] - _margin, _margin/2.0, f"Page {canvas.getPageNumber()}")
+        canvas.restoreState()
+
+    # Explicit PDF metadata — without this, some viewers (Chrome's built-in PDF viewer,
+    # Windows/macOS file previews) show the document as "anonymous"/untitled since reportlab
+    # doesn't set a default Title/Author on its own.
+    _doc_display_title = f"{title} {code}".strip() if code else title
+    _doc_author = (company or {}).get("company_name") or "Denplex Engineering Company"
+    doc = SimpleDocTemplate(buf, pagesize=page_size,
+                            rightMargin=_margin, leftMargin=_margin,
+                            topMargin=_base_top_margin + _header_total_h,
+                            bottomMargin=_margin,
+                            title=_doc_display_title, author=_doc_author,
+                            creator="Denplex ERP", subject=_doc_display_title)
 
     # ---------- e-Invoice IRN + signed QR (shown at top when present) ----------
     if doc_meta.get("irn"):
@@ -7075,7 +7119,7 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
         flow.append(Spacer(1, 2*mm))
         flow.append(bs_tbl)
 
-    doc.build(flow)
+    doc.build(flow, onFirstPage=_draw_repeating_header, onLaterPages=_draw_repeating_header)
     return buf.getvalue()
 
 async def _resolve_doc(coll, doc_id: str, party_id_key: str, party_name_key: str):
