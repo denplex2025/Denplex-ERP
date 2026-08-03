@@ -4795,6 +4795,19 @@ class InvoiceTemplateIn(BaseModel):
     # "modern" = clean serif with accent lines and more whitespace.
     template_style: Literal["standard", "compact", "modern"] = "standard"
 
+    # ---- Template Editor (Settings > Invoice Template > Template Editor) ----
+    # Colors: hex strings (e.g. "#1A1A1A"); empty/invalid silently falls back to the built-in
+    # default in _build_doc_pdf, so a bad value here can never break the PDF.
+    color_heading: Optional[str] = ""   # "Tax Invoice" title, company name — default near-black
+    color_body: Optional[str] = ""      # table/body text — default slate
+    color_accent: Optional[str] = ""    # Grand Total highlight, title underline, borders — default brand red
+    # Table/block widths (mm). 0/missing = use the built-in default; all are clamped in
+    # _build_doc_pdf so a bad value can distort but never overflow the page.
+    item_col_name_mm: float = 0         # Item table "Item name" column
+    item_col_amount_mm: float = 0       # Item table "Amount" column
+    billto_split_mm: float = 0          # Bill To box width; Invoice Details gets the remainder (190mm total)
+    totals_split_mm: float = 0          # Totals sidebar width; Tax Summary gets the remainder (190mm total)
+
 @api.get("/settings/invoice-template")
 async def get_invoice_template(doc_type: Optional[str] = None, user=Depends(get_current_user)):
     """Return template settings. If `doc_type` is supplied, returns the merged
@@ -6420,21 +6433,34 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
     is_interstate = bool((doc_meta or {}).get("is_interstate")) or bool(gst_breakup and gst_breakup.get("igst"))
     _taxable_doc = ((doc_meta or {}).get("invoice_type", "gst") == "gst")   # non_gst / export → no GST blocks
 
-    RED = colors.HexColor("#DC2626")
-    BLACK = colors.HexColor("#0A0A0A")
-    INK = colors.HexColor("#334155")     # softer body ink (slate-700) — lighter, less heavy than pure black
+    def _hex_or(v, default):
+        """Parse a Settings-supplied hex color string ('#rrggbb' or '#rgb'); fall back to the
+        built-in default on anything missing/invalid so a bad value can never break the PDF."""
+        try:
+            if isinstance(v, str) and v.strip().startswith("#") and len(v.strip()) in (4, 7):
+                return colors.HexColor(v.strip())
+        except Exception:
+            pass
+        return default
+
+    # Font colors — editable in Settings > Invoice Template > Template Editor. RED doubles as
+    # the "accent" color (Grand Total highlight, and _accent below for modern/compact presets).
+    RED = _hex_or(tpl.get("color_accent"), colors.HexColor("#DC2626"))
+    BLACK = _hex_or(tpl.get("color_heading"), colors.HexColor("#0A0A0A"))
+    INK = _hex_or(tpl.get("color_body"), colors.HexColor("#334155"))
     GREY = colors.HexColor("#475569")
     LIGHTGREY = colors.HexColor("#F4F6F8")
     BORDER = colors.HexColor("#D7DEE7")
 
     # ---- Style preset (standard / compact / modern) ----
     style_preset = (tpl.get("template_style") or "standard").lower()
+    _custom_accent = tpl.get("color_accent")  # explicit user choice overrides every preset's own accent
     if style_preset == "compact":
         _margin = 6*mm; _body = 7.5; _title_sz = 16; _company_sz = 12; _border_w = 0.4
-        _accent = colors.HexColor("#475569")  # slate grey accent
+        _accent = RED if _custom_accent else colors.HexColor("#475569")  # slate grey accent
     elif style_preset == "modern":
         _margin = 14*mm; _body = 9.0; _title_sz = 22; _company_sz = 14; _border_w = 0.0  # no full borders
-        _accent = colors.HexColor("#1E293B")  # near-black accent
+        _accent = RED if _custom_accent else colors.HexColor("#1E293B")  # near-black accent
     else:  # standard — kept deliberately light/subtle
         _margin = 10*mm; _body = 7.5; _title_sz = 13.5; _company_sz = 11; _border_w = 0.4
         _accent = RED
@@ -6692,7 +6718,8 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
     else:
         meta_lines = meta_main
 
-    bd_tbl = Table([[bill_lines, meta_lines]], colWidths=[95*mm, 95*mm])
+    _billto_w = _clamp_mm(tpl.get("billto_split_mm"), 70, 130, 95) * mm
+    bd_tbl = Table([[bill_lines, meta_lines]], colWidths=[_billto_w, 190*mm - _billto_w])
     bd_tbl.setStyle(TableStyle([
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("BOX", (0, 0), (-1, -1), 0.75, BORDER),
@@ -6755,9 +6782,27 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
     show_unit = _resolve_show("show_unit_column", lambda l: l.get("unit"), default_when_no_data=True)
     show_disc = _resolve_show("show_discount_column", lambda l: float(l.get("discount_amount") or 0) > 0 or float(l.get("discount_pct") or 0) > 0)
     show_inline_gst = bool(tpl.get("show_inline_gst_column"))  # default off — GST shown only in Tax Summary
+    # "Item name" and "Amount" widths are Template Editor-adjustable; every other column is
+    # fixed. To guarantee the row can never overflow the page regardless of which optional
+    # columns happen to be showing, the two adjustable widths are scaled down together if the
+    # user's requested sum doesn't fit what's actually left over.
+    _fixed_col_w = 7*mm + 14*mm + 22*mm  # "#" + Qty + Price/Unit (always shown)
+    if show_code: _fixed_col_w += 22*mm
+    if show_hsn: _fixed_col_w += 18*mm
+    if show_unit: _fixed_col_w += 14*mm
+    if show_disc: _fixed_col_w += 22*mm
+    if show_inline_gst: _fixed_col_w += 22*mm
+    _flex_budget = max((page_size[0] - 2*_margin) - _fixed_col_w, 40*mm)
+    _name_w = _clamp_mm(tpl.get("item_col_name_mm"), 30, 100, 56) * mm
+    _amount_w = _clamp_mm(tpl.get("item_col_amount_mm"), 16, 40, 24) * mm
+    if _name_w + _amount_w > _flex_budget:
+        _scale = _flex_budget / (_name_w + _amount_w)
+        _name_w *= _scale
+        _amount_w *= _scale
+
     # Default columns: # | Item name | Item Code | HSN/SAC | Qty | Unit | Price/Unit | Amount
     cols = ["#", "Item name"]
-    widths = [7*mm, 56*mm]
+    widths = [7*mm, _name_w]
     if show_code:
         cols.append("Item Code"); widths.append(22*mm)
     if show_hsn:
@@ -6770,7 +6815,7 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
         cols.append("Discount"); widths.append(22*mm)
     if show_inline_gst:
         cols.append("GST"); widths.append(22*mm)
-    cols.append("Amount"); widths.append(24*mm)
+    cols.append("Amount"); widths.append(_amount_w)
 
     data = [cols]
     subtotal = 0.0; total_discount = 0.0; total_gst = 0.0; total_amount = 0.0
@@ -6994,7 +7039,8 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
     if bottom_left_blocks or sidebar:
         left_cell = bottom_left_blocks or [Spacer(1, 1)]
         right_cell = sidebar or [Spacer(1, 1)]
-        ts_tbl = Table([[left_cell, right_cell]], colWidths=[125*mm, 65*mm])
+        _totals_w = _clamp_mm(tpl.get("totals_split_mm"), 40, 65, 65) * mm
+        ts_tbl = Table([[left_cell, right_cell]], colWidths=[190*mm - _totals_w, _totals_w])
         ts_tbl.setStyle(TableStyle([
             ("VALIGN", (0,0), (-1,-1), "TOP"),
             ("LEFTPADDING", (0,0), (-1,-1), 0),
