@@ -749,6 +749,7 @@ function InvoiceTemplatePanel() {
   const [allTpl, setAllTpl] = useState(null);   // full map keyed by doc_type
   const [previewUrl, setPreviewUrl] = useState("");
   const [loading, setLoading] = useState(true);
+  const [editorOpen, setEditorOpen] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -760,6 +761,7 @@ function InvoiceTemplatePanel() {
 
   const t = allTpl?.[docType] || {};
   const setFlag = (k) => setAllTpl(p => ({ ...p, [docType]: { ...(p?.[docType] || {}), [k]: !p?.[docType]?.[k] } }));
+  const setField = (k, v) => setAllTpl(p => ({ ...p, [docType]: { ...(p?.[docType] || {}), [k]: v } }));
 
   const save = async () => {
     try {
@@ -791,6 +793,7 @@ function InvoiceTemplatePanel() {
   if (loading || !allTpl) return <Card className="p-6"><div className="text-sm text-slate-500">Loading…</div></Card>;
 
   return (
+    <>
     <div className="grid grid-cols-1 lg:grid-cols-5 gap-4" data-testid="invoice-template-panel">
       <Card className="p-6 lg:col-span-2">
         <div className="flex items-start justify-between gap-3 mb-3 flex-wrap">
@@ -828,6 +831,12 @@ function InvoiceTemplatePanel() {
           <Button size="sm" variant="outline" className="rounded-sm" onClick={livePreview} data-testid="preview-template"><Eye className="h-4 w-4 mr-1" /> Preview</Button>
           <Button size="sm" className="rounded-sm bg-red-600 hover:bg-red-700" onClick={save} data-testid="save-template"><Save className="h-4 w-4 mr-1" /> Save</Button>
           {docType !== "default" && <Button size="sm" variant="outline" className="rounded-sm" onClick={resetThis}>Reset to default</Button>}
+        </div>
+        <div className="mb-4">
+          <Button size="sm" variant="outline" className="rounded-sm w-full" onClick={()=>setEditorOpen(true)} data-testid="open-template-editor">
+            Template Editor — colors &amp; table widths
+          </Button>
+          <p className="text-xs text-slate-500 mt-1">Adjust heading/body/accent colors and table column &amp; block widths for this document type.</p>
         </div>
         <div className="space-y-5 max-h-[65vh] overflow-y-auto -mx-2 px-2">
           {TEMPLATE_SECTIONS.map((sec) => (
@@ -884,6 +893,101 @@ function InvoiceTemplatePanel() {
         )}
       </Card>
     </div>
+
+    <Dialog open={editorOpen} onOpenChange={setEditorOpen}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Template Editor — {DOC_TYPES.find(d=>d.key===docType)?.label}</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-5 max-h-[65vh] overflow-y-auto -mx-1 px-1">
+          <div>
+            <div className="text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-500 mb-2 border-b border-slate-200 pb-1">
+              Font colors
+            </div>
+            <div className="grid grid-cols-3 gap-3 mt-2">
+              {[
+                { key: "color_heading", label: "Heading (title, company name)" },
+                { key: "color_body", label: "Body (table & general text)" },
+                { key: "color_accent", label: "Accent (totals, underline, borders)" },
+              ].map(({ key, label }) => (
+                <div key={key}>
+                  <Label className="text-xs text-slate-600">{label}</Label>
+                  <div className="flex items-center gap-2 mt-1">
+                    <input
+                      type="color"
+                      value={/^#[0-9a-fA-F]{6}$/.test(t[key] || "") ? t[key] : "#000000"}
+                      onChange={(e)=>setField(key, e.target.value)}
+                      className="h-9 w-9 border border-slate-300 rounded-sm cursor-pointer p-0.5 bg-white"
+                      data-testid={`tpl-${key}`}
+                    />
+                    <Input
+                      value={t[key] || ""}
+                      onChange={(e)=>setField(key, e.target.value)}
+                      placeholder="Default"
+                      className="h-9 text-sm"
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+            <p className="text-xs text-slate-500 mt-2">Leave a field blank to use the default color for that style preset.</p>
+          </div>
+
+          <div>
+            <div className="text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-500 mb-2 border-b border-slate-200 pb-1">
+              Line items table — column widths (mm)
+            </div>
+            <div className="grid grid-cols-2 gap-3 mt-2">
+              <div>
+                <Label className="text-xs text-slate-600">"Item name" column width</Label>
+                <Input type="number" min="30" max="100" value={t.item_col_name_mm || ""} placeholder="56 (default)"
+                  onChange={(e)=>setField("item_col_name_mm", e.target.value === "" ? 0 : Number(e.target.value))} className="h-9 text-sm mt-1" />
+              </div>
+              <div>
+                <Label className="text-xs text-slate-600">"Amount" column width</Label>
+                <Input type="number" min="16" max="40" value={t.item_col_amount_mm || ""} placeholder="24 (default)"
+                  onChange={(e)=>setField("item_col_amount_mm", e.target.value === "" ? 0 : Number(e.target.value))} className="h-9 text-sm mt-1" />
+              </div>
+            </div>
+            <p className="text-xs text-slate-500 mt-2">Other item columns stay fixed-width; these two are auto-scaled down together if they don't fit the page.</p>
+          </div>
+
+          <div>
+            <div className="text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-500 mb-2 border-b border-slate-200 pb-1">
+              Block widths (mm)
+            </div>
+            <div className="grid grid-cols-2 gap-3 mt-2">
+              <div>
+                <Label className="text-xs text-slate-600">Bill To box width (190mm total)</Label>
+                <Input type="number" min="70" max="130" value={t.billto_split_mm || ""} placeholder="95 (default)"
+                  onChange={(e)=>setField("billto_split_mm", e.target.value === "" ? 0 : Number(e.target.value))} className="h-9 text-sm mt-1" />
+                <p className="text-xs text-slate-500 mt-1">Invoice Details box gets the remaining width.</p>
+              </div>
+              <div>
+                <Label className="text-xs text-slate-600">Totals sidebar width (190mm total)</Label>
+                <Input type="number" min="40" max="65" value={t.totals_split_mm || ""} placeholder="65 (default)"
+                  onChange={(e)=>setField("totals_split_mm", e.target.value === "" ? 0 : Number(e.target.value))} className="h-9 text-sm mt-1" />
+                <p className="text-xs text-slate-500 mt-1">Tax Summary table gets the remaining width.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+        <DialogFooter className="gap-2">
+          <Button size="sm" variant="outline" className="rounded-sm" onClick={()=>{
+            setAllTpl(p => ({ ...p, [docType]: { ...(p?.[docType]||{}),
+              color_heading: "", color_body: "", color_accent: "",
+              item_col_name_mm: 0, item_col_amount_mm: 0, billto_split_mm: 0, totals_split_mm: 0 } }));
+          }}>Reset to defaults</Button>
+          <Button size="sm" variant="outline" className="rounded-sm" onClick={()=>{ livePreview(); }}>
+            <Eye className="h-4 w-4 mr-1" /> Preview
+          </Button>
+          <Button size="sm" className="rounded-sm bg-red-600 hover:bg-red-700" onClick={async ()=>{ await save(); setEditorOpen(false); }}>
+            <Save className="h-4 w-4 mr-1" /> Save &amp; Close
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+    </>
   );
 }
 
