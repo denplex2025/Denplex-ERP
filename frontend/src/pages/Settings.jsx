@@ -145,6 +145,16 @@ export default function Settings() {
               />
             </div>
 
+            <h3 className="font-display text-lg font-semibold mt-8 mb-4">Invoice font</h3>
+            <p className="text-sm text-slate-600 mb-3">Applies to Tax Invoice, Purchase Order, Purchase Bill and every other printed document. If a font isn't available on the server it silently falls back to the default, so this can't break the PDF.</p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-2">
+              <Fld label="Font">
+                <select value={s.font_family || "lato_light"} onChange={e=>setF("font_family", e.target.value)} className="w-full h-9 text-sm border border-slate-200 rounded-sm px-2 bg-white">
+                  {FONT_OPTIONS.map(f => <option key={f.key} value={f.key}>{f.label}</option>)}
+                </select>
+              </Fld>
+            </div>
+
             <h3 className="font-display text-lg font-semibold mt-8 mb-2">Manufacturing units</h3>
             <p className="text-sm text-slate-600 mb-3">Add each unit/factory. The PDF header will render every unit listed here. If empty, falls back to the single address above.</p>
             <UnitsEditor units={s.company_units || []} onChange={(arr)=>setF("company_units", arr)} />
@@ -602,6 +612,18 @@ function SignatoryUpload({ value, onChange }) {
     </Fld>
   );
 }
+
+// Keep in sync with _FONT_CATALOG in backend/server.py
+const FONT_OPTIONS = [
+  { key: "lato_light",       label: "Lato Light (closest open equivalent to Calibri Light) — recommended" },
+  { key: "liberation_sans",  label: "Liberation Sans (Arial-style)" },
+  { key: "liberation_serif", label: "Liberation Serif (Times New Roman-style)" },
+  { key: "carlito",          label: "Carlito (Calibri-style)" },
+  { key: "caladea",          label: "Caladea (Cambria-style, modern serif)" },
+  { key: "lato_regular",     label: "Lato Regular" },
+  { key: "dejavu_sans",      label: "DejaVu Sans" },
+  { key: "noto_sans",        label: "Noto Sans" },
+];
 
 function IsoLogoUpload({ value, onChange, width, height, onWidth, onHeight }) {
   const onPick = (e) => {
