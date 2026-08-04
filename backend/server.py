@@ -315,6 +315,21 @@ def create_token(uid: str, role: str) -> str:
     payload = {"sub": uid, "role": role, "exp": datetime.now(timezone.utc) + timedelta(days=7)}
     return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
 
+def _normalize_phone(raw: str) -> str:
+    """Parse a phone number into E.164 (e.g. +919876543210). Defaults to India ("IN") when
+    no country code is given, since Denplex's user base is India-only. Raises ValueError with
+    a user-facing message on anything unparseable."""
+    raw = (raw or "").strip()
+    if not raw:
+        raise ValueError("Phone number required")
+    try:
+        parsed = phonenumbers.parse(raw, None if raw.startswith("+") else "IN")
+        if not phonenumbers.is_valid_number(parsed):
+            raise ValueError("Invalid phone number")
+        return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
+    except phonenumbers.NumberParseException as ex:
+        raise ValueError(f"Phone parse error: {ex}")
+
 async def get_current_user(creds: Optional[HTTPAuthorizationCredentials] = Depends(security)) -> Dict[str, Any]:
     if not creds:
         raise HTTPException(401, "Not authenticated")
@@ -397,6 +412,27 @@ class LoginIn(BaseModel):
     email: EmailStr
     password: str
     totp_code: Optional[str] = ""
+
+class ProfileUpdateIn(BaseModel):
+    """Self-service profile fields any logged-in user may edit about themselves.
+    Phone is what enables the mobile-OTP forgot-password flow for that account."""
+    name: Optional[str] = None
+    phone: Optional[str] = None
+
+class ForgotPasswordIn(BaseModel):
+    email: EmailStr
+
+class ResetPasswordIn(BaseModel):
+    token: str
+    new_password: str
+
+class OtpRequestIn(BaseModel):
+    phone: str
+
+class OtpVerifyIn(BaseModel):
+    phone: str
+    otp: str
+    new_password: str
 
 class Customer(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -1791,6 +1827,7 @@ async def register(payload: RegisterIn, request: Request, current=Depends(get_cu
         "role": payload.role,
         "unit": (payload.unit or "Unit 1"),
         "password": hash_password(payload.password),
+        "phone": "",
         "created_at": now_iso(),
     }
     await db.users.insert_one(user)
@@ -1856,6 +1893,176 @@ async def change_password(payload: ChangePwIn, request: Request, user=Depends(ge
         raise HTTPException(401, "Current password is incorrect")
     await db.users.update_one({"id": user["id"]}, {"$set": {"password": hash_password(payload.new_password)}})
     await write_audit(user["name"], "password_changed", "user", user["id"], request=request)
+    return {"ok": True}
+
+@api.put("/auth/profile")
+async def update_profile(payload: ProfileUpdateIn, request: Request, user=Depends(get_current_user)):
+    """Self-service profile update. Any logged-in user can set their own display name and
+    mobile number — the phone is what makes the WhatsApp-OTP forgot-password option available
+    for their account. Email/role changes are deliberately not exposed here (admin-only via
+    /auth/register semantics)."""
+    updates: Dict[str, Any] = {}
+    if payload.name is not None:
+        name = payload.name.strip()
+        if not name:
+            raise HTTPException(400, "Name cannot be empty")
+        updates["name"] = name
+    if payload.phone is not None:
+        phone = payload.phone.strip()
+        if phone:
+            try:
+                e164 = _normalize_phone(phone)
+            except ValueError as e:
+                raise HTTPException(422, str(e))
+            existing = await db.users.find_one({"phone": e164, "id": {"$ne": user["id"]}})
+            if existing:
+                raise HTTPException(400, "This phone number is already linked to another account")
+            updates["phone"] = e164
+        else:
+            updates["phone"] = ""
+    if not updates:
+        raise HTTPException(400, "Nothing to update")
+    await db.users.update_one({"id": user["id"]}, {"$set": updates})
+    await write_audit(user["name"], "profile_updated", "user", user["id"], updates, request=request)
+    u = await db.users.find_one({"id": user["id"]}, {"_id": 0, "password": 0, "totp_secret": 0})
+    return u
+
+# ---------------- Forgot password: email link ----------------
+_PASSWORD_RESET_TTL_MIN = 30
+
+@api.post("/auth/forgot-password")
+async def forgot_password(payload: ForgotPasswordIn, request: Request):
+    """Always returns the same generic message regardless of whether the email is registered,
+    so this endpoint can't be used to enumerate valid accounts."""
+    generic = {"ok": True, "message": "If that email is registered, we've sent a password reset link. It expires in 30 minutes."}
+    user = await db.users.find_one({"email": payload.email.lower()})
+    if not user:
+        return generic
+    token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    await db.password_resets.insert_one({
+        "id": new_id(),
+        "user_id": user["id"],
+        "token_hash": token_hash,
+        "created_at": now_iso(),
+        "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=_PASSWORD_RESET_TTL_MIN)).isoformat(),
+        "used": False,
+    })
+    reset_link = f"{QR_BASE_URL}/reset-password?token={token}"
+    try:
+        await _send_system_email(
+            to=user["email"],
+            subject="Reset your Denplex ERP password",
+            html=(
+                f"<p>Hi {user.get('name') or ''},</p>"
+                f"<p>We received a request to reset your Denplex ERP password. This link is valid for {_PASSWORD_RESET_TTL_MIN} minutes.</p>"
+                f"<p><a href='{reset_link}' style='display:inline-block;padding:10px 18px;background:#dc2626;color:#fff;"
+                f"text-decoration:none;border-radius:4px;'>Reset your password</a></p>"
+                f"<p style='color:#64748b;font-size:12px;'>Or paste this link into your browser:<br>{reset_link}</p>"
+                f"<p style='color:#64748b;font-size:12px;'>If you didn't request this, you can safely ignore this email — your password won't change.</p>"
+            ),
+        )
+        await write_audit(user.get("name") or user["email"], "password_reset_requested", "auth", user["id"], request=request)
+    except Exception as e:
+        logger.exception("forgot-password email send failed: %s", e)
+        # Deliberately not surfaced to the (unauthenticated) caller — avoids leaking SMTP
+        # config details, and keeps the response identical whether or not the email exists.
+    return generic
+
+@api.post("/auth/reset-password")
+async def reset_password(payload: ResetPasswordIn, request: Request):
+    if len(payload.new_password) < 8:
+        raise HTTPException(400, "New password must be at least 8 characters")
+    token_hash = hashlib.sha256(payload.token.encode()).hexdigest()
+    rec = await db.password_resets.find_one({"token_hash": token_hash, "used": False})
+    if not rec:
+        raise HTTPException(400, "Invalid or already-used reset link. Please request a new one.")
+    if datetime.fromisoformat(rec["expires_at"]) < datetime.now(timezone.utc):
+        raise HTTPException(400, "This reset link has expired. Please request a new one.")
+    u = await db.users.find_one({"id": rec["user_id"]})
+    if not u:
+        raise HTTPException(400, "Account not found")
+    await db.users.update_one({"id": rec["user_id"]}, {"$set": {"password": hash_password(payload.new_password)}})
+    await db.password_resets.update_one({"id": rec["id"]}, {"$set": {"used": True}})
+    await write_audit(u.get("name") or u.get("email") or "", "password_reset_completed", "auth", rec["user_id"], request=request)
+    return {"ok": True}
+
+# ---------------- Forgot password: mobile OTP via WhatsApp ----------------
+_OTP_TTL_MIN = 10
+_OTP_MAX_REQUESTS_PER_WINDOW = 3
+_OTP_MAX_VERIFY_ATTEMPTS = 5
+
+@api.post("/auth/otp/request")
+async def otp_request(payload: OtpRequestIn, request: Request):
+    """Sends a 6-digit OTP over WhatsApp (via the Twilio integration already configured in
+    Settings) to the mobile number on file for that account. Always returns the same generic
+    message so this can't be used to enumerate which numbers are registered."""
+    generic = {"ok": True, "message": "If that mobile number is registered, we've sent an OTP on WhatsApp. It expires in 10 minutes."}
+    try:
+        phone = _normalize_phone(payload.phone)
+    except ValueError:
+        return generic
+    user = await db.users.find_one({"phone": phone})
+    if not user:
+        return generic
+    window_start = (datetime.now(timezone.utc) - timedelta(minutes=_OTP_TTL_MIN)).isoformat()
+    recent_count = await db.otp_codes.count_documents({"phone": phone, "created_at": {"$gte": window_start}})
+    if recent_count >= _OTP_MAX_REQUESTS_PER_WINDOW:
+        raise HTTPException(429, "Too many OTP requests for this number. Please wait a few minutes and try again.")
+    cfg = await get_setting("integrations")
+    sid = cfg.get("twilio_account_sid"); tok = cfg.get("twilio_auth_token"); frm = cfg.get("twilio_whatsapp_from")
+    if not (sid and tok and frm):
+        logger.warning("OTP requested for %s but Twilio WhatsApp is not configured", phone)
+        return generic
+    otp = f"{secrets.randbelow(1_000_000):06d}"
+    otp_hash = hashlib.sha256(otp.encode()).hexdigest()
+    await db.otp_codes.insert_one({
+        "id": new_id(),
+        "phone": phone,
+        "otp_hash": otp_hash,
+        "created_at": now_iso(),
+        "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=_OTP_TTL_MIN)).isoformat(),
+        "attempts": 0,
+        "used": False,
+    })
+    def _send():
+        client = TwilioClient(sid, tok)
+        return client.messages.create(
+            body=f"Your Denplex ERP password reset OTP is {otp}. It's valid for {_OTP_TTL_MIN} minutes. Don't share this code with anyone.",
+            from_=frm, to=f"whatsapp:{phone}",
+        )
+    try:
+        await asyncio.to_thread(_send)
+        await write_audit(user.get("name") or phone, "otp_requested", "auth", user["id"], request=request)
+    except TwilioRestException as e:
+        logger.exception("OTP WhatsApp send failed for %s: %s", phone, e.msg)
+    return generic
+
+@api.post("/auth/otp/verify")
+async def otp_verify(payload: OtpVerifyIn, request: Request):
+    if len(payload.new_password) < 8:
+        raise HTTPException(400, "New password must be at least 8 characters")
+    try:
+        phone = _normalize_phone(payload.phone)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    rec = await db.otp_codes.find_one({"phone": phone, "used": False}, sort=[("created_at", -1)])
+    if not rec:
+        raise HTTPException(400, "No active OTP for this number. Please request a new one.")
+    if datetime.fromisoformat(rec["expires_at"]) < datetime.now(timezone.utc):
+        raise HTTPException(400, "This OTP has expired. Please request a new one.")
+    if rec.get("attempts", 0) >= _OTP_MAX_VERIFY_ATTEMPTS:
+        raise HTTPException(429, "Too many incorrect attempts. Please request a new OTP.")
+    otp_hash = hashlib.sha256(payload.otp.strip().encode()).hexdigest()
+    if otp_hash != rec["otp_hash"]:
+        await db.otp_codes.update_one({"id": rec["id"]}, {"$inc": {"attempts": 1}})
+        raise HTTPException(400, "Incorrect OTP")
+    user = await db.users.find_one({"phone": phone})
+    if not user:
+        raise HTTPException(400, "Account not found")
+    await db.users.update_one({"id": user["id"]}, {"$set": {"password": hash_password(payload.new_password)}})
+    await db.otp_codes.update_one({"id": rec["id"]}, {"$set": {"used": True}})
+    await write_audit(user.get("name") or phone, "password_reset_completed_otp", "auth", user["id"], request=request)
     return {"ok": True}
 
 @api.get("/users")
@@ -4744,16 +4951,42 @@ class IntegrationSettingsIn(BaseModel):
                                     "4) Payment requested by CASH/CHEQUE/Bank Transfer only\n"
                                     "5) If any rejection or rework occurs please notify withing 10 days of material receipt after that it won't be accepted.")
     invoice_description: Optional[str] = ""
+    # System email sender — used ONLY for transactional/system mail (password-reset links),
+    # kept separate from personal mailboxes connected under Settings > Email Accounts so
+    # resets keep working even if an individual's connected inbox is removed/disconnected.
+    system_smtp_email: Optional[str] = ""
+    system_smtp_app_password: Optional[str] = ""  # write-only: never echoed back by GET
+    system_smtp_host: Optional[str] = ""           # blank = autodetect from email domain
+    system_smtp_port: Optional[int] = 0             # blank/0 = autodetect from email domain
+    system_smtp_label: Optional[str] = "Denplex ERP"
 
 @api.get("/settings/integrations")
 async def get_integrations(user=Depends(require_roles("admin"))):
-    return await get_setting("integrations")
+    s = await get_setting("integrations")
+    out = dict(s)
+    # Never return the real secret; expose only whether one is on file so the Settings UI can
+    # show "configured" and leave the field blank (blank on save = keep existing password).
+    out["system_smtp_configured"] = bool(out.get("system_smtp_app_password_encrypted"))
+    out["system_smtp_app_password"] = ""
+    out.pop("system_smtp_app_password_encrypted", None)
+    return out
 
 @api.put("/settings/integrations")
 async def update_integrations(payload: IntegrationSettingsIn, user=Depends(require_roles("admin"))):
     data = payload.model_dump()
+    raw_pw = (data.pop("system_smtp_app_password", "") or "").strip()
+    if raw_pw:
+        data["system_smtp_app_password_encrypted"] = _enc(raw_pw)
+    else:
+        # Blank field on save means "keep whatever's already configured" — don't wipe it out.
+        existing = await get_setting("integrations")
+        data["system_smtp_app_password_encrypted"] = existing.get("system_smtp_app_password_encrypted", "")
     await set_setting("integrations", data)
-    return data
+    out = dict(data)
+    out["system_smtp_configured"] = bool(out.get("system_smtp_app_password_encrypted"))
+    out["system_smtp_app_password"] = ""
+    out.pop("system_smtp_app_password_encrypted", None)
+    return out
 
 # ---------- Invoice Template (per-section visibility toggles) ----------
 class InvoiceTemplateIn(BaseModel):
@@ -4884,17 +5117,7 @@ def _format_in_whatsapp(raw: str) -> str:
         raise ValueError("Empty phone number")
     if raw.lower().startswith("whatsapp:"):
         return raw
-    try:
-        if raw.startswith("+"):
-            parsed = phonenumbers.parse(raw, None)
-        else:
-            parsed = phonenumbers.parse(raw, "IN")
-        if not phonenumbers.is_valid_number(parsed):
-            raise ValueError("Invalid phone number")
-        e164 = phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
-    except phonenumbers.NumberParseException as ex:
-        raise ValueError(f"Phone parse error: {ex}")
-    return f"whatsapp:{e164}"
+    return f"whatsapp:{_normalize_phone(raw)}"
 
 class WhatsAppSendIn(BaseModel):
     to_phone: str
@@ -7668,6 +7891,42 @@ DEFAULT_PROVIDER = {"smtp_host": "smtp.gmail.com", "smtp_port": 465, "imap_host"
 def _autodetect(email_addr: str) -> Dict[str, Any]:
     dom = (email_addr or "").lower().split("@")[-1]
     return EMAIL_PROVIDERS.get(dom, DEFAULT_PROVIDER)
+
+async def _send_system_email(to: str, subject: str, html: str) -> None:
+    """Send a transactional/system email (password reset links, etc.) using the dedicated
+    system sender configured in Settings > Integrations > System Email — separate from any
+    personal mailbox connected under Settings > Email Accounts. Raises RuntimeError if not
+    configured, or the underlying smtplib exception on send failure."""
+    cfg = await get_setting("integrations")
+    sender = (cfg.get("system_smtp_email") or "").strip()
+    pw_enc = cfg.get("system_smtp_app_password_encrypted") or ""
+    if not sender or not pw_enc:
+        raise RuntimeError("System email sender not configured (Settings → Integrations → System Email).")
+    pw = _dec(pw_enc)
+    if not pw:
+        raise RuntimeError("System email password could not be decrypted — please re-save it in Settings.")
+    preset = _autodetect(sender)
+    smtp_host = (cfg.get("system_smtp_host") or "").strip() or preset["smtp_host"]
+    smtp_port = int(cfg.get("system_smtp_port") or 0) or preset["smtp_port"]
+    from_name = cfg.get("system_smtp_label") or "Denplex ERP"
+    msg = EmailMessage()
+    msg["From"] = f"{from_name} <{sender}>"
+    msg["To"] = to
+    msg["Subject"] = subject
+    msg.set_content("This email contains HTML content. Please use an HTML-capable client.")
+    msg.add_alternative(html, subtype="html")
+    def _do_send():
+        ctx = ssl.create_default_context()
+        if int(smtp_port) == 465:
+            with smtplib.SMTP_SSL(smtp_host, int(smtp_port), context=ctx, timeout=30) as s:
+                s.login(sender, pw)
+                s.send_message(msg)
+        else:
+            with smtplib.SMTP(smtp_host, int(smtp_port), timeout=30) as s:
+                s.ehlo(); s.starttls(context=ctx); s.ehlo()
+                s.login(sender, pw)
+                s.send_message(msg)
+    await asyncio.to_thread(_do_send)
 
 def _app_pw_hint(label: str) -> str:
     """Provider-specific hint shown in 4xx/5xx auth errors."""
