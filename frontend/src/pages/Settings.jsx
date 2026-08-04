@@ -107,6 +107,7 @@ export default function Settings() {
           <TabsTrigger value="gdrive" className="rounded-sm" data-testid="tab-gdrive">Google Drive</TabsTrigger>
           <TabsTrigger value="template" className="rounded-sm" data-testid="tab-template">Invoice Template</TabsTrigger>
           <TabsTrigger value="email" className="rounded-sm" data-testid="tab-email">Email Accounts</TabsTrigger>
+          <TabsTrigger value="system-email" className="rounded-sm" data-testid="tab-system-email">System Email</TabsTrigger>
           <TabsTrigger value="vyapar" className="rounded-sm" data-testid="tab-vyapar">Vyapar Import</TabsTrigger>
           <TabsTrigger value="twilio" className="rounded-sm" data-testid="tab-twilio">Twilio WhatsApp</TabsTrigger>
           <TabsTrigger value="indiamart" className="rounded-sm" data-testid="tab-indiamart">Indiamart</TabsTrigger>
@@ -242,6 +243,34 @@ export default function Settings() {
 
         <TabsContent value="email">
           <EmailAccountsPanel />
+        </TabsContent>
+
+        <TabsContent value="system-email">
+          <Card className="p-6">
+            <h3 className="font-display text-lg font-semibold mb-1">System email sender</h3>
+            <p className="text-sm text-slate-600 mb-4">
+              Used only for automated system emails — right now, password-reset links sent from the sign-in page's
+              "Forgot password?" flow. This is separate from the personal mailboxes connected under{" "}
+              <strong>Email Accounts</strong>, so resets keep working even if someone disconnects their own inbox.
+              {s.system_smtp_configured && <span className="ml-1 text-emerald-600 font-medium">✓ Configured</span>}
+            </p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <Fld label="Sender email"><Input type="email" value={s.system_smtp_email || ""} onChange={e=>setF("system_smtp_email", e.target.value)} placeholder="noreply@denplex.co" className="rounded-sm" data-testid="system-smtp-email" /></Fld>
+              <Fld label="Display name"><Input value={s.system_smtp_label || ""} onChange={e=>setF("system_smtp_label", e.target.value)} placeholder="Denplex ERP" className="rounded-sm" data-testid="system-smtp-label" /></Fld>
+              <Fld label={s.system_smtp_configured ? "App password (leave blank to keep current)" : "App password"}>
+                <Input type="password" value={s.system_smtp_app_password || ""} onChange={e=>setF("system_smtp_app_password", e.target.value)} placeholder={s.system_smtp_configured ? "••••••••" : "16-character app password"} className="rounded-sm font-mono-tech" data-testid="system-smtp-password" />
+              </Fld>
+              <div className="grid grid-cols-2 gap-3">
+                <Fld label="SMTP host (optional — autodetected)"><Input value={s.system_smtp_host || ""} onChange={e=>setF("system_smtp_host", e.target.value)} placeholder="smtp.gmail.com" className="rounded-sm font-mono-tech" /></Fld>
+                <Fld label="SMTP port"><Input type="number" value={s.system_smtp_port || ""} onChange={e=>setF("system_smtp_port", Number(e.target.value))} placeholder="465" className="rounded-sm font-mono-tech" /></Fld>
+              </div>
+            </div>
+            <p className="text-xs text-slate-500 mt-3">
+              For Gmail/Workspace: turn on 2-Step Verification, then create an App Password at{" "}
+              <a className="text-red-600 underline" target="_blank" rel="noreferrer" href="https://myaccount.google.com/apppasswords">myaccount.google.com/apppasswords</a> and paste it here.
+            </p>
+            <div className="mt-4"><Button onClick={save} className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="save-system-email"><Save className="h-4 w-4 mr-1" /> Save</Button></div>
+          </Card>
         </TabsContent>
 
         <TabsContent value="twilio">

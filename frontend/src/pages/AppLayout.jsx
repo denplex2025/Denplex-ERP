@@ -240,11 +240,11 @@ export default function AppLayout() {
           ))}
         </nav>
         <div className="absolute bottom-0 left-0 right-0 p-3 border-t border-slate-200 bg-white">
-          <div className="px-2 py-1">
+          <Link to="/app/profile" onClick={() => setOpen(false)} className="block px-2 py-1 rounded-sm hover:bg-slate-50" data-testid="nav-profile">
             <div className="text-xs text-slate-500 uppercase tracking-wider">Signed in</div>
             <div className="text-sm font-medium text-slate-900 truncate">{user.name}</div>
             <div className="text-xs text-slate-500 uppercase tracking-wider mt-0.5">{user.role}</div>
-          </div>
+          </Link>
           <Button variant="ghost" onClick={handleLogout} className="w-full justify-start rounded-sm mt-2 text-slate-600" data-testid="logout-button">
             <LogOut className="h-4 w-4 mr-2" /> Sign out
           </Button>

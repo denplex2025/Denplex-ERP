@@ -70,7 +70,10 @@ export default function Login() {
               <Input id="email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} required className="mt-1.5 rounded-sm border-slate-300 focus-visible:ring-red-600" data-testid="login-email-input" />
             </div>
             <div>
-              <Label htmlFor="password" className="text-xs font-semibold uppercase tracking-wider text-slate-600">Password</Label>
+              <div className="flex items-center justify-between">
+                <Label htmlFor="password" className="text-xs font-semibold uppercase tracking-wider text-slate-600">Password</Label>
+                <Link to="/forgot-password" className="text-xs text-red-600 hover:text-red-700 hover:underline" data-testid="forgot-password-link">Forgot password?</Link>
+              </div>
               <Input id="password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} required className="mt-1.5 rounded-sm border-slate-300 focus-visible:ring-red-600" data-testid="login-password-input" />
             </div>
             {needs2fa && (
