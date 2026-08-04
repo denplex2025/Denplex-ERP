@@ -38,8 +38,17 @@ export function AuthProvider({ children }) {
     setUser(null);
   };
 
+  // Re-fetch /auth/me and refresh the cached user (e.g. after a profile edit on /app/profile
+  // so the sidebar name and everywhere else reading `user` picks up the change immediately).
+  const refreshUser = async () => {
+    const r = await api.get("/auth/me");
+    setUser(r.data);
+    localStorage.setItem("erp_user", JSON.stringify(r.data));
+    return r.data;
+  };
+
   return (
-    <AuthContext.Provider value={{ user, login, logout, loading }}>
+    <AuthContext.Provider value={{ user, login, logout, loading, refreshUser }}>
       {children}
     </AuthContext.Provider>
   );
