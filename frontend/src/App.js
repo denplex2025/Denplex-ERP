@@ -5,6 +5,8 @@ import { Toaster } from "sonner";
 
 import Landing from "@/pages/Landing";
 import Login from "@/pages/Login";
+import ForgotPassword from "@/pages/ForgotPassword";
+import ResetPassword from "@/pages/ResetPassword";
 import Portal from "@/pages/Portal";
 import AppLayout from "@/pages/AppLayout";
 import Dashboard from "@/pages/Dashboard";
@@ -25,6 +27,7 @@ import Accounting from "@/pages/Accounting";
 import HR from "@/pages/HR";
 import Marketing from "@/pages/Marketing";
 import Settings from "@/pages/Settings";
+import Profile from "@/pages/Profile";
 import AuditLog from "@/pages/AuditLog";
 import Trial from "@/pages/Trial";
 import TrialRequests from "@/pages/TrialRequests";
@@ -88,10 +91,13 @@ function App() {
           <Routes>
             <Route path="/" element={<Landing />} />
             <Route path="/login" element={<Login />} />
+            <Route path="/forgot-password" element={<ForgotPassword />} />
+            <Route path="/reset-password" element={<ResetPassword />} />
             <Route path="/portal" element={<Portal />} />
             <Route path="/trial" element={<Trial />} />
             <Route path="/app" element={<Protected><AppLayout /></Protected>}>
               <Route index element={<Dashboard />} />
+              <Route path="profile" element={<Profile />} />
               <Route path="inventory" element={<Inventory />} />
               <Route path="bom" element={<BOMPage />} />
               <Route path="work-orders" element={<WorkOrders />} />
