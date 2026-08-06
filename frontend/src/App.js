@@ -82,6 +82,11 @@ import PurchaseRequisitions from "./pages/PurchaseRequisitions";
 import SourcingTendering from "./pages/SourcingTendering";
 import GoodsReceipt from "./pages/GoodsReceipt";
 import SpendAnalytics from "./pages/SpendAnalytics";
+import MobileLayout from "./pages/mobile/MobileLayout";
+import MobileHome from "./pages/mobile/MobileHome";
+import MobileDashboard from "./pages/mobile/MobileDashboard";
+import MobileItems from "./pages/mobile/MobileItems";
+import MobileMenu from "./pages/mobile/MobileMenu";
 
 function App() {
   return (
@@ -161,6 +166,12 @@ function App() {
               <Route index element={<WorkerHome />} />
               <Route path="production" element={<WorkerProduction />} />
               <Route path="qc" element={<WorkerQC />} />
+            </Route>
+            <Route path="/m" element={<Protected><MobileLayout /></Protected>}>
+              <Route index element={<MobileHome />} />
+              <Route path="dashboard" element={<MobileDashboard />} />
+              <Route path="items" element={<MobileItems />} />
+              <Route path="menu" element={<MobileMenu />} />
             </Route>
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
