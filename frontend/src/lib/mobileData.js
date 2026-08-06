@@ -89,9 +89,14 @@ export async function loadMobileFinancials() {
     .map((it) => ({ name: it.name, shortfall: round2(Number(it.qty_on_hand || 0) - Number(it.reorder_level || 0)) }))
     .sort((a, b) => a.shortfall - b.shortfall);
 
-  // Open sale / purchase transactions
-  const openInvoices = invoices.filter((i) => round2(Number(i.total || 0) - Number(invSettled[i.id] || 0)) > 0.01);
-  const openBills = bills.filter((b) => round2(Number(b.total || 0) - Number(billSettled[b.id] || 0)) > 0.01);
+  // Open sale / purchase transactions — map in the computed balance, since the raw invoice/bill
+  // objects only carry `total`, not a settled-adjusted `balance` field.
+  const openInvoices = invoices
+    .map((i) => ({ ...i, balance: round2(Number(i.total || 0) - Number(invSettled[i.id] || 0)) }))
+    .filter((i) => i.balance > 0.01);
+  const openBills = bills
+    .map((b) => ({ ...b, balance: round2(Number(b.total || 0) - Number(billSettled[b.id] || 0)) }))
+    .filter((b) => b.balance > 0.01);
 
   // Cheques
   const receivedCheques = cheques.filter((c) => c.direction === "in" && c.cheque_status === "Pending");
