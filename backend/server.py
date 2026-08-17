@@ -1880,6 +1880,7 @@ async def login(payload: LoginIn, request: Request):
         "user": {
             "id": user["id"], "name": user["name"], "email": user["email"], "role": user["role"],
             "trial_expires_at": user.get("trial_expires_at", ""),
+            "module_access": user.get("module_access") or {},
         }
     }
 
@@ -2099,6 +2100,70 @@ async def otp_verify(payload: OtpVerifyIn, request: Request):
 @api.get("/users")
 async def list_users(user=Depends(require_roles("admin"))):
     return await db.users.find({}, {"_id": 0, "password": 0, "totp_secret": 0}).to_list(500)
+
+class UserUpdateIn(BaseModel):
+    """Admin-only edit of another user's account. All fields optional — only what's sent gets
+    changed. `module_access` is a per-user override map (e.g. {"quality": true}) layered on top of
+    the coarse role-based nav gating already in AppLayout.jsx/MobileMenu.jsx: a key set to True shows
+    that module even if the role wouldn't normally get it, False hides it even if the role would."""
+    name: Optional[str] = None
+    email: Optional[EmailStr] = None
+    role: Optional[Literal["admin", "manager", "production", "qc", "accountant", "ca", "sales", "design", "employee", "trial"]] = None
+    unit: Optional[str] = None
+    module_access: Optional[Dict[str, bool]] = None
+
+class UserPasswordResetIn(BaseModel):
+    new_password: str
+
+@api.put("/users/{uid}")
+async def update_user(uid: str, payload: UserUpdateIn, request: Request, current=Depends(require_roles("admin"))):
+    target = await db.users.find_one({"id": uid})
+    if not target:
+        raise HTTPException(404, "User not found")
+    data = payload.model_dump(exclude_unset=True)
+    if "email" in data and data["email"]:
+        data["email"] = data["email"].lower()
+        dup = await db.users.find_one({"email": data["email"], "id": {"$ne": uid}})
+        if dup:
+            raise HTTPException(400, "Email already exists")
+    if data.get("role") and data["role"] != "admin" and target.get("role") == "admin":
+        # Guard against locking everyone out by demoting the last remaining admin
+        admin_count = await db.users.count_documents({"role": "admin"})
+        if admin_count <= 1:
+            raise HTTPException(400, "Cannot demote the last remaining admin")
+    if data:
+        await db.users.update_one({"id": uid}, {"$set": data})
+    await write_audit(current.get("name", "admin"), "user_updated", "user", uid, data, request=request)
+    return await db.users.find_one({"id": uid}, {"_id": 0, "password": 0, "totp_secret": 0})
+
+@api.delete("/users/{uid}")
+async def delete_user(uid: str, request: Request, current=Depends(require_roles("admin"))):
+    if uid == current["id"]:
+        raise HTTPException(400, "You cannot delete your own account")
+    target = await db.users.find_one({"id": uid})
+    if not target:
+        raise HTTPException(404, "User not found")
+    if target.get("role") == "admin":
+        admin_count = await db.users.count_documents({"role": "admin"})
+        if admin_count <= 1:
+            raise HTTPException(400, "Cannot delete the last remaining admin")
+    await db.users.delete_one({"id": uid})
+    await write_audit(current.get("name", "admin"), "user_deleted", "user", uid, {"email": target.get("email")}, request=request)
+    return {"ok": True}
+
+@api.put("/users/{uid}/password")
+async def admin_reset_user_password(uid: str, payload: UserPasswordResetIn, request: Request, current=Depends(require_roles("admin"))):
+    """Lets an admin set a new password for another user directly (they've lost access to their
+    email/phone, forgot their password, etc.) — separate from /auth/change-password, which only
+    lets a user change their own password with the old one as proof."""
+    if len(payload.new_password) < 8:
+        raise HTTPException(400, "New password must be at least 8 characters")
+    target = await db.users.find_one({"id": uid})
+    if not target:
+        raise HTTPException(404, "User not found")
+    await db.users.update_one({"id": uid}, {"$set": {"password": hash_password(payload.new_password)}})
+    await write_audit(current.get("name", "admin"), "user_password_reset_by_admin", "user", uid, {}, request=request)
+    return {"ok": True}
 
 # ---------------- Generic CRUD helpers ----------------
 def serialize(d: Dict[str, Any]) -> Dict[str, Any]:
