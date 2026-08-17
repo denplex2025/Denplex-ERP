@@ -73,6 +73,7 @@ const NAV_GROUPS = [
   },
   {
     head: "Sales",
+    moduleKey: "sales",
     roles: ["manager", "sales"],
     items: [
       { to: "/app/leads", label: "Leads", icon: UserPlus, testid: "nav-leads" },
@@ -88,6 +89,7 @@ const NAV_GROUPS = [
   },
   {
     head: "Accounts",
+    moduleKey: "accounts",
     roles: ["manager", "accountant", "ca"],
     items: [
       { to: "/app/invoices", label: "Sale Invoices", icon: Receipt, testid: "nav-invoices" },
@@ -105,6 +107,7 @@ const NAV_GROUPS = [
   },
   {
     head: "Production",
+    moduleKey: "production",
     roles: ["manager", "production", "design"],
     items: [
       { to: "/app/parts", label: "Part Master", icon: Cog, testid: "nav-parts" },
@@ -124,6 +127,7 @@ const NAV_GROUPS = [
   },
   {
     head: "Procurement",
+    moduleKey: "procurement",
     roles: ["manager", "accountant", "ca", "production"],
     items: [
       { to: "/app/procurement/requisitions", label: "Purchase Requisition", icon: ClipboardCheck, testid: "nav-purchase-requisition" },
@@ -142,6 +146,7 @@ const NAV_GROUPS = [
   },
   {
     head: "Quality",
+    moduleKey: "quality",
     roles: ["manager", "qc", "production"],
     items: [
       { to: "/app/qc", label: "QC Reports", icon: ShieldCheck, testid: "nav-qc" },
@@ -151,6 +156,7 @@ const NAV_GROUPS = [
   },
   {
     head: "Marketing",
+    moduleKey: "marketing",
     roles: ["manager", "sales"],
     items: [
       { to: "/app/marketing", label: "Marketing", icon: Megaphone, testid: "nav-marketing" },
@@ -158,6 +164,7 @@ const NAV_GROUPS = [
   },
   {
     head: "HR",
+    moduleKey: "hr",
     roles: ["manager"],
     items: [
       { to: "/app/hr", label: "HR", icon: UsersRound, testid: "nav-hr" },
@@ -165,6 +172,7 @@ const NAV_GROUPS = [
   },
   {
     head: "Administration",
+    moduleKey: "administration",
     adminOnly: true,
     items: [
       { to: "/app/users", label: "Users", icon: SettingsIcon, testid: "nav-users" },
@@ -191,8 +199,16 @@ export default function AppLayout() {
   }
 
   const _role = user.role || "admin";
+  // Per-user module_access (set by an admin in Users & Permissions) overrides the role-based
+  // default when present — same mechanism and same module keys as the mobile menu
+  // (MobileMenu.jsx), so one toggle controls a user's access on both surfaces. Admin always sees
+  // everything regardless, so an override can never lock the admin account itself out.
+  const _overrides = user.module_access || {};
   const visibleGroups = NAV_GROUPS.filter(g => {
     if (_role === "admin") return true;       // admin sees everything
+    if (g.moduleKey && Object.prototype.hasOwnProperty.call(_overrides, g.moduleKey)) {
+      return _overrides[g.moduleKey] === true;
+    }
     if (g.adminOnly) return false;            // admin-only groups hidden from others
     if (_role === "trial") return true;       // trial evaluates the full product
     if (!g.roles) return true;                // ungated groups (e.g. Dashboard) visible to all
