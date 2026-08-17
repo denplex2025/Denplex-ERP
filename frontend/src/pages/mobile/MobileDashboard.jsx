@@ -1,11 +1,15 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { useAuth } from "@/lib/auth";
 import { loadMobileFinancials, inr } from "@/lib/mobileData";
+import { canSeeMoney, MASKED_AMOUNT } from "@/lib/roleAccess";
 import { AreaChart, Area, XAxis, ResponsiveContainer, Tooltip } from "recharts";
 import { TrendingDown, TrendingUp } from "lucide-react";
 
 export default function MobileDashboard() {
   const nav = useNavigate();
+  const { user } = useAuth();
+  const showMoney = canSeeMoney(user);
   const [d, setD] = useState(null);
   const [loading, setLoading] = useState(true);
 
@@ -27,50 +31,54 @@ export default function MobileDashboard() {
 
   return (
     <div className="px-3 pt-3 space-y-3">
-      {/* You'll Get / You'll Give */}
+      {/* You'll Get / You'll Give — amounts only for admin/accountant/ca */}
       <div className="grid grid-cols-2 gap-3">
-        <Tile label="You'll Get" value={inr(d.receivableTotal)} icon={<TrendingUp className="h-4 w-4 text-emerald-600" />} onClick={() => nav("/app/payments-in")} />
-        <Tile label="You'll Give" value={inr(d.payableTotal)} icon={<TrendingDown className="h-4 w-4 text-red-600" />} onClick={() => nav("/app/payments-out")} tone="red" />
+        <Tile label="You'll Get" value={showMoney ? inr(d.receivableTotal) : MASKED_AMOUNT} icon={<TrendingUp className="h-4 w-4 text-emerald-600" />} onClick={() => nav("/app/payments-in")} />
+        <Tile label="You'll Give" value={showMoney ? inr(d.payableTotal) : MASKED_AMOUNT} icon={<TrendingDown className="h-4 w-4 text-red-600" />} onClick={() => nav("/app/payments-out")} tone="red" />
       </div>
 
-      {/* Sale overview */}
-      <div className="bg-white rounded-xl p-4 border border-slate-200">
-        <div className="text-sm font-semibold text-slate-700 mb-1">Your Sale Overview ({d.trend?.[d.trend.length - 1]?.month})</div>
-        <div className="text-center">
-          <div className="text-xs text-slate-400">Total Sale</div>
-          <div className="text-2xl font-bold text-slate-900">{inr(d.monthSales)}</div>
-          {pctChange !== null && (
-            <div className={`text-xs mt-0.5 inline-flex items-center gap-1 ${pctChange >= 0 ? "text-emerald-600" : "text-red-500"}`}>
-              {pctChange >= 0 ? <TrendingUp className="h-3 w-3" /> : <TrendingDown className="h-3 w-3" />}
-              {Math.abs(pctChange)}% {pctChange >= 0 ? "growth" : "decline"} vs last month
-            </div>
-          )}
+      {/* Sale overview — purely financial (trend chart, purchases/expenses totals), hidden outright
+          for roles that shouldn't see revenue figures rather than shown with masked numbers. */}
+      {showMoney && (
+        <div className="bg-white rounded-xl p-4 border border-slate-200">
+          <div className="text-sm font-semibold text-slate-700 mb-1">Your Sale Overview ({d.trend?.[d.trend.length - 1]?.month})</div>
+          <div className="text-center">
+            <div className="text-xs text-slate-400">Total Sale</div>
+            <div className="text-2xl font-bold text-slate-900">{inr(d.monthSales)}</div>
+            {pctChange !== null && (
+              <div className={`text-xs mt-0.5 inline-flex items-center gap-1 ${pctChange >= 0 ? "text-emerald-600" : "text-red-500"}`}>
+                {pctChange >= 0 ? <TrendingUp className="h-3 w-3" /> : <TrendingDown className="h-3 w-3" />}
+                {Math.abs(pctChange)}% {pctChange >= 0 ? "growth" : "decline"} vs last month
+              </div>
+            )}
+          </div>
+          <div className="h-28 mt-2 -mx-2">
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={d.trend}>
+                <defs>
+                  <linearGradient id="mSalesG" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#dc2626" stopOpacity={0.35} />
+                    <stop offset="95%" stopColor="#dc2626" stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <XAxis dataKey="month" fontSize={10} stroke="#94a3b8" axisLine={false} tickLine={false} />
+                <Tooltip formatter={(v) => inr(v)} />
+                <Area type="monotone" dataKey="amount" stroke="#dc2626" strokeWidth={2} fill="url(#mSalesG)" />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+          <div className="grid grid-cols-2 gap-3 mt-1 pt-3 border-t border-slate-100">
+            <div><div className="text-[10px] text-slate-400 uppercase">Purchases (this month)</div><div className="font-semibold text-sm">{inr(d.monthPurchases)}</div></div>
+            <div><div className="text-[10px] text-slate-400 uppercase">Expenses (this month)</div><div className="font-semibold text-sm">{inr(d.monthExpenses)}</div></div>
+          </div>
         </div>
-        <div className="h-28 mt-2 -mx-2">
-          <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={d.trend}>
-              <defs>
-                <linearGradient id="mSalesG" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#dc2626" stopOpacity={0.35} />
-                  <stop offset="95%" stopColor="#dc2626" stopOpacity={0} />
-                </linearGradient>
-              </defs>
-              <XAxis dataKey="month" fontSize={10} stroke="#94a3b8" axisLine={false} tickLine={false} />
-              <Tooltip formatter={(v) => inr(v)} />
-              <Area type="monotone" dataKey="amount" stroke="#dc2626" strokeWidth={2} fill="url(#mSalesG)" />
-            </AreaChart>
-          </ResponsiveContainer>
-        </div>
-        <div className="grid grid-cols-2 gap-3 mt-1 pt-3 border-t border-slate-100">
-          <div><div className="text-[10px] text-slate-400 uppercase">Purchases (this month)</div><div className="font-semibold text-sm">{inr(d.monthPurchases)}</div></div>
-          <div><div className="text-[10px] text-slate-400 uppercase">Expenses (this month)</div><div className="font-semibold text-sm">{inr(d.monthExpenses)}</div></div>
-        </div>
-      </div>
+      )}
 
-      {/* Stock */}
+      {/* Stock — item counts stay visible to everyone (production/QC need this); stock valuation
+          (₹) is a financial figure and stays masked for non-finance roles. */}
       <div className="bg-white rounded-xl p-4 border border-slate-200" onClick={() => nav("/m/items")}>
         <div className="grid grid-cols-2 gap-3">
-          <div><div className="text-[10px] text-slate-400 uppercase">Stock Value</div><div className="font-bold text-emerald-600">{inr(d.stockValue)}</div></div>
+          <div><div className="text-[10px] text-slate-400 uppercase">Stock Value</div><div className="font-bold text-emerald-600">{showMoney ? inr(d.stockValue) : MASKED_AMOUNT}</div></div>
           <div><div className="text-[10px] text-slate-400 uppercase">No. of Items</div><div className="font-bold text-slate-900">{d.items.length}</div></div>
         </div>
         {d.lowStock.length > 0 && (
@@ -88,26 +96,26 @@ export default function MobileDashboard() {
         )}
       </div>
 
-      {/* Open Sale Transactions */}
+      {/* Open Sale Transactions — counts stay visible to everyone; ₹ balance masked for non-finance roles */}
       <Section title="Open Sale Transactions">
-        <Row label="Open Sale Orders" count={d.openInvoices.length} amount={sumOf(d.openInvoices, "balance")} onClick={() => nav("/app/invoices")} />
+        <Row label="Open Sale Orders" count={d.openInvoices.length} amount={sumOf(d.openInvoices, "balance")} showMoney={showMoney} onClick={() => nav("/app/invoices")} />
       </Section>
 
       {/* Open Purchase Transactions */}
       <Section title="Open Purchase Transactions">
-        <Row label="Open Purchase Orders" count={d.openBills.length} amount={sumOf(d.openBills, "balance")} tone="red" onClick={() => nav("/app/purchase-bills")} />
+        <Row label="Open Purchase Orders" count={d.openBills.length} amount={sumOf(d.openBills, "balance")} showMoney={showMoney} tone="red" onClick={() => nav("/app/purchase-bills")} />
       </Section>
 
       {/* Open Cheques */}
       {(d.receivedCheques.length > 0 || d.paidCheques.length > 0) && (
         <Section title="Open Cheques">
-          <Row label="Received Cheques" count={d.receivedCheques.length} amount={sumOf(d.receivedCheques, "amount")} onClick={() => nav("/app/bank-cash")} />
-          <Row label="Paid Cheques" count={d.paidCheques.length} amount={sumOf(d.paidCheques, "amount")} tone="red" onClick={() => nav("/app/bank-cash")} />
+          <Row label="Received Cheques" count={d.receivedCheques.length} amount={sumOf(d.receivedCheques, "amount")} showMoney={showMoney} onClick={() => nav("/app/bank-cash")} />
+          <Row label="Paid Cheques" count={d.paidCheques.length} amount={sumOf(d.paidCheques, "amount")} showMoney={showMoney} tone="red" onClick={() => nav("/app/bank-cash")} />
         </Section>
       )}
 
-      {/* Expenses */}
-      {d.expenseBreakdown.length > 0 && (
+      {/* Expenses — purely financial line items, hidden outright for non-finance roles */}
+      {showMoney && d.expenseBreakdown.length > 0 && (
         <div className="bg-white rounded-xl p-4 border border-slate-200 mb-4">
           <div className="flex items-center justify-between mb-2">
             <div className="text-sm font-semibold text-slate-700">Expenses</div>
@@ -143,14 +151,14 @@ function Section({ title, children }) {
   );
 }
 
-function Row({ label, count, amount, tone, onClick }) {
+function Row({ label, count, amount, tone, showMoney = true, onClick }) {
   return (
     <button onClick={onClick} className="w-full flex items-center justify-between bg-slate-50 rounded-lg px-3 py-2.5 text-left">
       <div>
         <div className="text-xs text-slate-500">{label}</div>
         <div className="font-semibold text-sm text-slate-900">{count}</div>
       </div>
-      <div className={`font-semibold text-sm ${tone === "red" ? "text-red-600" : "text-emerald-600"}`}>{inr(amount)}</div>
+      <div className={`font-semibold text-sm ${tone === "red" ? "text-red-600" : "text-emerald-600"}`}>{showMoney ? inr(amount) : MASKED_AMOUNT}</div>
     </button>
   );
 }

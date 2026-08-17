@@ -15,6 +15,7 @@ import {
 const GROUPS = [
   {
     title: "My Business",
+    moduleKey: "sales",
     roles: ["manager", "sales", "accountant", "ca"],
     items: [
       { label: "Sale", icon: ShoppingCart, to: "/app/invoices" },
@@ -27,6 +28,7 @@ const GROUPS = [
   },
   {
     title: "Manufacturing",
+    moduleKey: "production",
     roles: ["manager", "production", "design"],
     items: [
       { label: "Work Orders", icon: Factory, to: "/app/work-orders" },
@@ -38,6 +40,7 @@ const GROUPS = [
   },
   {
     title: "Quality",
+    moduleKey: "quality",
     roles: ["manager", "qc", "production"],
     items: [
       { label: "QC Reports", icon: ClipboardCheck, to: "/app/qc" },
@@ -46,6 +49,7 @@ const GROUPS = [
   },
   {
     title: "Cash & Bank",
+    moduleKey: "accounts",
     roles: ["manager", "accountant", "ca"],
     items: [
       { label: "Bank Accounts / Cash", icon: Landmark, to: "/app/bank-cash" },
@@ -55,6 +59,7 @@ const GROUPS = [
   },
   {
     title: "Reports",
+    moduleKey: "accounts",
     roles: ["manager", "accountant", "ca"],
     items: [
       { label: "GST Reports", icon: FileSpreadsheet, to: "/app/gst-reports" },
@@ -64,6 +69,7 @@ const GROUPS = [
   },
   {
     title: "Administration",
+    moduleKey: "administration",
     adminOnly: true,
     items: [
       { label: "Settings", icon: Settings, to: "/app/settings" },
@@ -85,8 +91,16 @@ export default function MobileMenu() {
   const { user, logout } = useAuth();
 
   const _role = user?.role || "employee";
+  // Per-user module_access (set by an admin in Users & Permissions) overrides the role-based
+  // default when present: true forces a module visible even if the role wouldn't normally get it,
+  // false forces it hidden even if the role would. Admin always sees everything regardless, so an
+  // override can never lock the admin account itself out.
+  const _overrides = user?.module_access || {};
   const visibleGroups = GROUPS.filter((g) => {
     if (_role === "admin") return true;
+    if (g.moduleKey && Object.prototype.hasOwnProperty.call(_overrides, g.moduleKey)) {
+      return _overrides[g.moduleKey] === true;
+    }
     if (g.adminOnly) return false;
     if (_role === "trial") return true;
     if (!g.roles) return true;

@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { useAuth } from "@/lib/auth";
 import { loadMobileFinancials, inr } from "@/lib/mobileData";
+import { canSeeMoney, MASKED_AMOUNT } from "@/lib/roleAccess";
 import {
   Search, FilePlus2, FileBarChart2, SlidersHorizontal, ChevronRight,
   Network, FileText, Settings2, UserPlus,
@@ -19,6 +21,8 @@ const QUICK_LINKS_PARTY = [
 
 export default function MobileHome() {
   const nav = useNavigate();
+  const { user } = useAuth();
+  const showMoney = canSeeMoney(user);
   const [tab, setTab] = useState("txn"); // txn | party
   const [q, setQ] = useState("");
   const [data, setData] = useState(null);
@@ -111,8 +115,8 @@ export default function MobileHome() {
                 </div>
               </div>
               <div className="flex items-center justify-between mt-2.5 pt-2.5 border-t border-neutral-100">
-                <div><div className="text-[10px] text-neutral-400 uppercase">Total</div><div className="font-semibold text-sm">{inr(t.total)}</div></div>
-                {t.balance > 0.01 && <div className="text-right"><div className="text-[10px] text-neutral-400 uppercase">Balance</div><div className="font-semibold text-sm text-red-600">{inr(t.balance)}</div></div>}
+                <div><div className="text-[10px] text-neutral-400 uppercase">Total</div><div className="font-semibold text-sm">{showMoney ? inr(t.total) : MASKED_AMOUNT}</div></div>
+                {t.balance > 0.01 && <div className="text-right"><div className="text-[10px] text-neutral-400 uppercase">Balance</div><div className="font-semibold text-sm text-red-600">{showMoney ? inr(t.balance) : MASKED_AMOUNT}</div></div>}
               </div>
             </div>
           ))}
@@ -130,7 +134,7 @@ export default function MobileHome() {
               </div>
               <div className="text-right flex-shrink-0">
                 <div className={`font-semibold text-sm ${p.balance > 0.01 ? "text-emerald-600" : p.balance < -0.01 ? "text-red-600" : "text-neutral-400"}`}>
-                  {inr(p.balance)}
+                  {showMoney ? inr(p.balance) : MASKED_AMOUNT}
                 </div>
                 <div className="text-[10px] text-neutral-400">{p.balance > 0.01 ? "You'll Get" : p.balance < -0.01 ? "You'll Give" : ""}</div>
               </div>
