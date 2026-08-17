@@ -62,9 +62,44 @@ export default function Dashboard() {
       .then((r) => setShopfloor(r.data))
       .catch((e) => { console.warn("shopfloor slow/failed:", e.message); setShopfloor({}); });
 
-    withTimeout(api.get("/dashboard/summary", { silent: true }))
-      .then((r) => setStats((s) => ({ ...s, ...r.data })))
-      .catch((e) => { console.warn("summary slow/failed:", e.message); });
+    // BUG FIX (2026-08-18): this used to call a single /dashboard/summary endpoint that was never
+    // implemented in the backend — it always 404'd, silently swallowed by the .catch() below, so
+    // the entire Financial Snapshot section (Receivable/Payable/Today Sales/Month Sales) and the
+    // Sales Trend chart sat at their hardcoded zero/empty defaults forever. Replaced with the three
+    // real endpoints that already exist and cover the same data, and derived today/month sales from
+    // the trend series client-side since no endpoint computes those directly.
+    withTimeout(api.get("/dashboard/stats", { silent: true }))
+      .then((r) => setStats((s) => ({
+        ...s,
+        recent_wo: r.data?.recent_wo || [],
+        low_stock: r.data?.low_stock_items || [],
+      })))
+      .catch((e) => console.warn("stats slow/failed:", e.message));
+
+    withTimeout(api.get("/dashboard/receivable-payable", { silent: true }))
+      .then((r) => setStats((s) => ({
+        ...s,
+        receivable: r.data?.receivable_total || 0,
+        payable: r.data?.payable_total || 0,
+      })))
+      .catch((e) => console.warn("receivable-payable slow/failed:", e.message));
+
+    withTimeout(api.get("/dashboard/sales-trend", { silent: true, params: { days: 30 } }))
+      .then((r) => {
+        const series = Array.isArray(r.data?.series) ? r.data.series : [];
+        const todayIso = new Date().toISOString().slice(0, 10);
+        const monthPrefix = todayIso.slice(0, 7);
+        const today_sales = series.find((d) => d.date === todayIso)?.total || 0;
+        const month_sales = series.filter((d) => (d.date || "").startsWith(monthPrefix))
+          .reduce((sum, d) => sum + (Number(d.total) || 0), 0);
+        setStats((s) => ({
+          ...s,
+          today_sales,
+          month_sales,
+          sales_trend: series.map((d) => ({ date: d.date, amount: d.total })),
+        }));
+      })
+      .catch((e) => console.warn("sales-trend slow/failed:", e.message));
   }, []);
 
   const m = shopfloor || {};
