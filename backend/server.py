@@ -1,9 +1,11 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, Query, Request, Response, UploadFile, File, Form
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, Query, Request, Response, UploadFile, File, Form, BackgroundTasks
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import StreamingResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import UpdateOne
+from pymongo.errors import BulkWriteError
 import os
 import logging
 import bcrypt
@@ -767,8 +769,8 @@ class PurchaseOrder(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: str = Field(default_factory=new_id)
     code: Optional[str] = None
-    supplier_id: str
-    supplier_name: str
+    supplier_id: str = ""
+    supplier_name: str = ""
     supplier_gstin: Optional[str] = ""
     date: str = Field(default_factory=now_iso)
     delivery_date: Optional[str] = ""
@@ -784,6 +786,11 @@ class PurchaseOrder(BaseModel):
     status: Literal["draft", "sent", "received", "cancelled"] = "draft"
     notes: Optional[str] = ""
     created_at: str = Field(default_factory=now_iso)
+    # WhatsApp/AI-drafted PO provenance (blank for normal manually-created POs)
+    source: Optional[str] = ""
+    whatsapp_message_id: Optional[str] = ""
+    whatsapp_raw_text: Optional[str] = ""
+    ai_confidence: Optional[str] = ""
 
 class SaleOrder(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -2025,14 +2032,38 @@ async def otp_request(payload: OtpRequestIn, request: Request):
         "attempts": 0,
         "used": False,
     })
+    otp_body = f"Your Denplex ERP password reset OTP is {otp}. It's valid for {_OTP_TTL_MIN} minutes. Don't share this code with anyone."
+
     def _send():
         client = TwilioClient(sid, tok)
         return client.messages.create(
-            body=f"Your Denplex ERP password reset OTP is {otp}. It's valid for {_OTP_TTL_MIN} minutes. Don't share this code with anyone.",
+            body=otp_body,
             from_=frm, to=f"whatsapp:{phone}",
         )
+
+    def _send_via_template():
+        # Some WhatsApp sandbox/business accounts reject freeform sends outside an
+        # active session (Twilio error 21654 "ContentSid Required") and require an
+        # approved Content Template instead. Fall back to the account's existing
+        # sample template, stuffing the OTP into its first variable slot so the
+        # code is still visible even though the template wording won't match.
+        import json
+        content_sid = cfg.get("twilio_content_sid") or "HXfe5ab5f00277942d4d4200328b4d403c"
+        client = TwilioClient(sid, tok)
+        return client.messages.create(
+            content_sid=content_sid,
+            content_variables=json.dumps({"1": otp, "2": f"{_OTP_TTL_MIN} min"}),
+            from_=frm, to=f"whatsapp:{phone}",
+        )
+
     try:
-        await asyncio.to_thread(_send)
+        try:
+            await asyncio.to_thread(_send)
+        except TwilioRestException as e:
+            if getattr(e, "code", None) == 21654:
+                await asyncio.to_thread(_send_via_template)
+            else:
+                raise
         await write_audit(user.get("name") or phone, "otp_requested", "auth", user["id"], request=request)
     except TwilioRestException as e:
         logger.exception("OTP WhatsApp send failed for %s: %s", phone, e.msg)
@@ -3842,6 +3873,13 @@ async def create_po(p: PurchaseOrder, user=Depends(get_current_user)):
 async def list_po(user=Depends(get_current_user)):
     return await list_collection(db.purchase_orders)
 
+@api.get("/purchase-orders/{pid}")
+async def get_po(pid: str, user=Depends(get_current_user)):
+    doc = await db.purchase_orders.find_one({"id": pid}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Purchase Order not found")
+    return serialize(doc)
+
 @api.put("/purchase-orders/{pid}")
 async def update_po(pid: str, p: PurchaseOrder, user=Depends(get_current_user)):
     data = p.model_dump(); data.pop("id", None); data.pop("created_at", None)
@@ -4502,12 +4540,198 @@ async def set_webhook_config(body: dict, user=Depends(require_roles("admin", "ma
     await db.settings.update_one({"_id": "webhooks"}, {"$set": {"mewurk": src}}, upsert=True)
     return {"ok": True, "url": f"{WEBHOOK_BASE}/api/webhooks/mewurk/{src['secret']}", "secret": src["secret"]}
 
+@api.get("/webhooks/aisensy/config")
+async def get_aisensy_config(user=Depends(require_roles("admin", "manager"))):
+    cfg = await get_setting("webhooks") or {}
+    src = cfg.get("aisensy") or {}
+    if not src.get("secret"):
+        src["secret"] = secrets.token_urlsafe(24)
+        src.setdefault("enabled", True)
+        await db.settings.update_one({"_id": "webhooks"}, {"$set": {"aisensy": src}}, upsert=True)
+    return {"enabled": src.get("enabled", True),
+            "url": f"{WEBHOOK_BASE}/api/webhooks/aisensy/{src['secret']}",
+            "secret": src["secret"],
+            "signing_secret": src.get("signing_secret", ""),
+            "api_key": src.get("api_key", "")}
+
+@api.post("/webhooks/aisensy/config")
+async def set_aisensy_config(body: dict, user=Depends(require_roles("admin", "manager"))):
+    cfg = await get_setting("webhooks") or {}
+    src = cfg.get("aisensy") or {}
+    if body.get("rotate") or not src.get("secret"):
+        src["secret"] = secrets.token_urlsafe(24)
+    if "enabled" in body:
+        src["enabled"] = bool(body["enabled"])
+    if "signing_secret" in body:
+        src["signing_secret"] = str(body["signing_secret"] or "").strip()
+    if "api_key" in body:
+        src["api_key"] = str(body["api_key"] or "").strip()
+    if "secret" not in src:
+        src["secret"] = secrets.token_urlsafe(24)
+    await db.settings.update_one({"_id": "webhooks"}, {"$set": {"aisensy": src}}, upsert=True)
+    return {"ok": True, "url": f"{WEBHOOK_BASE}/api/webhooks/aisensy/{src['secret']}", "secret": src["secret"]}
+
+def _verify_aisensy_signature(raw: bytes, signature: str, shared_secret: str) -> bool:
+    """AiSensy signs webhook deliveries with HMAC-SHA256(shared_secret, raw_body), sent in the
+    X-AiSensy-Signature header. Verified against the raw bytes, not the re-serialized JSON."""
+    import hmac
+    if not signature:
+        return False
+    mac = hmac.new(shared_secret.encode("utf-8"), raw, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(mac, signature.strip())
+
+def _aisensy_extract_text(message_content) -> str:
+    """Message content shape isn't fully documented for TEXT messages — stay tolerant of a few
+    plausible shapes (plain string, {"text": "..."}, {"text": {"body": "..."}}, {"body": "..."})."""
+    if isinstance(message_content, str):
+        return message_content
+    if isinstance(message_content, dict):
+        t = message_content.get("text")
+        if isinstance(t, dict):
+            return t.get("body") or ""
+        if isinstance(t, str):
+            return t
+        return message_content.get("body") or message_content.get("caption") or ""
+    return ""
+
+def _match_supplier_name(name_hint: str, suppliers: list) -> tuple:
+    """Best-effort match of an AI-extracted supplier name against the real suppliers list.
+    Returns (supplier_id, supplier_name) — supplier_id is "" if nothing matched confidently,
+    in which case supplier_name keeps the AI's raw text so the human reviewer has a starting point."""
+    if not name_hint:
+        return "", ""
+    h = name_hint.strip().lower()
+    for s in suppliers:
+        if (s.get("name") or "").strip().lower() == h:
+            return s["id"], s["name"]
+    for s in suppliers:
+        sn = (s.get("name") or "").strip().lower()
+        if sn and (h in sn or sn in h):
+            return s["id"], s["name"]
+    import difflib
+    names = [s.get("name") or "" for s in suppliers]
+    close = difflib.get_close_matches(name_hint, names, n=1, cutoff=0.6)
+    if close:
+        for s in suppliers:
+            if s.get("name") == close[0]:
+                return s["id"], s["name"]
+    return "", name_hint
+
+async def _ai_parse_po_from_text(text: str) -> Optional[dict]:
+    """Sends a WhatsApp message's text to Claude and asks it to decide whether it's a purchase
+    order request, extracting supplier + line items if so. Returns None if AI isn't configured or
+    the call/parse fails — caller treats that as 'skip, don't draft a PO'."""
+    import json
+    if not ANTHROPIC_API_KEY:
+        return None
+    prompt = (
+        "You are helping a manufacturing ERP decide if a WhatsApp message is a request to create "
+        "a Purchase Order (an order for materials/items to buy from a supplier). The message was "
+        "typed by the business owner themselves as a note to raise a PO — not sent by a supplier.\n\n"
+        f"Message:\n\"\"\"\n{text}\n\"\"\"\n\n"
+        "Decide if this describes items to purchase, or if it's unrelated (chit-chat, a question, "
+        "a status update, etc). If it IS a PO request, extract the supplier name if mentioned and "
+        "each line item with quantity, unit, and rate (price) if mentioned.\n\n"
+        "Respond with ONLY strict JSON, no markdown fencing, no explanation, in exactly this shape:\n"
+        '{"is_po_request": true or false, "supplier_name": string or null, '
+        '"lines": [{"description": string, "qty": number, "unit": string, "rate": number or null}], '
+        '"confidence": "high" or "medium" or "low"}'
+    )
+    payload = {
+        "model": os.environ.get("PO_PARSE_MODEL", "claude-sonnet-4-5"),
+        "max_tokens": 1024,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    headers = {"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=30) as cx:
+            r = await cx.post(f"{ANTHROPIC_BASE_URL}/v1/messages", json=payload, headers=headers)
+        r.raise_for_status()
+        blocks = r.json().get("content", [])
+        raw = "".join(b.get("text", "") for b in blocks if b.get("type") == "text").strip()
+        if raw.startswith("```"):
+            raw = raw.strip("`")
+            if raw.lower().startswith("json"):
+                raw = raw[4:]
+        return json.loads(raw.strip())
+    except Exception as e:
+        logging.warning(f"AiSensy PO parse failed: {e}")
+        return None
+
+async def _process_aisensy_webhook(body: Any) -> str:
+    """Handles AiSensy's 'message.sender.user' webhook topic (a user messaging the business
+    number). Runs the message text through Claude; if it looks like a purchase order request,
+    creates a draft PurchaseOrder for Neel to review — never auto-finalizes it."""
+    topic = str((body or {}).get("topic") or "")
+    if topic and topic != "message.sender.user":
+        return f"skipped (topic={topic})"
+    msg = ((body or {}).get("data") or {}).get("message") or (body or {}).get("message") or {}
+    if not isinstance(msg, dict) or not msg:
+        return "skipped (no message object)"
+    mtype = str(msg.get("message_type") or "").upper()
+    if mtype and mtype != "TEXT":
+        return f"skipped (type={mtype})"
+    text = _aisensy_extract_text(msg.get("message_content")).strip()
+    if not text:
+        return "skipped (empty text)"
+    message_id = str(msg.get("id") or msg.get("messageId") or "")
+    phone = str(msg.get("phone_number") or msg.get("sender") or "")
+    if message_id:
+        dup = await db.purchase_orders.find_one({"whatsapp_message_id": message_id}, {"_id": 0, "id": 1, "code": 1})
+        if dup:
+            return f"duplicate (already {dup.get('code') or dup.get('id')})"
+    result = await _ai_parse_po_from_text(text)
+    if not result:
+        return "skipped (AI parse unavailable/failed)"
+    if not result.get("is_po_request"):
+        return "skipped (not a PO request)"
+    raw_lines = result.get("lines") or []
+    if not raw_lines:
+        return "skipped (no items extracted)"
+    suppliers = await db.suppliers.find({}, {"_id": 0, "id": 1, "name": 1}).to_list(2000)
+    supplier_id, supplier_name = _match_supplier_name(result.get("supplier_name") or "", suppliers)
+    po_lines = []
+    for l in raw_lines:
+        try:
+            po_lines.append(POLine(
+                description=str(l.get("description") or "Item").strip(),
+                item_code="", hsn="",
+                qty=float(l.get("qty") or 1), unit=str(l.get("unit") or "Nos"),
+                rate=float(l.get("rate") or 0), gst_rate=18.0,
+            ).model_dump())
+        except Exception:
+            continue
+    if not po_lines:
+        return "skipped (no valid items after parsing)"
+    doc = PurchaseOrder(
+        supplier_id=supplier_id, supplier_name=supplier_name,
+        lines=[POLine(**pl) for pl in po_lines],
+        status="draft", source="whatsapp_ai",
+        whatsapp_message_id=message_id, whatsapp_raw_text=text,
+        ai_confidence=str(result.get("confidence") or ""),
+        notes=f'Auto-drafted from WhatsApp ({phone}): "{text}"',
+    ).model_dump()
+    doc["code"] = await gen_code("PO", "po")
+    doc.update(compute_totals(doc["lines"], 0))
+    await db.purchase_orders.insert_one(doc)
+    return f"draft PO {doc['code']} created ({len(po_lines)} line(s), confidence={doc['ai_confidence']})"
+
+async def _process_aisensy_background(event_id: str, body: Any):
+    """AiSensy expects a 2xx ack within 5s; the AI parse call can take a few seconds, so it runs
+    here as a background task after the webhook has already been ack'd, updating the same
+    webhook_events row with the real result once done."""
+    try:
+        result = await _process_aisensy_webhook(body)
+        await db.webhook_events.update_one({"id": event_id}, {"$set": {"result": result, "processed": True}})
+    except Exception as e:
+        await db.webhook_events.update_one({"id": event_id}, {"$set": {"result": f"error: {e}", "processed": False}})
+
 @api.get("/webhooks/events")
 async def list_webhook_events(user=Depends(require_roles("admin", "manager"))):
     return await db.webhook_events.find({}, {"_id": 0}).sort("received_at", -1).to_list(100)
 
 @api.post("/webhooks/{source}/{token}")
-async def receive_webhook(source: str, token: str, request: Request):
+async def receive_webhook(source: str, token: str, request: Request, background_tasks: BackgroundTasks):
     """Public inbound webhook (no JWT) — authenticated by the secret token in the URL.
     Logs every event raw so the real payload format can be inspected, then best-effort maps it."""
     cfg = await get_setting("webhooks") or {}
@@ -4516,10 +4740,20 @@ async def receive_webhook(source: str, token: str, request: Request):
         raise HTTPException(404, "Webhook source not enabled")
     if not token or token != src.get("secret"):
         raise HTTPException(401, "Invalid webhook token")
+    raw = await request.body()
     try:
-        body = await request.json()
+        import json
+        body = json.loads(raw.decode("utf-8", "ignore")) if raw else {}
     except Exception:
-        body = {"_raw": (await request.body()).decode("utf-8", "ignore")[:5000]}
+        body = {"_raw": raw.decode("utf-8", "ignore")[:5000]}
+    if source == "aisensy":
+        shared = src.get("signing_secret") or ""
+        if shared and not _verify_aisensy_signature(raw, request.headers.get("X-AiSensy-Signature", ""), shared):
+            raise HTTPException(401, "Invalid webhook signature")
+        ev = {"id": new_id(), "source": source, "received_at": now_iso(), "body": body, "processed": False, "result": "queued"}
+        await db.webhook_events.insert_one(dict(ev))
+        background_tasks.add_task(_process_aisensy_background, ev["id"], body)
+        return {"ok": True, "received": True, "result": "queued"}
     ev = {"id": new_id(), "source": source, "received_at": now_iso(), "body": body, "processed": False, "result": ""}
     try:
         ev["result"] = await _process_webhook(source, body)
@@ -8474,6 +8708,20 @@ async def vyapar_inspect(file: UploadFile = File(...), user=Depends(require_role
     })
     return info
 
+async def _flush_bulk(collection, ops: List["UpdateOne"]) -> None:
+    """Flush a batch of upsert ops in one round-trip instead of one await per row — this is the
+    actual bottleneck on repeat Vyapar imports (thousands of individual update_one() calls, each
+    a separate network round-trip to Atlas). ordered=False lets independent upserts land even if
+    one in the batch errors; BulkWriteError is swallowed per-batch rather than aborting the whole
+    import, matching the previous per-row behavior where one bad row didn't stop the rest."""
+    if not ops:
+        return
+    try:
+        await collection.bulk_write(ops, ordered=False)
+    except BulkWriteError:
+        pass
+
+
 async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company: bool = True) -> Dict[str, Any]:
     """Import a Vyapar SQLite DB. Recognises kb_* tables (Vyapar's real schema)."""
     import sqlite3
@@ -8562,6 +8810,8 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
 
     # --- Parties (kb_names) ---
     if opts.parties:
+        cust_ops: List[UpdateOne] = []
+        supp_ops: List[UpdateOne] = []
         # name_type: 1 = party (customer/supplier); 2 = EXPENSE CATEGORY (imported separately below)
         cur.execute('SELECT * FROM "kb_names" WHERE name_type = 1')
         for r in cur.fetchall():
@@ -8585,10 +8835,13 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
             is_cust = (nid in cust_ids) or (not is_supp)   # default unknown parties to customer
             if not opts.dry_run:
                 if is_cust:
-                    await db.customers.update_one({"name": doc["name"]}, {"$setOnInsert": doc}, upsert=True)
+                    cust_ops.append(UpdateOne({"name": doc["name"]}, {"$setOnInsert": doc}, upsert=True))
                 if is_supp:
-                    await db.suppliers.update_one({"name": doc["name"]}, {"$setOnInsert": doc}, upsert=True)
+                    supp_ops.append(UpdateOne({"name": doc["name"]}, {"$setOnInsert": doc}, upsert=True))
             res["parties"] += 1
+        if not opts.dry_run:
+            await _flush_bulk(db.customers, cust_ops)
+            await _flush_bulk(db.suppliers, supp_ops)
 
     # Build name_id -> party_name map for txn rows
     name_lookup: Dict[int, str] = {}
@@ -8602,6 +8855,7 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
 
     # --- Items (kb_items) ---
     if opts.items:
+        item_ops: List[UpdateOne] = []
         cur.execute('SELECT * FROM "kb_items" WHERE item_is_active IS NULL OR item_is_active != 0')
         for r in cur.fetchall():
             name = (r["item_name"] or "").strip()
@@ -8630,8 +8884,10 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
                 "created_at": str(r["item_date_created"] or now_iso()),
             }
             if not opts.dry_run:
-                await db.items.update_one({"name": doc["name"]}, {"$setOnInsert": doc}, upsert=True)
+                item_ops.append(UpdateOne({"name": doc["name"]}, {"$setOnInsert": doc}, upsert=True))
             res["items"] += 1
+        if not opts.dry_run:
+            await _flush_bulk(db.items, item_ops)
 
     # Build item_id -> (name, hsn, rate) for line items
     item_lookup: Dict[int, Dict[str, Any]] = {}
@@ -8738,6 +8994,7 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
     txn_to_doc: Dict[int, Dict[str, Any]] = {}
     cash_on_doc: List[Dict[str, Any]] = []            # cash received/paid on the doc itself -> synthetic payment below
     inv_open: Dict[int, List[Any]] = {}               # txn_id -> [party_kind, party_name, ERP-derived outstanding]
+    doc_ops: Dict[str, List[UpdateOne]] = {}          # collection_name -> batched upserts, flushed once after this loop
     cur.execute("SELECT * FROM kb_transactions")
     for r in cur.fetchall():
         t = int(r["txn_type"]) if r["txn_type"] is not None else 0
@@ -8840,9 +9097,9 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
             doc["outstanding"] = round(max(cur_bal, 0.0), 2)  # Vyapar's own live balance = ground truth
 
         if not opts.dry_run:
-            target = getattr(db, collection_name)
-            await target.update_one({"code": doc["code"], "vyapar_id": doc["vyapar_id"]},
-                                    {"$setOnInsert": doc}, upsert=True)
+            doc_ops.setdefault(collection_name, []).append(
+                UpdateOne({"code": doc["code"], "vyapar_id": doc["vyapar_id"]},
+                          {"$setOnInsert": doc}, upsert=True))
         if t in (1, 2):
             txn_to_doc[int(r["txn_id"])] = {"id": doc["id"], "code": doc["code"], "dtype": "invoice" if t == 1 else "vendor_bill"}
             if cur_bal > 0.01:
@@ -8865,6 +9122,10 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
         elif t == 30: res["delivery_challans"] += 1
         elif t == 65: res["proformas"] += 1
 
+    if not opts.dry_run:
+        for _coll_name, _ops in doc_ops.items():
+            await _flush_bulk(getattr(db, _coll_name), _ops)
+
     # --- Payments In/Out (kb_transactions type 3/4) + bill-to-bill allocations (kb_txn_links) ---
     # (ptype_name / _map_ptype now built earlier, above the invoice/bill loop, so both passes share it —
     # for payments-in/out specifically, "Credit" doesn't make sense, so treat a missing type as Cash.)
@@ -8880,6 +9141,8 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
         pass
 
     res["payments_in"] = 0; res["payments_out"] = 0
+    payin_ops: List[UpdateOne] = []
+    payout_ops: List[UpdateOne] = []
     cur.execute("SELECT * FROM kb_transactions WHERE txn_type IN (3,4)")
     for r in cur.fetchall():
         t = int(r["txn_type"]); is_in = (t == 3)
@@ -8905,8 +9168,8 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
                 "created_at": str(r["txn_date_created"] or now_iso())}
         pdoc["status"] = "Used" if (allocated >= amt - 0.01 and allocated > 0) else ("Partially Used" if allocated > 0 else "Unused")
         if not opts.dry_run:
-            await (db.payments_in if is_in else db.payments_out).update_one(
-                {"vyapar_id": pdoc["vyapar_id"], "code": pdoc["code"]}, {"$setOnInsert": pdoc}, upsert=True)
+            _op = UpdateOne({"vyapar_id": pdoc["vyapar_id"], "code": pdoc["code"]}, {"$setOnInsert": pdoc}, upsert=True)
+            (payin_ops if is_in else payout_ops).append(_op)
         if is_in: res["payments_in"] += 1
         else: res["payments_out"] += 1
 
@@ -8923,9 +9186,13 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
                 "notes": "Cash on document (Vyapar import)", "status": "Used",
                 "vyapar_id": f"cash-{cp['txn_id']}", "source": "vyapar", "created_at": now_iso()}
         if not opts.dry_run:
-            await (db.payments_in if cp["is_in"] else db.payments_out).update_one(
-                {"vyapar_id": pdoc["vyapar_id"]}, {"$setOnInsert": pdoc}, upsert=True)
+            _op = UpdateOne({"vyapar_id": pdoc["vyapar_id"]}, {"$setOnInsert": pdoc}, upsert=True)
+            (payin_ops if cp["is_in"] else payout_ops).append(_op)
         res["cash_on_doc_payments"] += 1
+
+    if not opts.dry_run:
+        await _flush_bulk(db.payments_in, payin_ops)
+        await _flush_bulk(db.payments_out, payout_ops)
 
     # --- Expenses (txn_type 7; category via txn_category_id -> kb_names name_type=2) ---
     if getattr(opts, "expenses", True):
@@ -8947,6 +9214,7 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
                 cat_map[int(r["name_id"])] = {"id": cid, "name": nm}
         except Exception:
             pass
+        exp_ops: List[UpdateOne] = []
         cur.execute("SELECT * FROM kb_transactions WHERE txn_type = 7")
         for r in cur.fetchall():
             e_cash = float(r["txn_cash_amount"] or 0); e_bal = float(r["txn_balance_amount"] or 0)
@@ -8964,8 +9232,10 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
                     "vyapar_id": str(r["txn_id"]), "source": "vyapar",
                     "created_at": str(r["txn_date_created"] or now_iso())}
             if not opts.dry_run:
-                await db.expenses.update_one({"vyapar_id": edoc["vyapar_id"]}, {"$setOnInsert": edoc}, upsert=True)
+                exp_ops.append(UpdateOne({"vyapar_id": edoc["vyapar_id"]}, {"$setOnInsert": edoc}, upsert=True))
             res["expenses"] += 1
+        if not opts.dry_run:
+            await _flush_bulk(db.expenses, exp_ops)
 
     # --- Party opening balances: gap between Vyapar's live party balance and ERP-derived outstanding ---
     # (covers pre-history opening balances, advances, unlinked payments, credit-note effects)
