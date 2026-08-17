@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import api from "@/lib/api";
 import { Input } from "@/components/ui/input";
 import { Sparkles, Send, X } from "lucide-react";
+import { useDraggable } from "@/lib/useDraggable";
 
 const SUGGESTIONS = [
   "Total outstanding receivable?",
@@ -17,6 +18,7 @@ export default function Aria() {
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const endRef = useRef(null);
+  const { style: dragStyle, onPointerDown, wasDragged } = useDraggable("aria-launcher-pos", { right: 24, bottom: 24 });
 
   useEffect(() => { if (open) endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, busy, open]);
 
@@ -43,8 +45,12 @@ export default function Aria() {
     <>
       {/* Launcher button */}
       {!open && (
-        <button onClick={() => setOpen(true)} aria-label="Open ARIA assistant"
-          className="fixed bottom-6 right-6 z-40 flex items-center gap-2 rounded-full bg-red-600 hover:bg-red-700 text-white shadow-lg pl-3 pr-4 py-3 transition">
+        <button
+          onClick={() => { if (!wasDragged()) setOpen(true); }}
+          onPointerDown={onPointerDown}
+          style={dragStyle}
+          aria-label="Open ARIA assistant — drag to reposition"
+          className="fixed z-40 flex items-center gap-2 rounded-full bg-red-600 hover:bg-red-700 text-white shadow-lg pl-3 pr-4 py-3 transition-colors cursor-grab active:cursor-grabbing touch-none select-none">
           <Sparkles className="h-5 w-5" />
           <span className="font-semibold text-sm">ARIA</span>
         </button>

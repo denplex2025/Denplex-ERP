@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Plus, X, Factory, FileText, PackagePlus, ClipboardCheck, Receipt } from "lucide-react";
+import { useDraggable } from "@/lib/useDraggable";
 
 const ACTIONS = [
   { key: "wo",       label: "New Work Order",   icon: Factory,        to: "/app/work-orders",  color: "bg-blue-600 hover:bg-blue-700" },
@@ -14,6 +15,7 @@ export default function FloatingActions() {
   const [open, setOpen] = useState(false);
   const navigate = useNavigate();
   const ref = useRef(null);
+  const { style: dragStyle, onPointerDown, wasDragged } = useDraggable("quick-actions-pos", { right: 24, bottom: 96 });
 
   useEffect(() => {
     const onClick = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
@@ -29,7 +31,7 @@ export default function FloatingActions() {
   const handleClick = (to) => { setOpen(false); navigate(to); };
 
   return (
-    <div ref={ref} className="fixed bottom-24 right-6 z-50 flex flex-col items-end gap-2">
+    <div ref={ref} style={dragStyle} className="fixed z-50 flex flex-col items-end gap-2">
       {open && (
         <div className="flex flex-col items-end gap-2 mb-1">
           {ACTIONS.map((a) => {
@@ -49,11 +51,13 @@ export default function FloatingActions() {
           })}
         </div>
       )}
-      <button onClick={() => setOpen(!open)}
-        className={`flex items-center gap-2 rounded-full pl-3 pr-4 py-3 shadow-lg transition-all ${
+      <button
+        onClick={() => { if (!wasDragged()) setOpen(!open); }}
+        onPointerDown={onPointerDown}
+        className={`flex items-center gap-2 rounded-full pl-3 pr-4 py-3 shadow-lg transition-colors cursor-grab active:cursor-grabbing touch-none select-none ${
           open ? "bg-slate-700 hover:bg-slate-800" : "bg-blue-600 hover:bg-blue-700"
         } text-white`}
-        title={open ? "Close" : "Quick actions"} aria-label="Quick actions">
+        title={open ? "Close" : "Quick actions — drag to reposition"} aria-label="Quick actions">
         {open ? <X className="w-5 h-5" /> : <Plus className="w-5 h-5" />}
         <span className="font-semibold text-sm">{open ? "Close" : "Quick Actions"}</span>
       </button>
