@@ -7,6 +7,8 @@ import {
   BarChart, Bar, AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
 } from "recharts";
 import { toast } from "sonner";
+import FYFilter from "@/components/erp/FYFilter";
+import { currentFYLabel, ALL_DATA } from "@/lib/fiscalYear";
 
 const fmtMonth = (m) => {
   if (!m) return m;
@@ -20,6 +22,9 @@ const fmtMonth = (m) => {
 export default function SpendAnalytics() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  // Left blank on purpose: the backend (/reports/purchase-spend) already defaults an empty
+  // range to the current Financial Year, so this starts correctly scoped without a round-trip.
+  const [fy, setFy] = useState(currentFYLabel());
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
 
@@ -49,6 +54,11 @@ export default function SpendAnalytics() {
       <Card className="p-3 mb-4">
         <div className="flex items-center gap-2 flex-wrap text-sm">
           <span className="text-xs uppercase tracking-wider text-slate-500 font-semibold">Range:</span>
+          <FYFilter value={fy} onChange={({ value, from, to }) => {
+            setFy(value);
+            if (value === ALL_DATA) { setDateFrom("2000-04-01"); setDateTo(new Date().toISOString().slice(0, 10)); }
+            else { setDateFrom(from || ""); setDateTo(to || ""); }
+          }} />
           <Input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} className="rounded-sm h-8 w-36 text-xs" />
           <span className="text-slate-400 text-xs">to</span>
           <Input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} className="rounded-sm h-8 w-36 text-xs" />

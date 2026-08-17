@@ -11,6 +11,8 @@ import {
   ColumnFilterPopover, CheckboxFilterContent, CategoryFilterContent,
 } from "@/components/erp/TableFilters";
 import { useColumnWidths, ColResizeHandle } from "@/components/erp/ColumnResize";
+import FYFilter from "@/components/erp/FYFilter";
+import { currentFYLabel, currentFYRange } from "@/lib/fiscalYear";
 import { Plus, Search, Eye, FileDown, Mail, MessageCircle, Trash2, Download as DLIcon, Printer, FileSpreadsheet } from "lucide-react";
 import { toast } from "sonner";
 
@@ -51,8 +53,11 @@ export default function PurchaseBills() {
   const [parties, setParties] = useState([]);
   const [settled, setSettled] = useState({});
   const [loading, setLoading] = useState(true);
-  const [dateFrom, setDateFrom] = useState("");
-  const [dateTo, setDateTo] = useState("");
+  // Default to the current Financial Year (not all-time since 2023) — see Invoices.jsx for the
+  // same pattern on the sales side.
+  const [fy, setFy] = useState(currentFYLabel());
+  const [dateFrom, setDateFrom] = useState(currentFYRange().from);
+  const [dateTo, setDateTo] = useState(currentFYRange().to);
   const [search, setSearch] = useState("");
   const [filters, setFilters] = useState(EMPTY_FILTERS);
   const [previewUrl, setPreviewUrl] = useState("");
@@ -188,6 +193,7 @@ export default function PurchaseBills() {
       <Card className="p-3 mb-4">
         <div className="flex items-center gap-2 flex-wrap text-sm">
           <span className="text-xs uppercase tracking-wider text-slate-500 font-semibold">Filter by:</span>
+          <FYFilter value={fy} onChange={({ value, from, to }) => { setFy(value); setDateFrom(from || ""); setDateTo(to || ""); }} />
           <Input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} className="rounded-sm h-8 w-36 text-xs" />
           <span className="text-slate-400 text-xs">to</span>
           <Input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} className="rounded-sm h-8 w-36 text-xs" />

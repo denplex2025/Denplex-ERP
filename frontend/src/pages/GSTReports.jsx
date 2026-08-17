@@ -5,14 +5,10 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { FileSpreadsheet, Download, Landmark } from "lucide-react";
 import { toast } from "sonner";
+import FYFilter from "@/components/erp/FYFilter";
+import { currentFYLabel, currentFYRange, ALL_DATA } from "@/lib/fiscalYear";
 
 const inr = (n) => "₹" + Number(n || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-
-function fyDefault() {
-  const t = new Date();
-  const y = t.getMonth() + 1 >= 4 ? t.getFullYear() : t.getFullYear() - 1;
-  return { from: `${y}-04-01`, to: `${y + 1}-03-31` };
-}
 
 const TABS = [
   { k: "gstr1", label: "GSTR-1 (Outward)" },
@@ -21,7 +17,8 @@ const TABS = [
 ];
 
 export default function GSTReports() {
-  const [range, setRange] = useState(fyDefault());
+  const [fy, setFy] = useState(currentFYLabel());
+  const [range, setRange] = useState(currentFYRange());
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [tab, setTab] = useState("gstr1");
@@ -56,6 +53,15 @@ export default function GSTReports() {
       <p className="text-sm text-slate-500 mb-4">GSTR-1, GSTR-3B and purchase (GSTR-2) summaries computed from your invoices and bills. Download as Excel for filing or your CA.</p>
 
       <div className="flex flex-wrap items-end gap-3 mb-4 bg-slate-50 border border-slate-200 rounded-md p-3">
+        <div>
+          <Label className="text-[11px] uppercase tracking-wider text-slate-500">Financial Year</Label>
+          <div className="mt-1">
+            <FYFilter value={fy} onChange={({ value, from, to }) => {
+              setFy(value);
+              setRange(value === ALL_DATA ? { from: "2000-04-01", to: new Date().toISOString().slice(0, 10) } : { from, to });
+            }} />
+          </div>
+        </div>
         <div><Label className="text-[11px] uppercase tracking-wider text-slate-500">From</Label><Input type="date" value={range.from} onChange={e => setRange(r => ({ ...r, from: e.target.value }))} className="mt-1 w-40" /></div>
         <div><Label className="text-[11px] uppercase tracking-wider text-slate-500">To</Label><Input type="date" value={range.to} onChange={e => setRange(r => ({ ...r, to: e.target.value }))} className="mt-1 w-40" /></div>
         <div><Label className="text-[11px] uppercase tracking-wider text-slate-500">Quick month</Label><Input type="month" onChange={e => setMonth(e.target.value)} className="mt-1 w-40" /></div>

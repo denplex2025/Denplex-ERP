@@ -12,6 +12,8 @@ import {
   ColumnFilterPopover, CheckboxFilterContent, CategoryFilterContent,
 } from "@/components/erp/TableFilters";
 import { useColumnWidths, ColResizeHandle } from "@/components/erp/ColumnResize";
+import FYFilter from "@/components/erp/FYFilter";
+import { currentFYLabel, currentFYRange } from "@/lib/fiscalYear";
 import { Plus, Search, Eye, FileDown, Mail, MessageCircle, Edit, Trash2, Download as DLIcon, Printer, FileSpreadsheet, MapPin } from "lucide-react";
 import { toast } from "sonner";
 
@@ -35,8 +37,12 @@ export default function Invoices() {
   const [parties, setParties] = useState([]);
   const [settled, setSettled] = useState({});
   const [loading, setLoading] = useState(true);
-  const [dateFrom, setDateFrom] = useState("");
-  const [dateTo, setDateTo] = useState("");
+  // Default to the current Financial Year (not all-time since 2023) — Vyapar-imported history
+  // otherwise dominates the totals. Users can still pick a different FY, "All Data", or edit the
+  // date fields directly for a custom range.
+  const [fy, setFy] = useState(currentFYLabel());
+  const [dateFrom, setDateFrom] = useState(currentFYRange().from);
+  const [dateTo, setDateTo] = useState(currentFYRange().to);
   const [godown, setGodown] = useState("All");
   const [search, setSearch] = useState("");
   const [filters, setFilters] = useState(EMPTY_FILTERS);
@@ -173,6 +179,7 @@ export default function Invoices() {
       <Card className="p-3 mb-4">
         <div className="flex items-center gap-2 flex-wrap text-sm">
           <span className="text-xs uppercase tracking-wider text-slate-500 font-semibold">Filter by:</span>
+          <FYFilter value={fy} onChange={({ value, from, to }) => { setFy(value); setDateFrom(from || ""); setDateTo(to || ""); }} />
           <Input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} className="rounded-sm h-8 w-36 text-xs" />
           <span className="text-slate-400 text-xs">to</span>
           <Input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} className="rounded-sm h-8 w-36 text-xs" />
