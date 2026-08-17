@@ -6,6 +6,11 @@ import { Home, LayoutGrid, Package, Menu as MenuIcon, Bell, Settings as Settings
 // Mobile-first shell for the Koshix app: sticky top bar + bottom tab nav.
 // Kept as a separate route tree (mounted at /m) from the desktop AppLayout so it can be
 // designed purpose-built for small screens rather than a responsive squeeze of the desktop UI.
+//
+// Visual design pass (2026-08-11): moved off the light-blue "fintech app" palette v1 borrowed
+// from Vyapar toward Denplex's own red/black identity — dark header instead of white, warm
+// neutral background instead of blue-tinted, neutral-toned (not slate/blue-toned) grays
+// throughout. Structure/routes/data layer intentionally unchanged from v1.
 const TABS = [
   { to: "/m", label: "Home", icon: Home, end: true },
   { to: "/m/dashboard", label: "Dashboard", icon: LayoutGrid },
@@ -18,17 +23,17 @@ export default function MobileLayout() {
   const nav = useNavigate();
 
   return (
-    <div className="min-h-screen bg-[#eaf2fb] flex flex-col">
-      <header className="sticky top-0 z-30 bg-white px-3 h-14 flex items-center justify-between border-b border-slate-200">
-        <div className="flex items-center gap-2 min-w-0">
-          <img src="/denplex-logo.png" alt="" className="h-8 w-8 rounded-full object-cover flex-shrink-0" />
-          <div className="font-display font-bold text-slate-900 text-[15px] truncate">{COMPANY_FULL}</div>
+    <div className="min-h-screen bg-[#F7F6F4] flex flex-col">
+      <header className="sticky top-0 z-30 bg-[#171717] px-3 h-14 flex items-center justify-between border-b-2 border-red-600">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <img src="/denplex-logo.png" alt="" className="h-8 w-8 rounded-md object-cover flex-shrink-0" />
+          <div className="font-display font-bold text-white text-[15px] truncate">{COMPANY_FULL}</div>
         </div>
         <div className="flex items-center gap-4 flex-shrink-0 ml-2">
-          <button aria-label="Notifications" className="text-slate-500 active:text-slate-700">
+          <button aria-label="Notifications" className="text-neutral-300 active:text-red-500">
             <Bell className="h-5 w-5" />
           </button>
-          <button aria-label="Settings" onClick={() => nav("/app/settings")} className="text-slate-500 active:text-slate-700">
+          <button aria-label="Settings" onClick={() => nav("/app/settings")} className="text-neutral-300 active:text-red-500">
             <SettingsIcon className="h-5 w-5" />
           </button>
         </div>
@@ -38,18 +43,24 @@ export default function MobileLayout() {
         <Outlet />
       </main>
 
-      <nav className="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 grid grid-cols-4 z-30 max-w-xl mx-auto">
+      <nav className="fixed bottom-0 left-0 right-0 bg-white border-t border-neutral-200 grid grid-cols-4 z-30 max-w-xl mx-auto">
         {TABS.map((t) => (
           <NavLink
             key={t.to}
             to={t.to}
             end={t.end}
             className={({ isActive }) =>
-              `flex flex-col items-center justify-center py-2.5 text-[11px] font-medium ${isActive ? "text-red-600" : "text-slate-500"}`
+              `flex flex-col items-center justify-center py-2.5 text-[11px] font-medium ${isActive ? "text-red-600" : "text-neutral-500"}`
             }
           >
-            <t.icon className="h-5 w-5 mb-0.5" />
-            {t.label}
+            {({ isActive }) => (
+              <>
+                <span className={`flex items-center justify-center h-7 w-7 rounded-full mb-0.5 ${isActive ? "bg-red-50" : ""}`}>
+                  <t.icon className="h-5 w-5" />
+                </span>
+                {t.label}
+              </>
+            )}
           </NavLink>
         ))}
       </nav>
