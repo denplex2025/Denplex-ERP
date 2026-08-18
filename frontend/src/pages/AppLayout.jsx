@@ -72,6 +72,12 @@ const NAV_GROUPS = [
     ],
   },
   {
+    // Full order-to-cash flow lives here now: every document a salesperson creates against a
+    // customer, from first quote through to the invoice and the payment received for it.
+    // Previously Sale Invoices/New Sale Invoice/Credit Notes were mis-filed under Accounts —
+    // moved here (2026-08-19) so a "sales"-only user sees their own invoices on desktop the same
+    // way they already do on mobile (MobileMenu.jsx's "My Business" group used moduleKey "sales"
+    // for Sale Invoices all along; desktop was the odd one out).
     head: "Sales",
     moduleKey: "sales",
     roles: ["manager", "sales"],
@@ -83,23 +89,24 @@ const NAV_GROUPS = [
       { to: "/app/docs/sale-orders", label: "Sale Orders", icon: FileText, testid: "nav-sale-orders" },
       { to: "/app/sale-orders/new", label: "New Sale Order", icon: FileText, testid: "nav-so-new", end: true },
       { to: "/app/docs/delivery-challans", label: "Delivery Challans", icon: Truck, testid: "nav-delivery-challans" },
-      { to: "/app/payments-in", label: "Payment-In", icon: ArrowDownToLine, testid: "nav-payments-in" },
+      { to: "/app/invoices", label: "Sale Invoices", icon: Receipt, testid: "nav-invoices" },
+      { to: "/app/invoices/new", label: "New Sale Invoice", icon: Receipt, testid: "nav-invoice-new", end: true },
+      { to: "/app/docs/credit-notes", label: "Credit Notes", icon: Receipt, testid: "nav-credit-notes" },
       { to: "/app/sale-returns", label: "Sale Returns", icon: Undo2, testid: "nav-sale-returns" },
+      { to: "/app/payments-in", label: "Payment-In", icon: ArrowDownToLine, testid: "nav-payments-in" },
     ],
   },
   {
+    // Backoffice bookkeeping/finance only — the sales documents themselves (invoices, credit
+    // notes) now live in Sales above; this group is reports, ledgers, and money-in-the-bank.
     head: "Accounts",
     moduleKey: "accounts",
     roles: ["manager", "accountant", "ca"],
     items: [
-      { to: "/app/invoices", label: "Sale Invoices", icon: Receipt, testid: "nav-invoices" },
-      { to: "/app/invoices/new", label: "New Sale Invoice", icon: Receipt, testid: "nav-invoice-new", end: true },
-      { to: "/app/docs/credit-notes", label: "Credit Notes", icon: Receipt, testid: "nav-credit-notes" },
       { to: "/app/accounting", label: "Accounting", icon: Calculator, testid: "nav-accounting" },
       { to: "/app/gst-reports", label: "GST Reports", icon: Landmark, testid: "nav-gst-reports" },
       { to: "/app/financial-statements", label: "Accounting Books (P&L / BS)", icon: BookOpen, testid: "nav-financials" },
       { to: "/app/bank-cash", label: "Cash & Bank", icon: Wallet, testid: "nav-bank-cash" },
-      { to: "/app/doc-masters", label: "Document Masters", icon: FileText, testid: "nav-doc-masters" },
       { to: "/app/statements", label: "Account Statements", icon: ScrollText, testid: "nav-statements" },
       { to: "/app/reminders", label: "Payment Reminders", icon: AlarmClock, testid: "nav-reminders" },
       { to: "/app/costing", label: "Costing & Profitability", icon: Calculator, testid: "nav-costing" },
@@ -177,6 +184,7 @@ const NAV_GROUPS = [
     items: [
       { to: "/app/users", label: "Users", icon: SettingsIcon, testid: "nav-users" },
       { to: "/app/settings", label: "Settings", icon: Wrench, testid: "nav-settings" },
+      { to: "/app/doc-masters", label: "Document Masters", icon: FileText, testid: "nav-doc-masters" },
       { to: "/app/audit", label: "Audit Log", icon: ScrollText, testid: "nav-audit" },
       { to: "/app/recycle-bin", label: "Recycle Bin", icon: Trash2, testid: "nav-recycle-bin" },
       { to: "/app/reset-data", label: "Reset Trial Data", icon: Trash2, testid: "nav-reset-data" },
