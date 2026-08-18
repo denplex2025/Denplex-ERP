@@ -328,12 +328,17 @@ export default function LineItemDoc({
         </DialogContent>
       </Dialog>
 
+      {/* PDF Preview — the shared DialogContent draws its own close "X" absolutely positioned at
+          right-4 top-4 (see components/ui/dialog.jsx), independent of this header's own layout.
+          Because this dialog uses p-0 with the header at px-5, the Email button used to land right
+          under that X and visually overlap it. Fixed (2026-08-19) by reserving a pr-9 gutter on the
+          button group so nothing we render here reaches into the X's corner. */}
       <Dialog open={previewOpen} onOpenChange={(v)=>{ if (!v) closePreview(); }}>
         <DialogContent className="rounded-sm max-w-5xl p-0 overflow-hidden" data-testid="pdf-preview-dialog">
           <DialogHeader className="px-5 py-3 border-b border-slate-200">
-            <DialogTitle className="font-display flex items-center justify-between">
-              <span>{previewRow?.code} — PDF Preview</span>
-              <span className="flex gap-2">
+            <DialogTitle className="font-display flex items-center justify-between pr-9">
+              <span className="truncate">{previewRow?.code} — PDF Preview</span>
+              <span className="flex gap-2 shrink-0">
                 <Button size="sm" variant="outline" className="rounded-sm" onClick={() => previewRow && downloadPdf(previewRow)} data-testid="preview-download"><DLIcon className="h-4 w-4 mr-1" /> Download</Button>
                 <Button size="sm" variant="outline" className="rounded-sm" onClick={() => previewRow && emailDoc(previewRow)}><Mail className="h-4 w-4 mr-1" /> Email</Button>
               </span>
