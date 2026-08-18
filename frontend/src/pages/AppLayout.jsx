@@ -251,8 +251,8 @@ export default function AppLayout() {
                     onClick={() => setOpen(false)}
                     data-testid={n.testid}
                     className={({ isActive }) =>
-                      `flex items-center gap-2.5 px-3 py-2 text-sm rounded-sm transition-colors ${
-                        isActive ? "bg-red-50 text-red-700 font-medium" : "text-slate-700 hover:bg-slate-100"
+                      `flex items-center gap-2.5 px-3 py-2 text-sm rounded-sm transition-all duration-150 ${
+                        isActive ? "bg-red-50 text-red-700 font-medium" : "text-slate-700 hover:bg-red-50 hover:text-red-700 hover:translate-x-0.5"
                       }`
                     }
                   >
