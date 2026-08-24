@@ -12442,6 +12442,174 @@ async def get_state_summary(user=Depends(get_current_user)):
     return summary
 # ==================== End Material States (M.4a) ====================
 
+# ==================== Party Statement: date-range filter + branded PDF/Excel/CSV export (2026-08-19) ====================
+# party_statement() itself (above) is left completely untouched — it always returns the party's
+# FULL transaction history with opening_balance hardcoded to 0. These wrap it: fetch the full
+# history once, then slice to [date_from, date_to] by rolling everything before date_from into a
+# recomputed opening balance and rebuilding the running balance for just the kept transactions.
+# Debit increases the running balance (Dr = they owe us), credit decreases it — the same
+# convention party_statement() and the frontend already use.
+def _filter_party_statement(full: dict, date_from: str = "", date_to: str = "") -> dict:
+    txns = full.get("transactions") or []
+    if not date_from and not date_to:
+        return full
+    opening = float(full.get("opening_balance") or 0)
+    kept = []
+    for t in txns:
+        d = str(t.get("date") or "")[:10]
+        if date_from and d < date_from:
+            opening += float(t.get("debit") or 0) - float(t.get("credit") or 0)
+            continue
+        if date_to and d > date_to:
+            continue
+        kept.append(t)
+    running = opening
+    out_txns = []
+    for t in kept:
+        running += float(t.get("debit") or 0) - float(t.get("credit") or 0)
+        out_txns.append({**t, "running": round(running, 2)})
+    return {"party": full.get("party"), "opening_balance": round(opening, 2), "transactions": out_txns, "closing_balance": round(running, 2)}
+
+
+@api.get("/parties/{pid}/statement/filtered")
+async def party_statement_filtered(pid: str, date_from: str = "", date_to: str = "", user=Depends(get_current_user)):
+    full = await party_statement(pid, "this_year", user)
+    return _filter_party_statement(full, date_from, date_to)
+
+
+def _party_stmt_pdf(stmt: dict, date_from: str = "", date_to: str = "") -> bytes:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image
+    from reportlab.lib import colors
+    from reportlab.lib.units import mm
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=14 * mm, bottomMargin=16 * mm, leftMargin=16 * mm, rightMargin=16 * mm)
+    ss = getSampleStyleSheet()
+    el = []
+    logo_path = ROOT_DIR / "logo.png"
+    company_block = Paragraph(
+        "<b>Denplex Engineering Company</b><br/>"
+        "UDYAM Registration Number - UDYAM-GJ-09-0005351<br/>"
+        "Unit-1: 3 Shed No.4, Shivam Estate, Opp. Shah Alloys Limited, Gandhinagar-382721 &nbsp;|&nbsp; "
+        "Unit-2: 3 Shed No.20, Pushkar Industrial Estate, nr. Ramol-Vatva Railway Bridge, Phase-1, Vatva, Ahmedabad-382445<br/>"
+        "Phone: +91 7016219334 &nbsp;|&nbsp; GSTIN: 24AALFD1671P1Z2 &nbsp;|&nbsp; State: 24-Gujarat",
+        ParagraphStyle("PartyStmtCompany", parent=ss["Normal"], fontSize=8, leading=10, textColor=colors.HexColor("#475569")),
+    )
+    if logo_path.exists():
+        header_row = [[Image(str(logo_path), width=16 * mm, height=16 * mm), company_block]]
+        header_t = Table(header_row, colWidths=[20 * mm, 158 * mm])
+        header_t.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0)]))
+        el.append(header_t)
+    else:
+        el.append(company_block)
+    el.append(Spacer(1, 5 * mm))
+    party = stmt.get("party") or {}
+    el.append(Paragraph("<b>Account Statement</b>", ss["Title"]))
+    period_line = f"{date_from or 'Beginning'} to {date_to or 'Today'}"
+    el.append(Paragraph(f"<b>{party.get('name','')}</b> &nbsp; {party.get('gstin','') or ''}<br/>Period: {period_line}", ss["Normal"]))
+    el.append(Spacer(1, 4 * mm))
+    summary_data = [["Opening Balance", f"{stmt.get('opening_balance', 0):,.2f}"], ["Closing Balance", f"{stmt.get('closing_balance', 0):,.2f}"]]
+    sum_t = Table(summary_data, colWidths=[40 * mm, 40 * mm])
+    sum_t.setStyle(TableStyle([("FONTSIZE", (0, 0), (-1, -1), 9), ("BOTTOMPADDING", (0, 0), (-1, -1), 3), ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold")]))
+    el.append(sum_t)
+    el.append(Spacer(1, 5 * mm))
+    rows = [["#", "Date", "Type", "Reference", "Debit", "Credit", "Balance"]]
+    for i, t in enumerate(stmt.get("transactions") or [], 1):
+        bal = t.get("running", 0)
+        rows.append([str(i), str(t.get("date", ""))[:10], t.get("type", ""), t.get("ref", "") or "-",
+                     f"{t['debit']:,.2f}" if t.get("debit") else "", f"{t['credit']:,.2f}" if t.get("credit") else "",
+                     f"{bal:,.2f} {'Dr' if bal > 0 else ('Cr' if bal < 0 else '')}"])
+    tbl = Table(rows, colWidths=[8 * mm, 20 * mm, 24 * mm, 34 * mm, 26 * mm, 26 * mm, 32 * mm], repeatRows=1)
+    tbl.setStyle(TableStyle([("FONTSIZE", (0, 0), (-1, -1), 8), ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                              ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f1f5f9")), ("ALIGN", (4, 0), (6, -1), "RIGHT"),
+                              ("LINEBELOW", (0, 0), (-1, -1), 0.25, colors.HexColor("#e2e8f0")),
+                              ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3)]))
+    el.append(tbl)
+    el.append(Spacer(1, 5 * mm))
+    el.append(Paragraph("Computed live from posted documents — Denplex Engineering Company", ss["Italic"]))
+    doc.build(el)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def _party_stmt_xlsx(stmt: dict, date_from: str = "", date_to: str = "") -> bytes:
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Statement"
+    party = stmt.get("party") or {}
+    ws["A1"] = "Denplex Engineering Company"
+    ws["A1"].font = Font(bold=True, size=14)
+    ws["A2"] = f"Account Statement — {party.get('name','')}"
+    ws["A2"].font = Font(bold=True, size=11)
+    ws["A3"] = f"Period: {date_from or 'Beginning'} to {date_to or 'Today'}"
+    ws["A3"].font = Font(size=9, color="888888")
+    ws["A5"] = "Opening Balance"
+    ws["B5"] = stmt.get("opening_balance", 0)
+    ws["A5"].font = Font(bold=True)
+    ws["A6"] = "Closing Balance"
+    ws["B6"] = stmt.get("closing_balance", 0)
+    ws["A6"].font = Font(bold=True)
+    headers = ["#", "Date", "Type", "Reference", "Debit", "Credit", "Balance"]
+    r = 8
+    for c, h in enumerate(headers, 1):
+        ws.cell(r, c, h).font = Font(bold=True)
+    r += 1
+    for i, t in enumerate(stmt.get("transactions") or [], 1):
+        ws.cell(r, 1, i)
+        ws.cell(r, 2, str(t.get("date", ""))[:10])
+        ws.cell(r, 3, t.get("type", ""))
+        ws.cell(r, 4, t.get("ref", "") or "")
+        ws.cell(r, 5, t.get("debit") or None)
+        ws.cell(r, 6, t.get("credit") or None)
+        ws.cell(r, 7, t.get("running", 0))
+        r += 1
+    for col, w in zip("ABCDEFG", [5, 12, 14, 20, 14, 14, 14]):
+        ws.column_dimensions[col].width = w
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+@api.get("/parties/{pid}/statement/pdf")
+async def party_statement_pdf(pid: str, date_from: str = "", date_to: str = "", user=Depends(get_current_user)):
+    full = await party_statement(pid, "this_year", user)
+    sliced = _filter_party_statement(full, date_from, date_to)
+    pdf_bytes = _party_stmt_pdf(sliced, date_from, date_to)
+    return Response(content=pdf_bytes, media_type="application/pdf", headers={"Content-Disposition": 'inline; filename="statement.pdf"'})
+
+
+@api.get("/parties/{pid}/statement/xlsx")
+async def party_statement_xlsx(pid: str, date_from: str = "", date_to: str = "", user=Depends(get_current_user)):
+    full = await party_statement(pid, "this_year", user)
+    sliced = _filter_party_statement(full, date_from, date_to)
+    xlsx_bytes = _party_stmt_xlsx(sliced, date_from, date_to)
+    return Response(content=xlsx_bytes, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": 'attachment; filename="statement.xlsx"'})
+
+
+@api.get("/parties/{pid}/statement/csv")
+async def party_statement_csv(pid: str, date_from: str = "", date_to: str = "", user=Depends(get_current_user)):
+    full = await party_statement(pid, "this_year", user)
+    sliced = _filter_party_statement(full, date_from, date_to)
+    sbuf = io.StringIO()
+    w = csv.writer(sbuf)
+    party = sliced.get("party") or {}
+    w.writerow(["Denplex Engineering Company"])
+    w.writerow([f"Account Statement - {party.get('name','')}"])
+    w.writerow([f"Period: {date_from or 'Beginning'} to {date_to or 'Today'}"])
+    w.writerow([])
+    w.writerow(["Opening Balance", sliced.get("opening_balance", 0)])
+    w.writerow(["Closing Balance", sliced.get("closing_balance", 0)])
+    w.writerow([])
+    w.writerow(["#", "Date", "Type", "Reference", "Debit", "Credit", "Balance"])
+    for i, t in enumerate(sliced.get("transactions") or [], 1):
+        w.writerow([i, str(t.get("date", ""))[:10], t.get("type", ""), t.get("ref", "") or "", t.get("debit") or "", t.get("credit") or "", t.get("running", 0)])
+    return Response(content=sbuf.getvalue(), media_type="text/csv", headers={"Content-Disposition": 'attachment; filename="statement.csv"'})
+# ==================== End Party Statement exports ====================
+
 
 # ---------------- App config ----------------
 app.include_router(api)
