@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import api from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -9,11 +9,31 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { Badge } from "@/components/ui/badge";
 import { PageHeader, Card, Th, Td, Empty, fmtDate, inr } from "@/components/erp/Primitives";
 import ExportMenu from "@/components/erp/ExportMenu";
-import { Plus, ArrowUpFromLine } from "lucide-react";
+import AttachmentsPopover from "@/components/erp/AttachmentsPopover";
+import {
+  TEXT_CATEGORIES, DATE_CATEGORIES, NUM_CATEGORIES,
+  matchesText, matchesDate, matchesNum,
+  ColumnFilterPopover, CheckboxFilterContent, CategoryFilterContent,
+} from "@/components/erp/TableFilters";
+import { useColumnWidths, ColResizeHandle } from "@/components/erp/ColumnResize";
+import FYFilter from "@/components/erp/FYFilter";
+import { currentFYLabel, currentFYRange } from "@/lib/fiscalYear";
+import { Plus, ArrowUpFromLine, Search, Printer } from "lucide-react";
 import { toast } from "sonner";
 
 const PAYMENT_TYPES = ["Cash", "Bank Transfer", "UPI", "Cheque", "Card", "Other"];
+const STATUSES = ["Unused", "Partially Used", "Used"];
 const n = (v) => Number(v || 0);
+
+const DEFAULT_COL_WIDTHS = { date: 110, code: 120, party: 220, amount: 120, paidVia: 170, status: 130, attach: 60 };
+const EMPTY_FILTERS = {
+  code: { category: "contains", value: "" },
+  party: { category: "contains", value: "" },
+  date: { category: "equal", value: "" },
+  amount: { category: "equal", value: "" },
+  paymentTypes: [],
+  statuses: [],
+};
 
 export default function PaymentOut() {
   const [rows, setRows] = useState([]);
@@ -23,6 +43,16 @@ export default function PaymentOut() {
   const [openBills, setOpenBills] = useState([]);
   const [allocs, setAllocs] = useState({});   // billId -> { amount, tds }
   const [advance, setAdvance] = useState("");
+
+  // Filters: FY/date range (defaults to current FY, same convention as every other report in the
+  // ERP) + free-text search + per-column filters (Vyapar-style funnel popovers), matching the
+  // pattern already established in PurchaseBills.jsx / PaymentIn.jsx.
+  const [fy, setFy] = useState(currentFYLabel());
+  const [dateFrom, setDateFrom] = useState(currentFYRange().from);
+  const [dateTo, setDateTo] = useState(currentFYRange().to);
+  const [search, setSearch] = useState("");
+  const [filters, setFilters] = useState(EMPTY_FILTERS);
+  const [colWidths, startResize] = useColumnWidths("colw:payments-out", DEFAULT_COL_WIDTHS);
 
   const load = async () => {
     try {
@@ -68,7 +98,33 @@ export default function PaymentOut() {
     } catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
   };
 
-  const total = rows.reduce((s, r) => s + n(r.amount), 0);
+  // Date-range slice first (drives the summary cards + is independent of the free-text/column
+  // filters below), then search + per-column filters on top — same two-stage approach as
+  // PurchaseBills.jsx / PaymentIn.jsx.
+  const baseFiltered = useMemo(() => rows.filter((r) => {
+    const d = (r.date || "").slice(0, 10);
+    if (dateFrom && d && d < dateFrom) return false;
+    if (dateTo && d && d > dateTo) return false;
+    return true;
+  }), [rows, dateFrom, dateTo]);
+
+  const q = search.trim().toLowerCase();
+  const filteredRows = useMemo(() => baseFiltered.filter((r) => {
+    if (q && !((r.code || "").toLowerCase().includes(q) || (r.party_name || "").toLowerCase().includes(q))) return false;
+    if (filters.statuses.length && !filters.statuses.includes(r.status || "Unused")) return false;
+    if (filters.paymentTypes.length && !filters.paymentTypes.includes(r.payment_type)) return false;
+    if (!matchesText(r.code, filters.code)) return false;
+    if (!matchesText(r.party_name, filters.party)) return false;
+    if (!matchesDate(r.date, filters.date)) return false;
+    if (!matchesNum(r.amount, filters.amount)) return false;
+    return true;
+  }), [baseFiltered, q, filters]);
+
+  const hasActiveFilters = filters.statuses.length > 0 || filters.paymentTypes.length > 0 || !!filters.code.value
+    || !!filters.party.value || !!filters.date.value || filters.amount.value !== "";
+
+  const total = filteredRows.reduce((s, r) => s + n(r.amount), 0);
+  const available = filteredRows.reduce((s, r) => s + Math.max(0, n(r.amount) - n(r.allocated_amount)), 0);
 
   return (
     <div data-testid="payments-out-page">
@@ -86,37 +142,109 @@ export default function PaymentOut() {
         }
       />
 
+      <Card className="p-3 mb-4">
+        <div className="flex items-center gap-2 flex-wrap text-sm">
+          <span className="text-xs uppercase tracking-wider text-slate-500 font-semibold">Filter by:</span>
+          <FYFilter value={fy} onChange={({ value, from, to }) => { setFy(value); setDateFrom(from || ""); setDateTo(to || ""); }} />
+          <Input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} className="rounded-sm h-8 w-36 text-xs" />
+          <span className="text-slate-400 text-xs">to</span>
+          <Input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} className="rounded-sm h-8 w-36 text-xs" />
+        </div>
+      </Card>
+
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
         <Card className="p-5">
           <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Total Paid</div>
           <div className="font-display text-2xl font-bold mt-1 text-red-700">{inr(total)}</div>
-          <div className="text-xs text-slate-500 mt-1">{rows.length} payment(s)</div>
+          <div className="text-xs text-slate-500 mt-1">{filteredRows.length} payment(s) in range</div>
+        </Card>
+        <Card className="p-5">
+          <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Available Credit (Unused)</div>
+          <div className="font-display text-2xl font-bold mt-1 text-amber-700">{inr(available)}</div>
+          <div className="text-xs text-slate-500 mt-1">Not yet allocated to a bill</div>
         </Card>
       </div>
 
+      <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+        <div className="relative w-full max-w-xs">
+          <Search className="h-3.5 w-3.5 text-slate-400 absolute left-2.5 top-2.5" />
+          <Input placeholder="Search ref. no or party…" value={search} onChange={(e) => setSearch(e.target.value)} className="rounded-sm border-slate-300 pl-8 h-8 text-sm" />
+        </div>
+        <div className="flex items-center gap-2">
+          {hasActiveFilters && (
+            <button onClick={() => setFilters(EMPTY_FILTERS)} className="text-xs text-red-600 hover:underline">Clear column filters</button>
+          )}
+          <Button size="sm" variant="outline" className="rounded-sm h-8" onClick={() => window.print()}><Printer className="h-3.5 w-3.5 mr-1" /> Print</Button>
+        </div>
+      </div>
+
       <Card>
-        {rows.length === 0 ? <Empty label="No payments made yet." /> : (
-          <table className="w-full">
-            <thead>
-              <tr><Th>Date</Th><Th>Ref.</Th><Th>Party Name</Th><Th>Amount</Th><Th>Paid via</Th><Th>Status</Th></tr>
-            </thead>
-            <tbody>
-              {rows.map(r => (
-                <tr key={r.id} className="hover:bg-slate-50">
-                  <Td>{fmtDate(r.date)}</Td>
-                  <Td className="font-mono-tech text-xs">{r.code}</Td>
-                  <Td>{r.party_name}</Td>
-                  <Td className="font-medium">{inr(r.amount)}</Td>
-                  <Td>{r.payment_type}{r.ref_no ? ` · ${r.ref_no}` : ""}</Td>
-                  <Td>
-                    <Badge variant="outline" className={`rounded-sm uppercase text-[10px] ${r.status === "Used" ? "border-emerald-600 text-emerald-700" : r.status === "Partially Used" ? "border-amber-600 text-amber-700" : "border-slate-400 text-slate-600"}`}>
-                      {r.status}
-                    </Badge>
-                  </Td>
+        {filteredRows.length === 0 ? <Empty label={rows.length === 0 ? "No payments made yet." : "No payments match the current filters."} /> : (
+          <div className="overflow-x-auto">
+            <table style={{ tableLayout: "fixed", width: "100%" }}>
+              <colgroup>{Object.entries(colWidths).map(([k, w]) => <col key={k} style={{ width: w }} />)}</colgroup>
+              <thead>
+                <tr>
+                  <Th className="relative"><div className="flex items-center gap-1">Date
+                    <ColumnFilterPopover active={!!filters.date.value} renderContent={(close) => (
+                      <CategoryFilterContent categoryOptions={DATE_CATEGORIES} inputType="date" valueLabel="Select Date" committed={filters.date}
+                        onApply={(v) => setFilters((f) => ({ ...f, date: v }))} onClear={() => setFilters((f) => ({ ...f, date: { category: "equal", value: "" } }))} close={close} />
+                    )} />
+                  </div><ColResizeHandle onMouseDown={startResize("date")} /></Th>
+                  <Th className="relative"><div className="flex items-center gap-1">Ref.
+                    <ColumnFilterPopover active={!!filters.code.value} renderContent={(close) => (
+                      <CategoryFilterContent categoryOptions={TEXT_CATEGORIES} inputType="text" valueLabel="Ref. No" committed={filters.code}
+                        onApply={(v) => setFilters((f) => ({ ...f, code: v }))} onClear={() => setFilters((f) => ({ ...f, code: { category: "contains", value: "" } }))} close={close} />
+                    )} />
+                  </div><ColResizeHandle onMouseDown={startResize("code")} /></Th>
+                  <Th className="relative"><div className="flex items-center gap-1">Party Name
+                    <ColumnFilterPopover active={!!filters.party.value} renderContent={(close) => (
+                      <CategoryFilterContent categoryOptions={TEXT_CATEGORIES} inputType="text" valueLabel="Party Name" committed={filters.party}
+                        onApply={(v) => setFilters((f) => ({ ...f, party: v }))} onClear={() => setFilters((f) => ({ ...f, party: { category: "contains", value: "" } }))} close={close} />
+                    )} />
+                  </div><ColResizeHandle onMouseDown={startResize("party")} /></Th>
+                  <Th className="relative text-right"><div className="flex items-center justify-end gap-1">Amount
+                    <ColumnFilterPopover active={filters.amount.value !== ""} renderContent={(close) => (
+                      <CategoryFilterContent categoryOptions={NUM_CATEGORIES} inputType="number" valueLabel="Amount" committed={filters.amount}
+                        onApply={(v) => setFilters((f) => ({ ...f, amount: v }))} onClear={() => setFilters((f) => ({ ...f, amount: { category: "equal", value: "" } }))} close={close} />
+                    )} />
+                  </div><ColResizeHandle onMouseDown={startResize("amount")} /></Th>
+                  <Th className="relative"><div className="flex items-center gap-1">Paid via
+                    <ColumnFilterPopover active={filters.paymentTypes.length > 0} renderContent={(close) => (
+                      <CheckboxFilterContent options={PAYMENT_TYPES} committed={filters.paymentTypes}
+                        onApply={(v) => setFilters((f) => ({ ...f, paymentTypes: v }))} onClear={() => setFilters((f) => ({ ...f, paymentTypes: [] }))} close={close} />
+                    )} />
+                  </div><ColResizeHandle onMouseDown={startResize("paidVia")} /></Th>
+                  <Th className="relative"><div className="flex items-center gap-1">Status
+                    <ColumnFilterPopover active={filters.statuses.length > 0} renderContent={(close) => (
+                      <CheckboxFilterContent options={STATUSES} committed={filters.statuses}
+                        onApply={(v) => setFilters((f) => ({ ...f, statuses: v }))} onClear={() => setFilters((f) => ({ ...f, statuses: [] }))} close={close} />
+                    )} />
+                  </div><ColResizeHandle onMouseDown={startResize("status")} /></Th>
+                  <Th className="text-center">Attach</Th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {filteredRows.map(r => (
+                  <tr key={r.id} className="hover:bg-slate-50">
+                    <Td className="truncate">{fmtDate(r.date)}</Td>
+                    <Td className="font-mono-tech text-xs truncate">{r.code}</Td>
+                    <Td className="truncate">{r.party_name}</Td>
+                    <Td className="text-right font-medium font-mono-tech">{inr(r.amount)}</Td>
+                    <Td className="truncate">{r.payment_type}{r.ref_no ? ` · ${r.ref_no}` : ""}</Td>
+                    <Td>
+                      <Badge variant="outline" className={`rounded-sm uppercase text-[10px] ${r.status === "Used" ? "border-emerald-600 text-emerald-700" : r.status === "Partially Used" ? "border-amber-600 text-amber-700" : "border-slate-400 text-slate-600"}`}>
+                        {r.status}
+                      </Badge>
+                    </Td>
+                    <Td className="text-center">
+                      <AttachmentsPopover linkedTo={r.id} linkedType="payment_out" category="payment" label="Receipt / Proof" />
+                    </Td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </Card>
 
@@ -184,6 +312,7 @@ export default function PaymentOut() {
             </div>
           </div>
           <div className="mt-2"><Field label="Notes"><Textarea rows={2} value={form.notes || ""} onChange={e => setForm(p => ({ ...p, notes: e.target.value }))} className="rounded-sm" /></Field></div>
+          <p className="text-xs text-slate-400 mt-1">Tip: after saving, use the paperclip icon on the row to attach a receipt, cheque scan, or UPI screenshot.</p>
 
           <DialogFooter>
             <Button variant="outline" className="rounded-sm" onClick={() => setOpen(false)}>Cancel</Button>
