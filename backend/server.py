@@ -226,7 +226,14 @@ _try_register_pdf_fonts()
 
 MONGO_URL = os.environ['MONGO_URL']
 DB_NAME = os.environ['DB_NAME']
-JWT_SECRET = os.environ.get('JWT_SECRET', 'dev-secret')
+# Never fall back to a hardcoded default: 'dev-secret' is published in this public repo, so a
+# missing or renamed env var would silently let anyone forge an admin token. A random
+# per-process key is secure and fails loudly (sessions drop) rather than failing silently.
+JWT_SECRET = os.environ.get('JWT_SECRET') or ''
+if not JWT_SECRET:
+    JWT_SECRET = secrets.token_urlsafe(48)
+    logging.error("JWT_SECRET is not set - using a random per-process key. All sessions are "
+                  "invalidated now and on every restart. Set JWT_SECRET in the environment.")
 EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY', '')
 
 client = AsyncIOMotorClient(MONGO_URL)
@@ -12442,14 +12449,123 @@ async def get_state_summary(user=Depends(get_current_user)):
     return summary
 # ==================== End Material States (M.4a) ====================
 
-# ==================== Party Statement: date-range filter + branded PDF/Excel/CSV export (2026-08-19) ====================
-# party_statement() itself (above) is left completely untouched — it always returns the party's
-# FULL transaction history with opening_balance hardcoded to 0. These wrap it: fetch the full
-# history once, then slice to [date_from, date_to] by rolling everything before date_from into a
-# recomputed opening balance and rebuilding the running balance for just the kept transactions.
-# Debit increases the running balance (Dr = they owe us), credit decreases it — the same
-# convention party_statement() and the frontend already use.
+# ==================== Party Statement: correct two-sided ledger + date filter + branded exports ====================
+# REWRITTEN 2026-08-26. The original party_statement() (still above, route GET /parties/{pid}/statement)
+# has three bugs that made every statement wrong, so nothing here calls it any more:
+#   1. It matched documents on customer_id/party_id ONLY. Every Vyapar-imported document (all 839
+#      invoices, 1822 bills, 532+1032 payments) has NO id field — the importer only wrote the
+#      denormalized *_name string. So the ledger came back empty for essentially every party.
+#   2. It only ever queried db.invoices + db.payments_in, so suppliers had no ledger at all.
+#   3. opening_balance was hardcoded to 0, and credit notes were fetched then never used.
+# _party_statement_full() below replaces it, reusing the same name-matching + dual-role party
+# resolution that /parties/{pid}/transactions already does correctly.
+#
+# Sign convention (unchanged from before, matches the frontend's Dr/Cr display):
+#   running = debit - credit;  positive => party owes us (Dr);  negative => we owe party (Cr).
+#   Customer: sale invoice = debit; payment-in, TDS withheld by them, credit note = credit.
+#   Supplier: purchase bill = credit; payment-out, TDS we withheld, purchase return = debit.
+# TDS is carried as its own ledger row because a payment document's 'amount' EXCLUDES the TDS
+# portion, while _settled_per_invoice/_settled_per_bill count amount + tds_amount as settled.
+# Without the TDS row the statement would leave every TDS-deducted document permanently open —
+# the same "outstanding till eternity" bug that was fixed for the dashboards.
+
+
+def _party_stmt_match(pid: str, name: str, id_field: str) -> dict:
+    """Mongo query matching a party's documents by id OR by exact (case-insensitive) name.
+    Name is the primary path because imported documents carry no ids — see note above."""
+    arms = [{id_field: pid}]
+    nm = (name or "").strip()
+    if nm:
+        rx = {"$regex": f"^{re.escape(nm)}$", "$options": "i"}
+        arms.append({id_field.replace("_id", "_name"): rx})
+    return {"$or": arms}
+
+
+def _party_stmt_pay_match(pid: str, name: str) -> dict:
+    arms = [{"party_id": pid}]
+    nm = (name or "").strip()
+    if nm:
+        arms.append({"party_name": {"$regex": f"^{re.escape(nm)}$", "$options": "i"}})
+    return {"$or": arms}
+
+
+def _pay_tds_total(p: dict) -> float:
+    return sum(float(a.get("tds_amount") or 0) for a in (p.get("allocations") or []))
+
+
+async def _party_statement_full(pid: str, kind: Optional[str] = None) -> dict:
+    """Full chronological ledger for one party, both customer and supplier sides.
+    'kind' ("customer"/"supplier") disambiguates the 8 real dual-role parties that exist under the
+    same id in both collections; without it we fall back to customer-first, same as
+    /parties/{pid}/transactions."""
+    customer = await db.customers.find_one({"id": pid}, {"_id": 0})
+    supplier = await db.suppliers.find_one({"id": pid}, {"_id": 0})
+    if kind == "supplier" and supplier:
+        party, resolved = supplier, "supplier"
+    elif kind == "customer" and customer:
+        party, resolved = customer, "customer"
+    elif customer:
+        party, resolved = customer, "customer"
+    else:
+        party, resolved = supplier, "supplier"
+    if not party:
+        raise HTTPException(404, "Party not found")
+
+    name = party.get("name") or ""
+    txns = []
+
+    if resolved == "customer":
+        q = _party_stmt_match(pid, name, "customer_id")
+        pq = _party_stmt_pay_match(pid, name)
+        for inv in await db.invoices.find(q, {"_id": 0}).to_list(20000):
+            txns.append({"date": inv.get("date"), "type": "Sale", "ref": inv.get("code"),
+                         "debit": float(inv.get("total") or 0), "credit": 0.0})
+        for cn in await db.credit_notes.find(q, {"_id": 0}).to_list(20000):
+            txns.append({"date": cn.get("date"), "type": "Sale Return", "ref": cn.get("code"),
+                         "debit": 0.0, "credit": float(cn.get("total") or 0)})
+        for p in await db.payments_in.find(pq, {"_id": 0}).to_list(20000):
+            txns.append({"date": p.get("date"), "type": "Payment In", "ref": p.get("code"),
+                         "debit": 0.0, "credit": float(p.get("amount") or 0)})
+            tds = _pay_tds_total(p)
+            if tds:
+                txns.append({"date": p.get("date"), "type": "TDS Deducted", "ref": p.get("code"),
+                             "debit": 0.0, "credit": tds})
+    else:
+        q = _party_stmt_match(pid, name, "supplier_id")
+        pq = _party_stmt_pay_match(pid, name)
+        for b in await db.vendor_bills.find(q, {"_id": 0}).to_list(20000):
+            txns.append({"date": b.get("date"), "type": "Purchase", "ref": b.get("code"),
+                         "debit": 0.0, "credit": float(b.get("total") or 0)})
+        for pr in await db.purchase_returns.find(q, {"_id": 0}).to_list(20000):
+            txns.append({"date": pr.get("date"), "type": "Purchase Return", "ref": pr.get("code"),
+                         "debit": float(pr.get("total") or 0), "credit": 0.0})
+        for p in await db.payments_out.find(pq, {"_id": 0}).to_list(20000):
+            txns.append({"date": p.get("date"), "type": "Payment Out", "ref": p.get("code"),
+                         "debit": float(p.get("amount") or 0), "credit": 0.0})
+            tds = _pay_tds_total(p)
+            if tds:
+                txns.append({"date": p.get("date"), "type": "TDS Deducted", "ref": p.get("code"),
+                             "debit": tds, "credit": 0.0})
+
+    # Opening balance carried on the party record by the Vyapar importer. It is stored as a
+    # POSITIVE magnitude on both sides (the dashboard adds customers' into receivable and
+    # suppliers' into payable), so the supplier side is negated into our signed convention.
+    opening = float(party.get("opening_balance") or 0)
+    if resolved == "supplier":
+        opening = -opening
+
+    txns.sort(key=lambda t: str(t.get("date") or "")[:10])
+    running = opening
+    for t in txns:
+        running += t["debit"] - t["credit"]
+        t["running"] = round(running, 2)
+    return {"party": party, "kind": resolved, "opening_balance": round(opening, 2),
+            "transactions": txns, "closing_balance": round(running, 2)}
+
+
 def _filter_party_statement(full: dict, date_from: str = "", date_to: str = "") -> dict:
+    """Slice a full statement to [date_from, date_to]: roll everything before date_from into a
+    recomputed opening balance, then rebuild the running balance for the kept rows."""
     txns = full.get("transactions") or []
     if not date_from and not date_to:
         return full
@@ -12468,38 +12584,70 @@ def _filter_party_statement(full: dict, date_from: str = "", date_to: str = "") 
     for t in kept:
         running += float(t.get("debit") or 0) - float(t.get("credit") or 0)
         out_txns.append({**t, "running": round(running, 2)})
-    return {"party": full.get("party"), "opening_balance": round(opening, 2), "transactions": out_txns, "closing_balance": round(running, 2)}
+    return {"party": full.get("party"), "kind": full.get("kind"),
+            "opening_balance": round(opening, 2), "transactions": out_txns,
+            "closing_balance": round(running, 2)}
 
 
 @api.get("/parties/{pid}/statement/filtered")
-async def party_statement_filtered(pid: str, date_from: str = "", date_to: str = "", user=Depends(get_current_user)):
-    full = await party_statement(pid, "this_year", user)
+async def party_statement_filtered(pid: str, date_from: str = "", date_to: str = "",
+                                   kind: str = "", user=Depends(get_current_user)):
+    full = await _party_statement_full(pid, kind or None)
     return _filter_party_statement(full, date_from, date_to)
 
 
-def _party_stmt_pdf(stmt: dict, date_from: str = "", date_to: str = "") -> bytes:
+async def _stmt_company() -> dict:
+    """Company letterhead details, read from Settings > Invoice Template (the same
+    'integrations' settings document every other branded PDF uses) rather than hardcoded, so a
+    second company deployment prints its own header without a code change."""
+    return (await get_setting("integrations")) or {}
+
+
+def _stmt_company_block(company: dict, style):
+    from reportlab.platypus import Paragraph
+    name = company.get("company_name") or "Denplex Engineering Company"
+    bits = []
+    if company.get("company_udyam"):
+        bits.append(f"UDYAM Registration Number - {company['company_udyam']}")
+    units = company.get("company_units") or []
+    if units:
+        bits.append(" &nbsp;|&nbsp; ".join(
+            f"{u.get('name','')}: {u.get('address','')}".strip(": ") for u in units if u))
+    elif company.get("company_address"):
+        bits.append(company["company_address"])
+    tail = []
+    if company.get("company_phone"):
+        tail.append(f"Phone: {company['company_phone']}")
+    if company.get("company_gstin"):
+        tail.append(f"GSTIN: {company['company_gstin']}")
+    if company.get("company_state"):
+        tail.append(f"State: {company['company_state']}")
+    if tail:
+        bits.append(" &nbsp;|&nbsp; ".join(tail))
+    return Paragraph(f"<b>{name}</b><br/>" + "<br/>".join(bits), style)
+
+
+def _party_stmt_pdf(stmt: dict, company: dict, date_from: str = "", date_to: str = "") -> bytes:
     from reportlab.lib.pagesizes import A4
     from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image
     from reportlab.lib import colors
     from reportlab.lib.units import mm
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     buf = io.BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=14 * mm, bottomMargin=16 * mm, leftMargin=16 * mm, rightMargin=16 * mm)
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=14 * mm, bottomMargin=16 * mm,
+                            leftMargin=16 * mm, rightMargin=16 * mm)
     ss = getSampleStyleSheet()
     el = []
+    small = ParagraphStyle("PartyStmtCompany", parent=ss["Normal"], fontSize=8, leading=10,
+                           textColor=colors.HexColor("#475569"))
+    company_block = _stmt_company_block(company, small)
     logo_path = ROOT_DIR / "logo.png"
-    company_block = Paragraph(
-        "<b>Denplex Engineering Company</b><br/>"
-        "UDYAM Registration Number - UDYAM-GJ-09-0005351<br/>"
-        "Unit-1: 3 Shed No.4, Shivam Estate, Opp. Shah Alloys Limited, Gandhinagar-382721 &nbsp;|&nbsp; "
-        "Unit-2: 3 Shed No.20, Pushkar Industrial Estate, nr. Ramol-Vatva Railway Bridge, Phase-1, Vatva, Ahmedabad-382445<br/>"
-        "Phone: +91 7016219334 &nbsp;|&nbsp; GSTIN: 24AALFD1671P1Z2 &nbsp;|&nbsp; State: 24-Gujarat",
-        ParagraphStyle("PartyStmtCompany", parent=ss["Normal"], fontSize=8, leading=10, textColor=colors.HexColor("#475569")),
-    )
     if logo_path.exists():
-        header_row = [[Image(str(logo_path), width=16 * mm, height=16 * mm), company_block]]
-        header_t = Table(header_row, colWidths=[20 * mm, 158 * mm])
-        header_t.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0)]))
+        header_t = Table([[Image(str(logo_path), width=16 * mm, height=16 * mm), company_block]],
+                         colWidths=[20 * mm, 158 * mm])
+        header_t.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                                      ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                                      ("RIGHTPADDING", (0, 0), (-1, -1), 0)]))
         el.append(header_t)
     else:
         el.append(company_block)
@@ -12507,42 +12655,59 @@ def _party_stmt_pdf(stmt: dict, date_from: str = "", date_to: str = "") -> bytes
     party = stmt.get("party") or {}
     el.append(Paragraph("<b>Account Statement</b>", ss["Title"]))
     period_line = f"{date_from or 'Beginning'} to {date_to or 'Today'}"
-    el.append(Paragraph(f"<b>{party.get('name','')}</b> &nbsp; {party.get('gstin','') or ''}<br/>Period: {period_line}", ss["Normal"]))
+    label = "Supplier" if stmt.get("kind") == "supplier" else "Customer"
+    el.append(Paragraph(
+        f"<b>{party.get('name','')}</b> &nbsp; {party.get('gstin','') or ''} &nbsp;({label})"
+        f"<br/>Period: {period_line}", ss["Normal"]))
     el.append(Spacer(1, 4 * mm))
-    summary_data = [["Opening Balance", f"{stmt.get('opening_balance', 0):,.2f}"], ["Closing Balance", f"{stmt.get('closing_balance', 0):,.2f}"]]
-    sum_t = Table(summary_data, colWidths=[40 * mm, 40 * mm])
-    sum_t.setStyle(TableStyle([("FONTSIZE", (0, 0), (-1, -1), 9), ("BOTTOMPADDING", (0, 0), (-1, -1), 3), ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold")]))
+
+    def _bal(v):
+        v = float(v or 0)
+        return f"{abs(v):,.2f} {'Dr' if v > 0 else ('Cr' if v < 0 else '')}".strip()
+
+    sum_t = Table([["Opening Balance", _bal(stmt.get("opening_balance"))],
+                   ["Closing Balance", _bal(stmt.get("closing_balance"))]],
+                  colWidths=[40 * mm, 45 * mm])
+    sum_t.setStyle(TableStyle([("FONTSIZE", (0, 0), (-1, -1), 9),
+                               ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                               ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold")]))
     el.append(sum_t)
     el.append(Spacer(1, 5 * mm))
     rows = [["#", "Date", "Type", "Reference", "Debit", "Credit", "Balance"]]
     for i, t in enumerate(stmt.get("transactions") or [], 1):
-        bal = t.get("running", 0)
         rows.append([str(i), str(t.get("date", ""))[:10], t.get("type", ""), t.get("ref", "") or "-",
-                     f"{t['debit']:,.2f}" if t.get("debit") else "", f"{t['credit']:,.2f}" if t.get("credit") else "",
-                     f"{bal:,.2f} {'Dr' if bal > 0 else ('Cr' if bal < 0 else '')}"])
-    tbl = Table(rows, colWidths=[8 * mm, 20 * mm, 24 * mm, 34 * mm, 26 * mm, 26 * mm, 32 * mm], repeatRows=1)
-    tbl.setStyle(TableStyle([("FONTSIZE", (0, 0), (-1, -1), 8), ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                              ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f1f5f9")), ("ALIGN", (4, 0), (6, -1), "RIGHT"),
-                              ("LINEBELOW", (0, 0), (-1, -1), 0.25, colors.HexColor("#e2e8f0")),
-                              ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3)]))
+                     f"{t['debit']:,.2f}" if t.get("debit") else "",
+                     f"{t['credit']:,.2f}" if t.get("credit") else "",
+                     _bal(t.get("running", 0))])
+    tbl = Table(rows, colWidths=[8 * mm, 20 * mm, 26 * mm, 32 * mm, 26 * mm, 26 * mm, 32 * mm],
+                repeatRows=1)
+    tbl.setStyle(TableStyle([("FONTSIZE", (0, 0), (-1, -1), 8),
+                             ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                             ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f1f5f9")),
+                             ("ALIGN", (4, 0), (6, -1), "RIGHT"),
+                             ("LINEBELOW", (0, 0), (-1, -1), 0.25, colors.HexColor("#e2e8f0")),
+                             ("TOPPADDING", (0, 0), (-1, -1), 3),
+                             ("BOTTOMPADDING", (0, 0), (-1, -1), 3)]))
     el.append(tbl)
     el.append(Spacer(1, 5 * mm))
-    el.append(Paragraph("Computed live from posted documents — Denplex Engineering Company", ss["Italic"]))
+    el.append(Paragraph("Computed live from posted documents — "
+                        f"{company.get('company_name') or 'Denplex Engineering Company'}", ss["Italic"]))
     doc.build(el)
     buf.seek(0)
     return buf.getvalue()
 
 
-def _party_stmt_xlsx(stmt: dict, date_from: str = "", date_to: str = "") -> bytes:
+def _party_stmt_xlsx(stmt: dict, company: dict, date_from: str = "", date_to: str = "") -> bytes:
     from openpyxl import Workbook
     from openpyxl.styles import Font
     wb = Workbook()
     ws = wb.active
     ws.title = "Statement"
     party = stmt.get("party") or {}
-    ws["A1"] = "Denplex Engineering Company"
+    label = "Supplier" if stmt.get("kind") == "supplier" else "Customer"
+    ws["A1"] = company.get("company_name") or "Denplex Engineering Company"
     ws["A1"].font = Font(bold=True, size=14)
-    ws["A2"] = f"Account Statement — {party.get('name','')}"
+    ws["A2"] = f"Account Statement — {party.get('name','')} ({label})"
     ws["A2"].font = Font(bold=True, size=11)
     ws["A3"] = f"Period: {date_from or 'Beginning'} to {date_to or 'Today'}"
     ws["A3"].font = Font(size=9, color="888888")
@@ -12552,9 +12717,8 @@ def _party_stmt_xlsx(stmt: dict, date_from: str = "", date_to: str = "") -> byte
     ws["A6"] = "Closing Balance"
     ws["B6"] = stmt.get("closing_balance", 0)
     ws["A6"].font = Font(bold=True)
-    headers = ["#", "Date", "Type", "Reference", "Debit", "Credit", "Balance"]
     r = 8
-    for c, h in enumerate(headers, 1):
+    for c, h in enumerate(["#", "Date", "Type", "Reference", "Debit", "Credit", "Balance"], 1):
         ws.cell(r, c, h).font = Font(bold=True)
     r += 1
     for i, t in enumerate(stmt.get("transactions") or [], 1):
@@ -12566,7 +12730,7 @@ def _party_stmt_xlsx(stmt: dict, date_from: str = "", date_to: str = "") -> byte
         ws.cell(r, 6, t.get("credit") or None)
         ws.cell(r, 7, t.get("running", 0))
         r += 1
-    for col, w in zip("ABCDEFG", [5, 12, 14, 20, 14, 14, 14]):
+    for col, w in zip("ABCDEFG", [5, 12, 16, 22, 14, 14, 14]):
         ws.column_dimensions[col].width = w
     buf = io.BytesIO()
     wb.save(buf)
@@ -12574,31 +12738,42 @@ def _party_stmt_xlsx(stmt: dict, date_from: str = "", date_to: str = "") -> byte
     return buf.getvalue()
 
 
+def _stmt_filename(stmt: dict, ext: str) -> str:
+    nm = ((stmt.get("party") or {}).get("name") or "statement")
+    nm = re.sub(r"[^A-Za-z0-9._-]+", "-", nm).strip("-") or "statement"
+    return f"Statement-{nm}.{ext}"
+
+
 @api.get("/parties/{pid}/statement/pdf")
-async def party_statement_pdf(pid: str, date_from: str = "", date_to: str = "", user=Depends(get_current_user)):
-    full = await party_statement(pid, "this_year", user)
-    sliced = _filter_party_statement(full, date_from, date_to)
-    pdf_bytes = _party_stmt_pdf(sliced, date_from, date_to)
-    return Response(content=pdf_bytes, media_type="application/pdf", headers={"Content-Disposition": 'inline; filename="statement.pdf"'})
+async def party_statement_pdf(pid: str, date_from: str = "", date_to: str = "", kind: str = "",
+                              user=Depends(get_current_user)):
+    sliced = _filter_party_statement(await _party_statement_full(pid, kind or None), date_from, date_to)
+    pdf_bytes = _party_stmt_pdf(sliced, await _stmt_company(), date_from, date_to)
+    return Response(content=pdf_bytes, media_type="application/pdf",
+                    headers={"Content-Disposition": f'inline; filename="{_stmt_filename(sliced, "pdf")}"'})
 
 
 @api.get("/parties/{pid}/statement/xlsx")
-async def party_statement_xlsx(pid: str, date_from: str = "", date_to: str = "", user=Depends(get_current_user)):
-    full = await party_statement(pid, "this_year", user)
-    sliced = _filter_party_statement(full, date_from, date_to)
-    xlsx_bytes = _party_stmt_xlsx(sliced, date_from, date_to)
-    return Response(content=xlsx_bytes, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": 'attachment; filename="statement.xlsx"'})
+async def party_statement_xlsx(pid: str, date_from: str = "", date_to: str = "", kind: str = "",
+                               user=Depends(get_current_user)):
+    sliced = _filter_party_statement(await _party_statement_full(pid, kind or None), date_from, date_to)
+    xlsx_bytes = _party_stmt_xlsx(sliced, await _stmt_company(), date_from, date_to)
+    return Response(content=xlsx_bytes,
+                    media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": f'attachment; filename="{_stmt_filename(sliced, "xlsx")}"'})
 
 
 @api.get("/parties/{pid}/statement/csv")
-async def party_statement_csv(pid: str, date_from: str = "", date_to: str = "", user=Depends(get_current_user)):
-    full = await party_statement(pid, "this_year", user)
-    sliced = _filter_party_statement(full, date_from, date_to)
+async def party_statement_csv(pid: str, date_from: str = "", date_to: str = "", kind: str = "",
+                              user=Depends(get_current_user)):
+    sliced = _filter_party_statement(await _party_statement_full(pid, kind or None), date_from, date_to)
+    company = await _stmt_company()
+    party = sliced.get("party") or {}
     sbuf = io.StringIO()
     w = csv.writer(sbuf)
-    party = sliced.get("party") or {}
-    w.writerow(["Denplex Engineering Company"])
-    w.writerow([f"Account Statement - {party.get('name','')}"])
+    w.writerow([company.get("company_name") or "Denplex Engineering Company"])
+    w.writerow([f"Account Statement - {party.get('name','')}"
+                f" ({'Supplier' if sliced.get('kind') == 'supplier' else 'Customer'})"])
     w.writerow([f"Period: {date_from or 'Beginning'} to {date_to or 'Today'}"])
     w.writerow([])
     w.writerow(["Opening Balance", sliced.get("opening_balance", 0)])
@@ -12606,9 +12781,65 @@ async def party_statement_csv(pid: str, date_from: str = "", date_to: str = "", 
     w.writerow([])
     w.writerow(["#", "Date", "Type", "Reference", "Debit", "Credit", "Balance"])
     for i, t in enumerate(sliced.get("transactions") or [], 1):
-        w.writerow([i, str(t.get("date", ""))[:10], t.get("type", ""), t.get("ref", "") or "", t.get("debit") or "", t.get("credit") or "", t.get("running", 0)])
-    return Response(content=sbuf.getvalue(), media_type="text/csv", headers={"Content-Disposition": 'attachment; filename="statement.csv"'})
+        w.writerow([i, str(t.get("date", ""))[:10], t.get("type", ""), t.get("ref", "") or "",
+                    t.get("debit") or "", t.get("credit") or "", t.get("running", 0)])
+    return Response(content=sbuf.getvalue(), media_type="text/csv",
+                    headers={"Content-Disposition": f'attachment; filename="{_stmt_filename(sliced, "csv")}"'})
 # ==================== End Party Statement exports ====================
+
+
+# ==================== Database indexes ====================
+# Until 2026-08-26 this codebase created ZERO indexes, so every query — including the
+# find_one({"id": ...}) that runs on almost every request — was a full collection scan against
+# 3,935 items / 1,822 vendor bills / 839 invoices. These cover the fields actually filtered on:
+# document lookups by id/code, party lookups by id/name (the statement + ledger endpoints), and
+# date sorting. Index creation is idempotent, so this is safe to re-run on every boot, and the
+# whole thing is wrapped so a single bad index can never stop the app from starting.
+_INDEX_PLAN = {
+    "customers":         [["id"], ["name"]],
+    "suppliers":         [["id"], ["name"]],
+    "invoices":          [["id"], ["code"], ["customer_id"], ["customer_name"], ["date"], ["status"]],
+    "vendor_bills":      [["id"], ["code"], ["supplier_id"], ["supplier_name"], ["date"], ["status"]],
+    "credit_notes":      [["id"], ["customer_id"], ["customer_name"], ["date"]],
+    "purchase_returns":  [["id"], ["supplier_id"], ["supplier_name"], ["date"]],
+    "payments_in":       [["id"], ["party_id"], ["party_name"], ["date"]],
+    "payments_out":      [["id"], ["party_id"], ["party_name"], ["date"]],
+    "expenses":          [["id"], ["date"]],
+    "items":             [["id"], ["sku"], ["name"]],
+    "movements":         [["id"], ["item_id"], ["date"]],
+    "stock_adjustments": [["id"], ["item_id"], ["date"]],
+    "quotations":        [["id"], ["code"], ["customer_id"], ["date"]],
+    "purchase_orders":   [["id"], ["code"], ["supplier_id"], ["date"]],
+    "sale_orders":       [["id"], ["code"], ["date"]],
+    "delivery_challans": [["id"], ["code"], ["date"]],
+    "proforma_invoices": [["id"], ["code"], ["date"]],
+    "work_orders":       [["id"], ["code"], ["status"]],
+    "parts":             [["id"], ["part_no"]],
+    "documents":         [["id"], ["linked_to"], ["category"]],
+    "register_entries":  [["template_id"], ["date"]],
+    "registers":         [["id"], ["department"]],
+    "iso_documents":     [["id"], ["department"], ["status"]],
+    "users":             [["id"], ["email"]],
+    "audit_logs":        [["at"]],
+    "recycle_bin":       [["id"], ["deleted_at"]],
+    "fin_accounts":      [["id"]],
+    "instruments":       [["id"], ["due_date"]],
+}
+
+
+@app.on_event("startup")
+async def _ensure_indexes():
+    created = failed = 0
+    for coll, specs in _INDEX_PLAN.items():
+        for spec in specs:
+            try:
+                await db[coll].create_index([(f, 1) for f in spec])
+                created += 1
+            except Exception as e:  # never let an index problem block startup
+                failed += 1
+                logging.warning("index %s.%s failed: %s", coll, "_".join(spec), e)
+    logging.info("index check complete: %d ensured, %d failed", created, failed)
+# ==================== End Database indexes ====================
 
 
 # ---------------- App config ----------------
@@ -12616,7 +12847,13 @@ app.include_router(api)
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
+    # Default to the real front-end origins instead of '*' - with allow_credentials=True a
+    # wildcard means any site on the internet can call this API with a signed-in user's token.
+    # Override via the CORS_ORIGINS env var (comma-separated) when a new domain is added.
+    allow_origins=[o.strip() for o in os.environ.get(
+        'CORS_ORIGINS',
+        'https://erp.denplex.co,https://www.denplex.co,https://denplex-erp.vercel.app'
+    ).split(',') if o.strip()],
     allow_methods=["*"],
     allow_headers=["*"],
 )
