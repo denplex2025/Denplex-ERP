@@ -1026,6 +1026,7 @@ function VyaparImportPanel() {
   const [opts, setOpts] = useState({ parties: true, items: true, sales: true, purchases: true, expenses: true, dry_run: false });
   const [results, setResults] = useState(null);
   const [recon, setRecon] = useState(null);
+  const [codes, setCodes] = useState(null);   // document-number backfill report
   const [progress, setProgress] = useState("");
 
   const runReconcile = async () => {
@@ -1036,6 +1037,23 @@ function VyaparImportPanel() {
       setRecon(r.data);
       toast[r.data.all_ok ? "success" : "warning"](r.data.all_ok ? "All rows reconcile — safe to cut over" : "Some rows differ — review below");
     } catch (e) { toast.error(e?.response?.data?.detail || "Reconcile failed"); }
+    finally { setBusy(false); }
+  };
+
+  // Document-number repair. The importer used to read txn_invoice_prefix (always NULL in real
+  // Vyapar data) instead of txn_prefix_id -> kb_prefix, so imported documents lost their
+  // financial-year prefix and showed as a bare "66" instead of "2627/066". New imports are
+  // correct; this fixes the ~880 documents already stored. Always previewed before applying.
+  const runCodeFix = async (apply = false) => {
+    if (!analysis?.token) { toast.error("Upload a .vyb backup first"); return; }
+    if (apply && !window.confirm("Rewrite document numbers on existing records? Run the preview first and read it.")) return;
+    setBusy(true); if (!apply) setCodes(null);
+    try {
+      const r = await api.post(`/integrations/vyapar/backfill-codes?dry_run=${apply ? "false" : "true"}`, { token: analysis.token });
+      setCodes(r.data);
+      if (apply) toast.success(`Updated ${r.data.changed} document number(s)`);
+      else toast.info(`Preview: ${r.data.changed} would change, ${r.data.unchanged} already correct`);
+    } catch (e) { toast.error(e?.response?.data?.detail || "Document-number fix failed"); }
     finally { setBusy(false); }
   };
 
@@ -1137,6 +1155,9 @@ function VyaparImportPanel() {
                   <Button onClick={runReconcile} disabled={busy} variant="outline" className="rounded-sm" data-testid="run-vyapar-reconcile">
                     {busy ? "Working…" : "Reconcile ERP vs backup"}
                   </Button>
+                  <Button onClick={() => runCodeFix(false)} disabled={busy} variant="outline" className="rounded-sm" data-testid="run-vyapar-codefix">
+                    {busy ? "Working…" : "Preview document numbers"}
+                  </Button>
                 </div>
                 {progress && <div className="text-xs text-slate-500" data-testid="vyapar-progress">{progress}</div>}
               </>
@@ -1195,6 +1216,71 @@ function VyaparImportPanel() {
               </table>
             </div>
             <p className="text-[11px] text-slate-500 mt-2">{recon.note}</p>
+          </div>
+        )}
+
+        {codes && (
+          <div className="mt-4 border border-slate-200 p-4 rounded-sm text-sm bg-slate-50/60" data-testid="vyapar-codefix">
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <p className="font-semibold">
+                Document numbers — {codes.dry_run ? "preview" : "applied"}
+              </p>
+              {codes.dry_run && codes.changed > 0 && (
+                <Button onClick={() => runCodeFix(true)} disabled={busy}
+                        className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="apply-vyapar-codefix">
+                  Apply to {codes.changed} document{codes.changed === 1 ? "" : "s"}
+                </Button>
+              )}
+            </div>
+            <div className="flex flex-wrap gap-x-5 gap-y-1 mt-2 text-slate-700">
+              <span>Scanned <strong className="font-mono-tech">{codes.scanned}</strong></span>
+              <span>Will change <strong className="font-mono-tech text-red-700">{codes.changed}</strong></span>
+              <span>Already correct <strong className="font-mono-tech">{codes.unchanged}</strong></span>
+              <span>Not in ERP <strong className="font-mono-tech">{codes.not_in_erp}</strong></span>
+              <span>Drafts <strong className="font-mono-tech">{codes.drafts}</strong></span>
+            </div>
+
+            {codes.collisions?.length > 0 && (
+              <div className="mt-3 border border-red-200 bg-red-50 rounded-sm p-2">
+                <p className="font-semibold text-red-800 text-xs">
+                  {codes.collisions.length} number(s) would be shared by more than one document — resolve in Vyapar first
+                </p>
+                <ul className="mt-1 text-xs text-red-900 list-disc pl-5">
+                  {codes.collisions.slice(0, 10).map((c, i) => (
+                    <li key={i}><span className="font-mono-tech">{c.code}</span> — Vyapar txn {c.vyapar_ids.join(", ")}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {codes.samples?.length > 0 && (
+              <div className="mt-3 max-h-72 overflow-y-auto border border-slate-200 rounded-sm bg-white">
+                <table className="w-full text-xs">
+                  <thead className="sticky top-0 bg-slate-100">
+                    <tr className="text-left text-slate-600">
+                      <th className="py-1.5 px-2">Vyapar txn</th>
+                      <th className="py-1.5 px-2">Current number</th>
+                      <th className="py-1.5 px-2">New number</th>
+                      <th className="py-1.5 px-2">Raised?</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {codes.samples.map((c, i) => (
+                      <tr key={i} className="border-b border-slate-100">
+                        <td className="py-1.5 px-2 font-mono-tech text-slate-500">{c.vyapar_id}</td>
+                        <td className="py-1.5 px-2 font-mono-tech">{c.old_code || "—"}</td>
+                        <td className="py-1.5 px-2 font-mono-tech font-semibold text-emerald-700">{c.new_code}</td>
+                        <td className="py-1.5 px-2">{c.is_raised ? "Yes" : <span className="text-amber-700">Draft</span>}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <p className="text-[11px] text-slate-500 mt-2">
+              Showing up to 40 examples. Purchase bills are excluded on purpose — their number is the
+              supplier's own bill number, not ours. {codes.note}
+            </p>
           </div>
         )}
       </Card>
