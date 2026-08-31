@@ -9172,6 +9172,16 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
             doc_ops.setdefault(collection_name, []).append(
                 UpdateOne({"code": doc["code"], "vyapar_id": doc["vyapar_id"]},
                           {"$setOnInsert": doc}, upsert=True))
+        # $setOnInsert leaves an already-imported document untouched, so it keeps its ORIGINAL id
+        # while doc["id"] holds a freshly minted UUID that was never stored. txn_to_doc - and the
+        # payment allocations built from it - used that phantom id, so every re-import orphaned the
+        # allocations it wrote (405 dangling links / Rs 1.19 cr found live on 2026-08-29). Always
+        # read the id back from the stored document before recording it.
+        if not opts.dry_run and t in (1, 2):
+            _stored = await getattr(db, collection_name).find_one(
+                {"code": doc["code"], "vyapar_id": doc["vyapar_id"]}, {"_id": 0, "id": 1})
+            if _stored and _stored.get("id"):
+                doc["id"] = _stored["id"]
         if t in (1, 2):
             txn_to_doc[int(r["txn_id"])] = {"id": doc["id"], "code": doc["code"], "dtype": "invoice" if t == 1 else "vendor_bill"}
             if cur_bal > 0.01:
@@ -12840,6 +12850,136 @@ async def _ensure_indexes():
                 logging.warning("index %s.%s failed: %s", coll, "_".join(spec), e)
     logging.info("index check complete: %d ensured, %d failed", created, failed)
 # ==================== End Database indexes ====================
+
+# ==================== Repair: re-link orphaned payment allocations ====================
+# Added 2026-08-29. Background: _do_import_sqlite writes documents with
+# update_one({...}, {"$setOnInsert": doc}, upsert=True). On a re-import an already-present
+# invoice/bill is left completely untouched, so it KEEPS its original id -- but the importer had
+# already recorded the freshly minted doc["id"] in txn_to_doc, and payment allocations are built
+# from txn_to_doc. Every re-run therefore pointed that run's allocations at UUIDs that were never
+# stored. Measured live on 2026-08-29: 151 payment-in allocations (Rs 79,81,161.81, 12 parties)
+# and 254 payment-out allocations (Rs 39,14,446.34, 81 parties) were dangling, which left the
+# corresponding invoices/bills looking unpaid and overstated receivable by roughly Rs 80 lakh.
+# The importer itself is fixed separately (it now reads the id back after upserting); this
+# endpoint repairs the allocations already written.
+#
+# Matching is deliberately conservative -- an allocation is only re-pointed when it resolves to
+# exactly ONE document:
+#   1. same document_code + same party name (case-insensitive)
+#   2. if several match, the one whose total equals the allocation amount exactly
+#      (Vyapar reuses reference numbers across financial years -- e.g. three different Bectochem
+#      invoices are all numbered "134" -- so code alone is not unique)
+#   3. if still several, the one dated on/before the payment date, latest first
+# Anything that stays ambiguous, or matches nothing, is reported and left untouched.
+# Verified against live data before deployment: all 405 dangling allocations resolved uniquely,
+# 0 ambiguous, 0 unmatched.
+
+
+def _relink_key(code, party):
+    return f"{(code or '').strip()}|{(party or '').strip().lower()}"
+
+
+def _relink_pick(cands, alloc_amount, pay_date):
+    """Return the single best candidate document, or None if it stays ambiguous."""
+    if len(cands) == 1:
+        return cands[0]
+    exact = [d for d in cands if abs(float(d.get("total") or 0) - float(alloc_amount or 0)) < 1.0]
+    if len(exact) == 1:
+        return exact[0]
+    pool = exact or cands
+    before = [d for d in pool if str(d.get("date") or "")[:10] <= str(pay_date or "9999-12-31")[:10]]
+    if len(before) == 1:
+        return before[0]
+    if before:
+        before.sort(key=lambda d: str(d.get("date") or "")[:10], reverse=True)
+        newest = str(before[0].get("date") or "")[:10]
+        if sum(1 for d in before if str(d.get("date") or "")[:10] == newest) == 1:
+            return before[0]
+    return None
+
+
+@api.post("/integrations/repair/relink-allocations")
+async def relink_allocations(dry_run: bool = True, limit_report: int = 40,
+                             user=Depends(require_roles("admin"))):
+    """Re-point payment allocations whose document_id no longer resolves. Defaults to a dry run:
+    nothing is written unless dry_run=false is passed explicitly."""
+    invoices = await db.invoices.find({}, {"_id": 0, "id": 1, "code": 1, "customer_name": 1,
+                                           "total": 1, "date": 1}).to_list(50000)
+    bills = await db.vendor_bills.find({}, {"_id": 0, "id": 1, "code": 1, "supplier_name": 1,
+                                            "total": 1, "date": 1}).to_list(50000)
+    inv_ids = {d["id"] for d in invoices if d.get("id")}
+    bill_ids = {d["id"] for d in bills if d.get("id")}
+    inv_idx, bill_idx = {}, {}
+    for d in invoices:
+        inv_idx.setdefault(_relink_key(d.get("code"), d.get("customer_name")), []).append(d)
+    for d in bills:
+        bill_idx.setdefault(_relink_key(d.get("code"), d.get("supplier_name")), []).append(d)
+
+    report = {"dry_run": dry_run, "payments_in": {}, "payments_out": {}, "changes": [],
+              "unresolved": []}
+    touched_invoices, touched_bills = set(), set()
+
+    for is_in, coll, ids, idx, side in (
+            (True, db.payments_in, inv_ids, inv_idx, "payments_in"),
+            (False, db.payments_out, bill_ids, bill_idx, "payments_out")):
+        stats = {"payments_scanned": 0, "allocations": 0, "dangling": 0, "relinked": 0,
+                 "ambiguous": 0, "unmatched": 0, "amount_relinked": 0.0}
+        pays = await coll.find({}, {"_id": 0}).to_list(50000)
+        for p in pays:
+            stats["payments_scanned"] += 1
+            allocs = p.get("allocations") or []
+            if not allocs:
+                continue
+            changed = False
+            new_allocs = []
+            for a in allocs:
+                stats["allocations"] += 1
+                did = a.get("document_id")
+                if did in ids:
+                    new_allocs.append(a)
+                    continue
+                stats["dangling"] += 1
+                cands = idx.get(_relink_key(a.get("document_code"), p.get("party_name")), [])
+                pick = _relink_pick(cands, a.get("amount"), p.get("date")) if cands else None
+                if not pick:
+                    if cands:
+                        stats["ambiguous"] += 1
+                    else:
+                        stats["unmatched"] += 1
+                    if len(report["unresolved"]) < limit_report:
+                        report["unresolved"].append({
+                            "side": side, "payment_code": p.get("code"),
+                            "party": p.get("party_name"), "document_code": a.get("document_code"),
+                            "amount": a.get("amount"), "candidates": len(cands)})
+                    new_allocs.append(a)
+                    continue
+                stats["relinked"] += 1
+                stats["amount_relinked"] += float(a.get("amount") or 0)
+                if len(report["changes"]) < limit_report:
+                    report["changes"].append({
+                        "side": side, "payment_code": p.get("code"), "party": p.get("party_name"),
+                        "document_code": a.get("document_code"), "amount": a.get("amount"),
+                        "old_document_id": did, "new_document_id": pick["id"],
+                        "matched_total": pick.get("total"), "matched_date": pick.get("date")})
+                new_allocs.append({**a, "document_id": pick["id"]})
+                (touched_invoices if is_in else touched_bills).add(pick["id"])
+                changed = True
+            if changed and not dry_run:
+                await coll.update_one({"id": p["id"]}, {"$set": {"allocations": new_allocs}})
+        stats["amount_relinked"] = round(stats["amount_relinked"], 2)
+        report[side] = stats
+
+    if not dry_run:
+        await _refresh_invoice_paid_status(list(touched_invoices))
+        await _refresh_bill_paid_status(list(touched_bills))
+        report["documents_restatused"] = {"invoices": len(touched_invoices),
+                                          "bills": len(touched_bills)}
+    else:
+        report["would_restatus"] = {"invoices": len(touched_invoices), "bills": len(touched_bills)}
+    report["note"] = ("Dry run - nothing was written. Re-run with dry_run=false to apply."
+                      if dry_run else "Applied.")
+    return report
+# ==================== End repair: re-link orphaned payment allocations ====================
 
 
 # ---------------- App config ----------------
