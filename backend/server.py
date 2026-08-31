@@ -13097,11 +13097,20 @@ async def relink_allocations(dry_run: bool = True, limit_report: int = 40,
                     new_allocs.append(a)
                     continue
                 stats["dangling"] += 1
-                cands, _seen_ids = [], set()
-                for _k in _relink_keys(a.get("document_code"), p.get("party_name")):
+                # Gather candidates under both the exact and the prefix-stripped key, then let a
+                # TRUE exact code match win outright. Without this preference, normalisation can
+                # drag an unrelated document into the pool and turn a clean single match into a
+                # false ambiguity - it did exactly that on 2026-09-01 for two Muratech bills,
+                # where allocation code "00079/2223" normalises to "2223" and pulled in a second
+                # bill, leaving 2 of 405 allocations unrepairable.
+                _alloc_code = (a.get("document_code") or "").strip()
+                _pool, _seen_ids = [], set()
+                for _k in _relink_keys(_alloc_code, p.get("party_name")):
                     for _d in idx.get(_k, []):
                         if _d["id"] not in _seen_ids:
-                            _seen_ids.add(_d["id"]); cands.append(_d)
+                            _seen_ids.add(_d["id"]); _pool.append(_d)
+                _exact = [_d for _d in _pool if (_d.get("code") or "").strip() == _alloc_code]
+                cands = _exact if _exact else _pool
                 pick = _relink_pick(cands, a.get("amount"), p.get("date")) if cands else None
                 if not pick:
                     if cands:
