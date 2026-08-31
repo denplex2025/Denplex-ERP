@@ -1027,6 +1027,7 @@ function VyaparImportPanel() {
   const [results, setResults] = useState(null);
   const [recon, setRecon] = useState(null);
   const [codes, setCodes] = useState(null);   // document-number backfill report
+  const [links, setLinks] = useState(null);   // payment-allocation repair report
   const [progress, setProgress] = useState("");
 
   const runReconcile = async () => {
@@ -1054,6 +1055,23 @@ function VyaparImportPanel() {
       if (apply) toast.success(`Updated ${r.data.changed} document number(s)`);
       else toast.info(`Preview: ${r.data.changed} would change, ${r.data.unchanged} already correct`);
     } catch (e) { toast.error(e?.response?.data?.detail || "Document-number fix failed"); }
+    finally { setBusy(false); }
+  };
+
+  // Payment-allocation repair. Re-imports used to mint a fresh id for documents that already
+  // existed, leaving the allocations written that run pointing at ids that were never stored.
+  // Works entirely off ERP data, so no backup upload is needed. Matching tolerates the FY prefix,
+  // so this can be run before or after the document-number fix.
+  const runLinkFix = async (apply = false) => {
+    if (apply && !window.confirm("Re-point payment allocations? Run the preview first and read it.")) return;
+    setBusy(true); if (!apply) setLinks(null);
+    try {
+      const r = await api.post(`/integrations/repair/relink-allocations?dry_run=${apply ? "false" : "true"}`, {});
+      setLinks(r.data);
+      const n = (r.data.payments_in?.relinked || 0) + (r.data.payments_out?.relinked || 0);
+      if (apply) toast.success(`Re-linked ${n} allocation(s)`);
+      else toast.info(`Preview: ${n} allocation(s) would be re-linked`);
+    } catch (e) { toast.error(e?.response?.data?.detail || "Payment-link repair failed"); }
     finally { setBusy(false); }
   };
 
@@ -1157,6 +1175,9 @@ function VyaparImportPanel() {
                   </Button>
                   <Button onClick={() => runCodeFix(false)} disabled={busy} variant="outline" className="rounded-sm" data-testid="run-vyapar-codefix">
                     {busy ? "Working…" : "Preview document numbers"}
+                  </Button>
+                  <Button onClick={() => runLinkFix(false)} disabled={busy} variant="outline" className="rounded-sm" data-testid="run-relink">
+                    {busy ? "Working…" : "Preview payment links"}
                   </Button>
                 </div>
                 {progress && <div className="text-xs text-slate-500" data-testid="vyapar-progress">{progress}</div>}
@@ -1283,6 +1304,90 @@ function VyaparImportPanel() {
             </p>
           </div>
         )}
+
+        {links && (() => {
+          const pin = links.payments_in || {}, pout = links.payments_out || {};
+          const relinked = (pin.relinked || 0) + (pout.relinked || 0);
+          const dangling = (pin.dangling || 0) + (pout.dangling || 0);
+          const stuck = (pin.ambiguous || 0) + (pin.unmatched || 0) + (pout.ambiguous || 0) + (pout.unmatched || 0);
+          const amount = (pin.amount_relinked || 0) + (pout.amount_relinked || 0);
+          return (
+            <div className="mt-4 border border-slate-200 p-4 rounded-sm text-sm bg-slate-50/60" data-testid="relink-report">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <p className="font-semibold">Payment links — {links.dry_run ? "preview" : "applied"}</p>
+                {links.dry_run && relinked > 0 && (
+                  <Button onClick={() => runLinkFix(true)} disabled={busy}
+                          className="rounded-sm bg-red-600 hover:bg-red-700" data-testid="apply-relink">
+                    Re-link {relinked} allocation{relinked === 1 ? "" : "s"}
+                  </Button>
+                )}
+              </div>
+              <div className="flex flex-wrap gap-x-5 gap-y-1 mt-2 text-slate-700">
+                <span>Broken links <strong className="font-mono-tech text-red-700">{dangling}</strong></span>
+                <span>Repairable <strong className="font-mono-tech text-emerald-700">{relinked}</strong></span>
+                <span>Still unresolved <strong className="font-mono-tech">{stuck}</strong></span>
+                <span>Value <strong className="font-mono-tech">₹{amount.toLocaleString("en-IN")}</strong></span>
+              </div>
+              <p className="text-[11px] text-slate-500 mt-1">
+                Payments-in {pin.relinked || 0}/{pin.dangling || 0} · Payments-out {pout.relinked || 0}/{pout.dangling || 0}
+                {" · "}{links.dry_run ? "would re-status" : "re-statused"}{" "}
+                {(links.would_restatus || links.documents_restatused || {}).invoices || 0} invoice(s),{" "}
+                {(links.would_restatus || links.documents_restatused || {}).bills || 0} bill(s)
+              </p>
+
+              {links.unresolved?.length > 0 && (
+                <div className="mt-3 border border-amber-200 bg-amber-50 rounded-sm p-2">
+                  <p className="font-semibold text-amber-900 text-xs">
+                    {links.unresolved.length} allocation(s) could not be matched — left untouched
+                  </p>
+                  <ul className="mt-1 text-xs text-amber-900 list-disc pl-5">
+                    {links.unresolved.slice(0, 8).map((u, i) => (
+                      <li key={i}>
+                        {u.payment_code} → doc <span className="font-mono-tech">{u.document_code}</span>{" "}
+                        ({u.party}) — {u.candidates} candidate(s)
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {links.changes?.length > 0 && (
+                <div className="mt-3 max-h-72 overflow-y-auto border border-slate-200 rounded-sm bg-white">
+                  <table className="w-full text-xs">
+                    <thead className="sticky top-0 bg-slate-100">
+                      <tr className="text-left text-slate-600">
+                        <th className="py-1.5 px-2">Payment</th>
+                        <th className="py-1.5 px-2">Party</th>
+                        <th className="py-1.5 px-2">Document</th>
+                        <th className="py-1.5 px-2 text-right">Amount</th>
+                        <th className="py-1.5 px-2">Matched on</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {links.changes.map((c, i) => (
+                        <tr key={i} className="border-b border-slate-100">
+                          <td className="py-1.5 px-2 font-mono-tech">{c.payment_code}</td>
+                          <td className="py-1.5 px-2 truncate max-w-[180px]">{c.party}</td>
+                          <td className="py-1.5 px-2 font-mono-tech">{c.document_code}</td>
+                          <td className="py-1.5 px-2 text-right font-mono-tech">
+                            {Number(c.amount || 0).toLocaleString("en-IN")}
+                          </td>
+                          <td className="py-1.5 px-2 text-slate-500">
+                            {c.matched_date} · ₹{Number(c.matched_total || 0).toLocaleString("en-IN")}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              <p className="text-[11px] text-slate-500 mt-2">
+                Showing up to 40 examples. Only allocations that resolve to exactly one document are
+                re-linked; anything ambiguous is reported and left alone. {links.note}
+              </p>
+            </div>
+          );
+        })()}
       </Card>
     </div>
   );
