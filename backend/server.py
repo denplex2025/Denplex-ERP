@@ -12994,8 +12994,43 @@ async def _ensure_indexes():
 # 0 ambiguous, 0 unmatched.
 
 
+def _relink_norm(code):
+    """Strip a financial-year prefix and zero padding off a document number so the same document
+    matches whether or not the code backfill has run yet.
+
+      2627/066 -> 66        FY26-27/101 -> 101        66 -> 66
+
+    Everything up to and including the last non-digit character is removed, then leading zeros
+    go. A wholly numeric code is left alone (a slash-less prefix like "222300" cannot be split
+    safely, so those simply fall back to exact matching rather than risk a wrong link).
+
+    Why this exists: payment allocations store the document_code as it was at import time. When
+    the code backfill rewrote 134 to 2627/134, an exact-match lookup stopped finding anything and
+    405 dangling allocations would have become unrepairable. Normalising both sides makes the
+    re-link independent of when the backfill runs."""
+    c = (code or "").strip()
+    if not c:
+        return ""
+    cut = -1
+    for i, ch in enumerate(c):
+        if not ch.isdigit():
+            cut = i
+    tail = c[cut + 1:] if cut >= 0 else c
+    stripped = tail.lstrip("0")
+    return stripped or tail or c
+
+
 def _relink_key(code, party):
     return f"{(code or '').strip()}|{(party or '').strip().lower()}"
+
+
+def _relink_keys(code, party):
+    """Both the exact and the prefix-stripped key, so an index or lookup covers either form."""
+    keys = [_relink_key(code, party)]
+    norm = _relink_norm(code)
+    if norm and norm != (code or "").strip():
+        keys.append(_relink_key(norm, party))
+    return keys
 
 
 def _relink_pick(cands, alloc_amount, pay_date):
@@ -13029,10 +13064,14 @@ async def relink_allocations(dry_run: bool = True, limit_report: int = 40,
     inv_ids = {d["id"] for d in invoices if d.get("id")}
     bill_ids = {d["id"] for d in bills if d.get("id")}
     inv_idx, bill_idx = {}, {}
+    # Index each document under BOTH its exact code and its prefix-stripped form, so a lookup
+    # succeeds whether the allocation holds "134" or "2627/134".
     for d in invoices:
-        inv_idx.setdefault(_relink_key(d.get("code"), d.get("customer_name")), []).append(d)
+        for k in _relink_keys(d.get("code"), d.get("customer_name")):
+            inv_idx.setdefault(k, []).append(d)
     for d in bills:
-        bill_idx.setdefault(_relink_key(d.get("code"), d.get("supplier_name")), []).append(d)
+        for k in _relink_keys(d.get("code"), d.get("supplier_name")):
+            bill_idx.setdefault(k, []).append(d)
 
     report = {"dry_run": dry_run, "payments_in": {}, "payments_out": {}, "changes": [],
               "unresolved": []}
@@ -13058,7 +13097,11 @@ async def relink_allocations(dry_run: bool = True, limit_report: int = 40,
                     new_allocs.append(a)
                     continue
                 stats["dangling"] += 1
-                cands = idx.get(_relink_key(a.get("document_code"), p.get("party_name")), [])
+                cands, _seen_ids = [], set()
+                for _k in _relink_keys(a.get("document_code"), p.get("party_name")):
+                    for _d in idx.get(_k, []):
+                        if _d["id"] not in _seen_ids:
+                            _seen_ids.add(_d["id"]); cands.append(_d)
                 pick = _relink_pick(cands, a.get("amount"), p.get("date")) if cands else None
                 if not pick:
                     if cands:
