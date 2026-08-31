@@ -8871,6 +8871,23 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
     except Exception:
         pass
 
+    # --- Invoice-number prefix lookup (kb_prefix) ---
+    # Vyapar splits a document number in two: txn_ref_number_char holds the bare number ("66")
+    # and txn_prefix_id points at kb_prefix.prefix_value which holds the financial-year prefix
+    # INCLUDING its zero padding ("2627/0"), giving "2627/066". The importer used to read
+    # txn_invoice_prefix instead, which Vyapar never populates - it is NULL on all 882 sale
+    # invoices in the 24-Aug-2026 backup - so every imported document lost its prefix and showed
+    # as a bare "66". That also made codes non-unique: Vyapar restarts numbering each financial
+    # year, so 211 bare reference numbers were reused across 839 invoices. With the prefix,
+    # 838 of 839 codes are distinct.
+    prefix_lookup: Dict[int, str] = {}
+    try:
+        cur.execute('SELECT prefix_id, prefix_value FROM "kb_prefix"')
+        for r in cur.fetchall():
+            prefix_lookup[int(r["prefix_id"])] = (r["prefix_value"] or "").strip()
+    except Exception:
+        pass
+
     # --- Unit lookup (kb_item_units) for item UOM ---
     unit_lookup: Dict[int, str] = {}
     try:
@@ -9085,8 +9102,18 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
 
         party_name = name_lookup.get(int(r["txn_name_id"]) if r["txn_name_id"] is not None else -1, "Unknown")
         ref = (r["txn_ref_number_char"] or "").strip()
-        prefix = (r["txn_invoice_prefix"] or "").strip()
-        code = (f"{prefix}{ref}" if ref else f"VY-{r['txn_id']}").strip()
+        # txn_invoice_prefix is always NULL in real Vyapar data; the prefix lives behind
+        # txn_prefix_id -> kb_prefix. Fall back to the old column just in case another
+        # Vyapar version does populate it.
+        prefix = prefix_lookup.get(int(r["txn_prefix_id"]), "") if r["txn_prefix_id"] is not None else ""
+        if not prefix:
+            prefix = (r["txn_invoice_prefix"] or "").strip()
+        # A sale invoice with no reference number is deliberate: Neel prepares invoices in
+        # advance and only allocates a number when the invoice is actually raised (waiting on a
+        # client PO). Never invent a number for one - burning a GST number on an unissued
+        # document leaves gaps in the series. Mark it as a draft instead.
+        is_draft = (t == 1 and not ref)
+        code = (f"{prefix}{ref}" if ref else f"DRAFT-{r['txn_id']}").strip()
         cash = float(r["txn_cash_amount"] or 0)
         bal = float(r["txn_balance_amount"] or 0)      # balance AT CREATION
         cur_bal = float(r["txn_current_balance"] or 0) # LIVE balance (net of later linked payments)
@@ -9167,10 +9194,13 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
             doc["gst_total"] = tax_total
             doc["status"] = "received" if cur_bal <= 0.01 else "open"
             doc["outstanding"] = round(max(cur_bal, 0.0), 2)  # Vyapar's own live balance = ground truth
+        # Prepared-but-not-raised sale invoices. Surfaced so the accountant can chase whatever the
+        # client still owes us before it can be raised (usually a PO).
+        doc["is_raised"] = not is_draft
 
         if not opts.dry_run:
             doc_ops.setdefault(collection_name, []).append(
-                UpdateOne({"code": doc["code"], "vyapar_id": doc["vyapar_id"]},
+                UpdateOne({"vyapar_id": doc["vyapar_id"]},
                           {"$setOnInsert": doc}, upsert=True))
         # $setOnInsert leaves an already-imported document untouched, so it keeps its ORIGINAL id
         # while doc["id"] holds a freshly minted UUID that was never stored. txn_to_doc - and the
@@ -9179,7 +9209,7 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
         # read the id back from the stored document before recording it.
         if not opts.dry_run and t in (1, 2):
             _stored = await getattr(db, collection_name).find_one(
-                {"code": doc["code"], "vyapar_id": doc["vyapar_id"]}, {"_id": 0, "id": 1})
+                {"vyapar_id": doc["vyapar_id"]}, {"_id": 0, "id": 1})
             if _stored and _stored.get("id"):
                 doc["id"] = _stored["id"]
         if t in (1, 2):
@@ -9250,7 +9280,7 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
                 "created_at": str(r["txn_date_created"] or now_iso())}
         pdoc["status"] = "Used" if (allocated >= amt - 0.01 and allocated > 0) else ("Partially Used" if allocated > 0 else "Unused")
         if not opts.dry_run:
-            _op = UpdateOne({"vyapar_id": pdoc["vyapar_id"], "code": pdoc["code"]}, {"$setOnInsert": pdoc}, upsert=True)
+            _op = UpdateOne({"vyapar_id": pdoc["vyapar_id"]}, {"$setOnInsert": pdoc}, upsert=True)
             (payin_ops if is_in else payout_ops).append(_op)
         if is_in: res["payments_in"] += 1
         else: res["payments_out"] += 1
@@ -9728,6 +9758,95 @@ async def vyapar_backfill_bill_gst_split(payload: _GstLineBackfillIn, user=Depen
 
 class VyaparReconcileIn(BaseModel):
     token: str
+
+@api.post("/integrations/vyapar/backfill-codes")
+async def vyapar_backfill_codes(payload: VyaparReconcileIn, dry_run: bool = True,
+                                user=Depends(require_roles("admin"))):
+    """One-off repair: rewrite document codes on ALREADY-imported records so they carry Vyapar's
+    financial-year prefix (2627/066 instead of a bare 66), and mark prepared-but-unraised sale
+    invoices as drafts.
+
+    Needed because the importer used to read txn_invoice_prefix, which Vyapar leaves NULL, instead
+    of txn_prefix_id -> kb_prefix.prefix_value. New imports are correct as of this release; this
+    fixes the ~880 documents already in the database. Matching is by vyapar_id, which is the true
+    identity of an imported document and never changes, so a code rewrite is safe.
+
+    Defaults to a dry run: nothing is written unless dry_run=false is passed."""
+    import sqlite3
+    meta = await db.vyapar_uploads.find_one({"id": payload.token, "user_id": user["id"]}, {"_id": 0})
+    if not meta:
+        raise HTTPException(404, "Upload not found. Re-upload the file.")
+    path = Path(meta["path"])
+    if not path.exists():
+        raise HTTPException(404, "Uploaded file is no longer on disk. Please re-upload.")
+    kind = meta.get("kind")
+    if kind in ("zip", "zip_sqlite"):
+        import zipfile, tempfile
+        with zipfile.ZipFile(path) as z:
+            inner = [n for n in z.namelist() if n.endswith(".db") or n.endswith(".sqlite") or n.endswith(".vyp")]
+            if not inner:
+                raise HTTPException(400, "Archive doesn't contain a SQLite database.")
+            tmpd = Path(tempfile.mkdtemp())
+            z.extract(inner[0], tmpd)
+            path = tmpd / inner[0]
+            kind = "sqlite"
+    if kind != "sqlite":
+        raise HTTPException(400, "Code backfill needs a .vyb backup (SQLite), not an Excel export.")
+
+    con = sqlite3.connect(str(path)); con.row_factory = sqlite3.Row
+    cur = con.cursor()
+    prefixes = {}
+    try:
+        cur.execute('SELECT prefix_id, prefix_value FROM "kb_prefix"')
+        for r in cur.fetchall():
+            prefixes[int(r["prefix_id"])] = (r["prefix_value"] or "").strip()
+    except Exception:
+        pass
+
+    # Only the document types the ERP stores with a Vyapar-generated number. Purchase bills are
+    # deliberately excluded: their code is the SUPPLIER's own bill number and carries no prefix.
+    TYPE_COLL = {1: db.invoices, 24: db.sale_orders, 27: db.quotations,
+                 28: db.purchase_orders, 65: db.proforma_invoices}
+    cur.execute("""SELECT txn_id, txn_type, txn_ref_number_char, txn_prefix_id
+                   FROM kb_transactions WHERE txn_type IN (1,24,27,28,65)""")
+    rows = cur.fetchall()
+    con.close()
+
+    report = {"dry_run": dry_run, "scanned": len(rows), "changed": 0, "unchanged": 0,
+              "not_in_erp": 0, "drafts": 0, "samples": [], "collisions": []}
+    seen_codes = {}
+    for r in rows:
+        coll = TYPE_COLL.get(int(r["txn_type"]))
+        if coll is None:
+            continue
+        vid = str(r["txn_id"])
+        ref = (r["txn_ref_number_char"] or "").strip()
+        pfx = prefixes.get(int(r["txn_prefix_id"]), "") if r["txn_prefix_id"] is not None else ""
+        is_draft = (int(r["txn_type"]) == 1 and not ref)
+        new_code = (f"{pfx}{ref}" if ref else f"DRAFT-{vid}").strip()
+        if is_draft:
+            report["drafts"] += 1
+        seen_codes.setdefault(new_code, []).append(vid)
+        doc = await coll.find_one({"vyapar_id": vid}, {"_id": 0, "id": 1, "code": 1})
+        if not doc:
+            report["not_in_erp"] += 1
+            continue
+        if doc.get("code") == new_code:
+            report["unchanged"] += 1
+            continue
+        report["changed"] += 1
+        if len(report["samples"]) < 40:
+            report["samples"].append({"vyapar_id": vid, "old_code": doc.get("code"),
+                                      "new_code": new_code, "is_raised": not is_draft})
+        if not dry_run:
+            await coll.update_one({"vyapar_id": vid},
+                                  {"$set": {"code": new_code, "is_raised": not is_draft}})
+
+    report["collisions"] = [{"code": c, "vyapar_ids": v} for c, v in seen_codes.items() if len(v) > 1]
+    report["note"] = ("Dry run - nothing was written. Re-run with dry_run=false to apply."
+                      if dry_run else "Applied.")
+    return report
+
 
 @api.post("/integrations/vyapar/reconcile")
 async def vyapar_reconcile(payload: VyaparReconcileIn, user=Depends(require_roles("admin"))):
