@@ -8858,6 +8858,92 @@ class VyaparImportIn(BaseModel):
     purchases: bool = True
     expenses: bool = True
     dry_run: bool = False
+    # When False (the default) an already-imported transaction is left completely untouched, so an
+    # edit made in Vyapar after the first import never reaches the ERP. That silent drift lands
+    # directly in the money numbers: dashboard_receivable_payable prefers each document's stored
+    # `outstanding`, which the importer copies from Vyapar's live `current_balance`. Between the
+    # 09-Jul and 24-Aug backups, 62 of the 70 changed documents changed ONLY that field — so
+    # importing the new payments without this flag leaves receivable overstated.
+    # With it on, only the VYAPAR_OWNED_* fields below are overwritten; everything the ERP owns
+    # (id, e-way bill, IRN, PO/GRN links, attachments) is preserved.
+    update_existing: bool = False
+
+
+# --- Field ownership for update_existing -------------------------------------------------------
+# Vyapar is the live book (Neel, 29-Aug-2026), so it wins on every field it actually knows about.
+# Everything NOT listed here is ERP-owned and is only ever written on first insert:
+#   id                         - payment allocations point at it; changing it recreates the
+#                                405-dangling-allocation orphan bug fixed on 29-Aug
+#   eway_* / irn / ack_* / signed_qr / einvoice_*  - filed with the government, must be retained
+#   po_id and GRN references   - procurement linkage that exists only in the ERP
+#   customer_id / supplier_id  - the importer always writes "", so overwriting would wipe any
+#                                party linking done on the ERP side
+#   created_at, source, vyapar_id, and any ERP workflow status
+# `code` IS owned by Vyapar: a draft that gets raised legitimately changes DRAFT-4516 -> 2627/067.
+VYAPAR_OWNED_DOC_FIELDS = {
+    "code", "date", "due_date", "lines", "subtotal", "total", "round_off", "notes",
+    "place_of_supply", "is_interstate", "po_date", "po_number", "purchaser_name",
+    "payment_mode", "ship_to_address", "cgst", "sgst", "igst", "gst_total",
+    "tds", "tds_rate", "tds_section", "status", "outstanding", "is_raised",
+    "customer_name", "supplier_name", "vyapar_txn_type",
+}
+VYAPAR_OWNED_PAYMENT_FIELDS = {
+    "code", "date", "amount", "allocated_amount", "payment_type", "ref_no",
+    "allocations", "notes", "party_name", "status",
+}
+VYAPAR_OWNED_EXPENSE_FIELDS = {
+    "code", "date", "amount", "paid_amount", "payment_type", "ref_no", "notes",
+    "status", "category_id", "category_name",
+}
+
+
+def _vy_same(old, new) -> bool:
+    """Tolerant equality for import diffing. Booleans first (isinstance(True, int) is True in
+    Python), then numbers at 2dp, then structures by normalised JSON, then strings with
+    None treated as ''."""
+    if isinstance(old, bool) or isinstance(new, bool):
+        return bool(old) == bool(new)
+    if isinstance(old, (int, float)) or isinstance(new, (int, float)):
+        try:
+            return abs(float(old or 0) - float(new or 0)) < 0.01
+        except (TypeError, ValueError):
+            pass
+    if isinstance(old, (list, dict)) or isinstance(new, (list, dict)):
+        import json as _j
+        return _j.dumps(old, sort_keys=True, default=str) == _j.dumps(new, sort_keys=True, default=str)
+    return (old or "") == (new or "")
+
+
+def _vy_diff(existing: dict, incoming: dict, owned: set) -> dict:
+    """Which Vyapar-owned fields would change if this record were updated. {} means no change.
+    Structures report only their size — a full line-item dump would bury the report."""
+    out: Dict[str, Any] = {}
+    for k in owned:
+        if k not in incoming:
+            continue
+        old, new = existing.get(k), incoming[k]
+        if _vy_same(old, new):
+            continue
+        if isinstance(old, (list, dict)) or isinstance(new, (list, dict)):
+            out[k] = {"from": f"{len(old or [])} item(s)", "to": f"{len(new or [])} item(s)"}
+        else:
+            out[k] = {"from": old, "to": new}
+    return out
+
+
+def _vy_upsert_body(doc: dict, owned: set, update_existing: bool) -> dict:
+    """$setOnInsert-only (current behaviour) or a split $set/$setOnInsert update. A field may
+    never appear in both operators — Mongo rejects that as a conflict — so the split is exact."""
+    if not update_existing:
+        return {"$setOnInsert": doc}
+    own = {k: v for k, v in doc.items() if k in owned}
+    init = {k: v for k, v in doc.items() if k not in owned}
+    body: Dict[str, Any] = {}
+    if own:
+        body["$set"] = own
+    if init:
+        body["$setOnInsert"] = init
+    return body or {"$setOnInsert": doc}
 
 @api.post("/integrations/vyapar/inspect")
 async def vyapar_inspect(file: UploadFile = File(...), user=Depends(require_roles("admin"))):
@@ -9184,6 +9270,61 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
     cash_on_doc: List[Dict[str, Any]] = []            # cash received/paid on the doc itself -> synthetic payment below
     inv_open: Dict[int, List[Any]] = {}               # txn_id -> [party_kind, party_name, ERP-derived outstanding]
     doc_ops: Dict[str, List[UpdateOne]] = {}          # collection_name -> batched upserts, flushed once after this loop
+
+    # Pre-load every already-imported record keyed by vyapar_id — ONE query per collection.
+    # Two jobs: it serves the id read-back below (which used to be a find_one per row, i.e. ~2,700
+    # separate round-trips to Atlas), and it is the basis of the update_existing diff report.
+    # Snapshot semantics are correct either way: doc_ops are flushed only after this loop, so
+    # nothing here can be stale mid-loop.
+    _vy_colls = sorted({_rt[0] for _rt in TYPE_ROUTES.values()} | {"payments_in", "payments_out", "expenses"})
+    existing_by_coll: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    for _cn in _vy_colls:
+        _m: Dict[str, Dict[str, Any]] = {}
+        async for _d in getattr(db, _cn).find({"vyapar_id": {"$nin": [None, ""]}}, {"_id": 0}):
+            if _d.get("vyapar_id"):
+                _m[str(_d["vyapar_id"])] = _d
+        existing_by_coll[_cn] = _m
+
+    seen_vyapar_ids: Dict[str, set] = {}      # collection -> vyapar_ids present in THIS backup
+    processed_colls: set = set()              # only these are eligible for vanished-doc reporting
+    upd: Dict[str, Any] = {
+        "enabled": opts.update_existing, "existing_seen": 0, "new": 0, "changed": 0,
+        "unchanged": 0, "by_field": {}, "by_collection": {},
+        "outstanding_before": 0.0, "outstanding_after": 0.0, "samples": [],
+    }
+
+    def _track(collection_name: str, doc: Dict[str, Any], existing: Optional[Dict[str, Any]], owned: set):
+        """Record what an update WOULD change (dry run) or IS changing (real run)."""
+        seen_vyapar_ids.setdefault(collection_name, set()).add(doc["vyapar_id"])
+        processed_colls.add(collection_name)
+        if not existing:
+            upd["new"] += 1
+            return
+        upd["existing_seen"] += 1
+        d = _vy_diff(existing, doc, owned)
+        if not d:
+            upd["unchanged"] += 1
+            return
+        upd["changed"] += 1
+        for _k in d:
+            upd["by_field"][_k] = upd["by_field"].get(_k, 0) + 1
+        _bc = upd["by_collection"].setdefault(
+            collection_name, {"changed": 0, "outstanding_before": 0.0, "outstanding_after": 0.0})
+        _bc["changed"] += 1
+        if "outstanding" in d:
+            _ob = float(existing.get("outstanding") or 0)
+            _oa = float(doc.get("outstanding") or 0)
+            upd["outstanding_before"] += _ob
+            upd["outstanding_after"] += _oa
+            _bc["outstanding_before"] += _ob
+            _bc["outstanding_after"] += _oa
+        if len(upd["samples"]) < 60:
+            upd["samples"].append({
+                "collection": collection_name, "code": doc.get("code"),
+                "party": doc.get("customer_name") or doc.get("supplier_name") or doc.get("party_name") or "",
+                "date": doc.get("date"), "fields": d,
+            })
+
     cur.execute("SELECT * FROM kb_transactions")
     for r in cur.fetchall():
         t = int(r["txn_type"]) if r["txn_type"] is not None else 0
@@ -9298,20 +9439,22 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
         # client still owes us before it can be raised (usually a PO).
         doc["is_raised"] = not is_draft
 
+        # An already-imported document keeps its ORIGINAL id, while doc["id"] holds a freshly
+        # minted UUID that was never stored. txn_to_doc - and the payment allocations built from
+        # it - used that phantom id, so every re-import orphaned the allocations it wrote (405
+        # dangling links / Rs 1.19 cr found live on 2026-08-29). Always adopt the stored id.
+        # Now served from the preloaded snapshot instead of a find_one per row, so it also works
+        # during a dry run - which makes the dry-run allocation preview accurate too.
+        _existing = existing_by_coll.get(collection_name, {}).get(doc["vyapar_id"])
+        if _existing and _existing.get("id"):
+            doc["id"] = _existing["id"]
+        _track(collection_name, doc, _existing, VYAPAR_OWNED_DOC_FIELDS)
+
         if not opts.dry_run:
             doc_ops.setdefault(collection_name, []).append(
                 UpdateOne({"vyapar_id": doc["vyapar_id"]},
-                          {"$setOnInsert": doc}, upsert=True))
-        # $setOnInsert leaves an already-imported document untouched, so it keeps its ORIGINAL id
-        # while doc["id"] holds a freshly minted UUID that was never stored. txn_to_doc - and the
-        # payment allocations built from it - used that phantom id, so every re-import orphaned the
-        # allocations it wrote (405 dangling links / Rs 1.19 cr found live on 2026-08-29). Always
-        # read the id back from the stored document before recording it.
-        if not opts.dry_run and t in (1, 2):
-            _stored = await getattr(db, collection_name).find_one(
-                {"vyapar_id": doc["vyapar_id"]}, {"_id": 0, "id": 1})
-            if _stored and _stored.get("id"):
-                doc["id"] = _stored["id"]
+                          _vy_upsert_body(doc, VYAPAR_OWNED_DOC_FIELDS, opts.update_existing),
+                          upsert=True))
         if t in (1, 2):
             txn_to_doc[int(r["txn_id"])] = {"id": doc["id"], "code": doc["code"], "dtype": "invoice" if t == 1 else "vendor_bill"}
             if cur_bal > 0.01:
@@ -9379,8 +9522,15 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
                 "notes": (r["txn_description"] or "").strip(), "vyapar_id": str(r["txn_id"]), "source": "vyapar",
                 "created_at": str(r["txn_date_created"] or now_iso())}
         pdoc["status"] = "Used" if (allocated >= amt - 0.01 and allocated > 0) else ("Partially Used" if allocated > 0 else "Unused")
+        _pcoll = "payments_in" if is_in else "payments_out"
+        _pex = existing_by_coll.get(_pcoll, {}).get(pdoc["vyapar_id"])
+        if _pex and _pex.get("id"):
+            pdoc["id"] = _pex["id"]
+        _track(_pcoll, pdoc, _pex, VYAPAR_OWNED_PAYMENT_FIELDS)
         if not opts.dry_run:
-            _op = UpdateOne({"vyapar_id": pdoc["vyapar_id"]}, {"$setOnInsert": pdoc}, upsert=True)
+            _op = UpdateOne({"vyapar_id": pdoc["vyapar_id"]},
+                            _vy_upsert_body(pdoc, VYAPAR_OWNED_PAYMENT_FIELDS, opts.update_existing),
+                            upsert=True)
             (payin_ops if is_in else payout_ops).append(_op)
         if is_in: res["payments_in"] += 1
         else: res["payments_out"] += 1
@@ -9397,8 +9547,15 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
                                  "amount": cp["amount"], "tds_amount": 0}],
                 "notes": "Cash on document (Vyapar import)", "status": "Used",
                 "vyapar_id": f"cash-{cp['txn_id']}", "source": "vyapar", "created_at": now_iso()}
+        _pcoll = "payments_in" if cp["is_in"] else "payments_out"
+        _pex = existing_by_coll.get(_pcoll, {}).get(pdoc["vyapar_id"])
+        if _pex and _pex.get("id"):
+            pdoc["id"] = _pex["id"]
+        _track(_pcoll, pdoc, _pex, VYAPAR_OWNED_PAYMENT_FIELDS)
         if not opts.dry_run:
-            _op = UpdateOne({"vyapar_id": pdoc["vyapar_id"]}, {"$setOnInsert": pdoc}, upsert=True)
+            _op = UpdateOne({"vyapar_id": pdoc["vyapar_id"]},
+                            _vy_upsert_body(pdoc, VYAPAR_OWNED_PAYMENT_FIELDS, opts.update_existing),
+                            upsert=True)
             (payin_ops if cp["is_in"] else payout_ops).append(_op)
         res["cash_on_doc_payments"] += 1
 
@@ -9443,8 +9600,14 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
                     "status": "Paid" if e_bal <= 0.01 else ("Partial" if e_cash > 0.01 else "Unpaid"),
                     "vyapar_id": str(r["txn_id"]), "source": "vyapar",
                     "created_at": str(r["txn_date_created"] or now_iso())}
+            _eex = existing_by_coll.get("expenses", {}).get(edoc["vyapar_id"])
+            if _eex and _eex.get("id"):
+                edoc["id"] = _eex["id"]
+            _track("expenses", edoc, _eex, VYAPAR_OWNED_EXPENSE_FIELDS)
             if not opts.dry_run:
-                exp_ops.append(UpdateOne({"vyapar_id": edoc["vyapar_id"]}, {"$setOnInsert": edoc}, upsert=True))
+                exp_ops.append(UpdateOne({"vyapar_id": edoc["vyapar_id"]},
+                                         _vy_upsert_body(edoc, VYAPAR_OWNED_EXPENSE_FIELDS, opts.update_existing),
+                                         upsert=True))
             res["expenses"] += 1
         if not opts.dry_run:
             await _flush_bulk(db.expenses, exp_ops)
@@ -9494,6 +9657,39 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
             await _refresh_bill_paid_status([m["id"] for m in txn_to_doc.values() if m["dtype"] == "vendor_bill"])
         except Exception:
             pass
+
+    # --- update_existing report -----------------------------------------------------------------
+    # Records the ERP imported from Vyapar that are ABSENT from this backup. Reported only, never
+    # deleted: they may have been cancelled in Vyapar, but they may equally carry a filed e-way
+    # bill or IRN that legally has to be retained. Only collections actually processed in this run
+    # are eligible, so unticking Sales/Purchases can't make everything look vanished.
+    vanished: List[Dict[str, Any]] = []
+    for _cn in sorted(processed_colls):
+        _seen = seen_vyapar_ids.get(_cn, set())
+        for _vid, _d in existing_by_coll.get(_cn, {}).items():
+            if _vid in _seen:
+                continue
+            vanished.append({"collection": _cn, "vyapar_id": _vid, "code": _d.get("code"),
+                             "party": _d.get("customer_name") or _d.get("supplier_name") or _d.get("party_name") or "",
+                             "date": _d.get("date"), "total": _d.get("total"),
+                             "outstanding": _d.get("outstanding")})
+    upd["outstanding_before"] = round(upd["outstanding_before"], 2)
+    upd["outstanding_after"] = round(upd["outstanding_after"], 2)
+    upd["outstanding_delta"] = round(upd["outstanding_after"] - upd["outstanding_before"], 2)
+    for _bc in upd["by_collection"].values():
+        _bc["outstanding_before"] = round(_bc["outstanding_before"], 2)
+        _bc["outstanding_after"] = round(_bc["outstanding_after"], 2)
+        _bc["outstanding_delta"] = round(_bc["outstanding_after"] - _bc["outstanding_before"], 2)
+    upd["vanished_count"] = len(vanished)
+    upd["vanished_samples"] = vanished[:40]
+    upd["note"] = (
+        "Preview only - update_existing was OFF, so these changes were NOT written. "
+        "Re-run with update_existing=true to apply them."
+        if not opts.update_existing else
+        ("Preview only - dry_run was ON, nothing was written."
+         if opts.dry_run else "Applied.")
+    )
+    res["updates"] = upd
 
     con.close()
     return res
@@ -9629,6 +9825,13 @@ async def _run_vyapar_import_job(job_id: str, path: Path, kind: str, payload: "V
                 ("parties","items","sales","purchases","payments_in","payments_out","quotations","sale_orders","purchase_orders","delivery_challans","job_work_out","sale_returns")
                 if details.get(k2)]
         summary = " · ".join(bits) or "nothing matched"
+        _u = details.get("updates") or {}
+        if _u.get("changed"):
+            summary += f" · {_u['changed']} existing record(s) {'updated' if _u.get('enabled') and not payload.dry_run else 'would change'}"
+            if abs(float(_u.get("outstanding_delta") or 0)) > 0.01:
+                summary += f" · outstanding {_u['outstanding_delta']:+,.2f}"
+        if _u.get("vanished_count"):
+            summary += f" · {_u['vanished_count']} not in this backup (review)"
         if payload.dry_run: summary += " (dry run)"
         if details.get("company_seeded"): summary += " · company details auto-filled"
         await db.vyapar_import_jobs.update_one({"id": job_id}, {"$set": {
