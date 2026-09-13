@@ -1023,7 +1023,7 @@ function InvoiceTemplatePanel() {
 function VyaparImportPanel() {
   const [busy, setBusy] = useState(false);
   const [analysis, setAnalysis] = useState(null);
-  const [opts, setOpts] = useState({ parties: true, items: true, sales: true, purchases: true, expenses: true, dry_run: false });
+  const [opts, setOpts] = useState({ parties: true, items: true, sales: true, purchases: true, expenses: true, dry_run: false, update_existing: false });
   const [results, setResults] = useState(null);
   const [recon, setRecon] = useState(null);
   const [codes, setCodes] = useState(null);   // document-number backfill report
@@ -1163,6 +1163,20 @@ function VyaparImportPanel() {
                   <Toggle label="Purchase Invoices" checked={opts.purchases} onChange={(v)=>setOpts({...opts, purchases: v})} />
                   <Toggle label="Expenses" checked={opts.expenses} onChange={(v)=>setOpts({...opts, expenses: v})} />
                 </div>
+                <div className="border border-slate-200 bg-white p-3 rounded-sm mt-2">
+                  <label className="flex items-center gap-2 text-xs font-semibold text-slate-700">
+                    <Switch checked={opts.update_existing} onCheckedChange={(v)=>setOpts({...opts, update_existing: v})} data-testid="vyapar-update-existing" />
+                    Update records that already exist
+                  </label>
+                  <p className="text-[11px] text-slate-500 mt-1.5 leading-relaxed">
+                    Off by default: a transaction already imported is left untouched, so anything edited in
+                    Vyapar afterwards never reaches the ERP — including the running balance, which is what
+                    receivable is calculated from. Turn this on and Vyapar's version wins on the fields it
+                    owns (amounts, dates, lines, balance, document number). E-way bills, IRNs, PO/GRN links
+                    and attachments are never overwritten.
+                    {!opts.update_existing && <> Leave it off with <strong>Dry run</strong> on to preview what would change.</>}
+                  </p>
+                </div>
                 <div className="flex items-center gap-3 pt-2 flex-wrap">
                   <label className="flex items-center gap-2 text-xs text-slate-600">
                     <Switch checked={opts.dry_run} onCheckedChange={(v)=>setOpts({...opts, dry_run: v})} /> Dry run (preview without writing)
@@ -1198,12 +1212,106 @@ function VyaparImportPanel() {
           </div>
         )}
 
-        {results && (
-          <div className="mt-4 border border-emerald-200 p-4 bg-emerald-50 rounded-sm text-sm" data-testid="vyapar-results">
-            <div className="font-semibold text-emerald-800 mb-2">Import complete</div>
-            <pre className="text-xs whitespace-pre-wrap text-slate-700">{JSON.stringify(results.details || results, null, 2)}</pre>
-          </div>
-        )}
+        {results && (() => {
+          const d = results.details || results;
+          const u = d.updates || null;
+          const { updates, ...rest } = d;            // the diff gets its own panel below
+          const money = (n) => (Number(n) || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+          return (
+            <>
+              <div className="mt-4 border border-emerald-200 p-4 bg-emerald-50 rounded-sm text-sm" data-testid="vyapar-results">
+                <div className="font-semibold text-emerald-800 mb-2">Import complete</div>
+                <pre className="text-xs whitespace-pre-wrap text-slate-700">{JSON.stringify(rest, null, 2)}</pre>
+              </div>
+
+              {u && (u.changed > 0 || u.vanished_count > 0) && (
+                <div className={`mt-4 border p-4 rounded-sm text-sm ${u.enabled && !results.dry_run ? "border-emerald-200 bg-emerald-50" : "border-amber-200 bg-amber-50"}`} data-testid="vyapar-updates">
+                  <p className="font-semibold">
+                    Existing records — {u.enabled && !results.dry_run ? "updated" : "preview"}
+                  </p>
+                  <p className="text-xs text-slate-600 mt-0.5">{u.note}</p>
+
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs mt-3">
+                    {[["Already in ERP", u.existing_seen], ["Would change", u.changed],
+                      ["Unchanged", u.unchanged], ["Brand new", u.new]].map(([k, v]) => (
+                      <div key={k} className="bg-white border border-slate-200 px-3 py-2 rounded-sm">
+                        <div className="text-slate-500 uppercase tracking-wider text-[10px]">{k}</div>
+                        <div className="font-mono-tech text-base text-slate-900">{v}</div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {Math.abs(Number(u.outstanding_delta) || 0) > 0.01 && (
+                    <div className="mt-3 bg-white border border-slate-200 p-3 rounded-sm">
+                      <div className="text-[11px] uppercase tracking-wider text-slate-500">Outstanding on the affected records</div>
+                      <div className="font-mono-tech text-sm text-slate-900 mt-1">
+                        ₹{money(u.outstanding_before)} → ₹{money(u.outstanding_after)}
+                        <span className={`ml-2 font-semibold ${Number(u.outstanding_delta) < 0 ? "text-emerald-700" : "text-red-700"}`}>
+                          {Number(u.outstanding_delta) < 0 ? "−" : "+"}₹{money(Math.abs(u.outstanding_delta))}
+                        </span>
+                      </div>
+                      {u.by_collection && Object.keys(u.by_collection).length > 0 && (
+                        <div className="mt-2 text-[11px] text-slate-600 space-y-0.5">
+                          {Object.entries(u.by_collection).map(([c, v]) => (
+                            <div key={c}>
+                              <span className="font-mono-tech">{c}</span>: {v.changed} changed
+                              {Math.abs(Number(v.outstanding_delta) || 0) > 0.01 &&
+                                <> · outstanding {Number(v.outstanding_delta) < 0 ? "−" : "+"}₹{money(Math.abs(v.outstanding_delta))}</>}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {u.by_field && Object.keys(u.by_field).length > 0 && (
+                    <div className="mt-3 text-xs">
+                      <span className="text-slate-500">Fields affected: </span>
+                      {Object.entries(u.by_field).sort((a, b) => b[1] - a[1]).map(([f, n]) => (
+                        <span key={f} className="inline-block bg-white border border-slate-200 px-1.5 py-0.5 rounded-sm mr-1 mb-1 font-mono-tech">{f} ×{n}</span>
+                      ))}
+                    </div>
+                  )}
+
+                  {u.vanished_count > 0 && (
+                    <div className="mt-3 bg-white border border-amber-300 p-3 rounded-sm text-xs">
+                      <p className="font-semibold text-amber-900">{u.vanished_count} record(s) in the ERP are not in this backup — flagged for review, never deleted.</p>
+                      <p className="text-slate-600 mt-0.5">They may have been cancelled in Vyapar, but they can also carry a filed e-way bill or IRN that has to be kept.</p>
+                      <div className="mt-2 max-h-40 overflow-auto">
+                        {(u.vanished_samples || []).map((v, i) => (
+                          <div key={i} className="font-mono-tech text-[11px] py-0.5 border-b border-slate-100">
+                            {v.code} · {v.party} · {String(v.date || "").slice(0, 10)} · ₹{money(v.total)}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {(u.samples || []).length > 0 && (
+                    <details className="mt-3">
+                      <summary className="text-xs text-slate-600 cursor-pointer">
+                        Show {u.samples.length} sample change{u.samples.length === 1 ? "" : "s"}
+                        {u.changed > u.samples.length && <> (of {u.changed})</>}
+                      </summary>
+                      <div className="mt-2 max-h-72 overflow-auto space-y-1">
+                        {u.samples.map((s, i) => (
+                          <div key={i} className="bg-white border border-slate-200 p-2 rounded-sm text-[11px]">
+                            <div className="font-semibold font-mono-tech">{s.code} <span className="font-normal text-slate-500">· {s.party} · {String(s.date || "").slice(0, 10)}</span></div>
+                            {Object.entries(s.fields).map(([f, v]) => (
+                              <div key={f} className="font-mono-tech text-slate-600 pl-2">
+                                {f}: <span className="text-red-700">{String(v.from)}</span> → <span className="text-emerald-700">{String(v.to)}</span>
+                              </div>
+                            ))}
+                          </div>
+                        ))}
+                      </div>
+                    </details>
+                  )}
+                </div>
+              )}
+            </>
+          );
+        })()}
 
         {recon && (
           <div className={`mt-4 border p-4 rounded-sm text-sm ${recon.all_ok ? "border-emerald-200 bg-emerald-50" : "border-amber-200 bg-amber-50"}`} data-testid="vyapar-reconcile">
