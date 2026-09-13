@@ -4652,19 +4652,87 @@ def _verify_aisensy_signature(raw: bytes, signature: str, shared_secret: str) ->
     mac = hmac.new(shared_secret.encode("utf-8"), raw, hashlib.sha256).hexdigest()
     return hmac.compare_digest(mac, signature.strip())
 
+# --- AiSensy capture gates -------------------------------------------------------------------
+# Both of these are deliberately env-driven so they can be corrected from Railway after the trial
+# captures a real payload, WITHOUT another code deploy.
+#
+# AISENSY_TOPIC: AiSensy confirmed (2026-09-13) the topic is "message.created". The default below
+#   is left at the old value so that, until the trial confirms the payload, every event is LOGGED
+#   by receive_webhook but NONE is processed into a PO. That is intentional, not a bug.
+# AISENSY_AGENT_SENDERS: comma-separated list of Message.sender values that mean "we sent this".
+#   AiSensy confirmed message.created fires for BOTH directions but has not yet told us the exact
+#   enum values. Until this is set, no PO is drafted — otherwise a supplier's reply would be
+#   parsed into a duplicate purchase order.
+AISENSY_TOPIC = os.environ.get("AISENSY_TOPIC", "message.sender.user")
+AISENSY_AGENT_SENDERS = [s.strip().upper() for s in os.environ.get("AISENSY_AGENT_SENDERS", "").split(",") if s.strip()]
+
+def _aisensy_norm_phone(v) -> str:
+    """Reduce a number to its last 10 digits so '918062358338', '+91 80623 58338' and
+    '8062358338' all compare equal. Returns '' when there aren't 10 digits to compare."""
+    d = "".join(ch for ch in str(v or "") if ch.isdigit())
+    return d[-10:] if len(d) >= 10 else ""
+
+async def _aisensy_supplier_by_phone(phone: str) -> tuple:
+    """Deterministic supplier match on the contact's WhatsApp number. Preferred over
+    _match_supplier_name, which is fuzzy and can mismatch. Returns ('', '') if nothing matches."""
+    key = _aisensy_norm_phone(phone)
+    if not key:
+        return "", ""
+    for s in await db.suppliers.find({}, {"_id": 0, "id": 1, "name": 1, "phone": 1}).to_list(5000):
+        if _aisensy_norm_phone(s.get("phone")) == key:
+            return s["id"], s["name"]
+    return "", ""
+
 def _aisensy_extract_text(message_content) -> str:
-    """Message content shape isn't fully documented for TEXT messages — stay tolerant of a few
-    plausible shapes (plain string, {"text": "..."}, {"text": {"body": "..."}}, {"body": "..."})."""
+    """Message content shape isn't fully documented — stay tolerant of the plausible shapes for
+    plain text (a string, {"text": "..."}, {"text": {"body": "..."}}, {"body": "..."}) AND for
+    templates, where the typed content lives in the variable values rather than a body.
+
+    The template path matters: the first message to any supplier with no open 24-hour session has
+    to go out as an approved template, so if templates aren't parsed, the message that starts every
+    new supplier conversation is the one we drop. AiSensy confirmed 2026-09-13 that template sends
+    are captured together with the values entered into the template variables."""
     if isinstance(message_content, str):
         return message_content
-    if isinstance(message_content, dict):
-        t = message_content.get("text")
-        if isinstance(t, dict):
-            return t.get("body") or ""
-        if isinstance(t, str):
-            return t
-        return message_content.get("body") or message_content.get("caption") or ""
-    return ""
+    if not isinstance(message_content, dict):
+        return ""
+    t = message_content.get("text")
+    if isinstance(t, dict) and t.get("body"):
+        return str(t["body"])
+    if isinstance(t, str) and t.strip():
+        return t
+    for k in ("body", "caption"):
+        if message_content.get(k):
+            return str(message_content[k])
+
+    # Template shapes: collect every free-text parameter value, in order.
+    parts: list = []
+
+    def _collect(v):
+        if isinstance(v, str):
+            if v.strip():
+                parts.append(v.strip())
+        elif isinstance(v, dict):
+            for kk in ("text", "value", "parameter", "body"):
+                if isinstance(v.get(kk), str) and v[kk].strip():
+                    parts.append(v[kk].strip())
+                    return
+            for kk in ("parameters", "components", "variables", "params"):
+                if kk in v:
+                    _collect(v[kk])
+        elif isinstance(v, list):
+            for x in v:
+                _collect(x)
+
+    for container in (message_content.get("template"), message_content.get("templateData"), message_content):
+        if not isinstance(container, dict):
+            continue
+        for kk in ("parameters", "components", "variables", "params", "bodyValues", "templateParams"):
+            if kk in container:
+                _collect(container[kk])
+        if parts:
+            break
+    return " ".join(parts).strip()
 
 def _match_supplier_name(name_hint: str, suppliers: list) -> tuple:
     """Best-effort match of an AI-extracted supplier name against the real suppliers list.
@@ -4731,23 +4799,33 @@ async def _ai_parse_po_from_text(text: str) -> Optional[dict]:
         return None
 
 async def _process_aisensy_webhook(body: Any) -> str:
-    """Handles AiSensy's 'message.sender.user' webhook topic (a user messaging the business
-    number). Runs the message text through Claude; if it looks like a purchase order request,
-    creates a draft PurchaseOrder for Neel to review — never auto-finalizes it."""
+    """Turns an agent-sent WhatsApp message into a DRAFT PurchaseOrder for review — never
+    auto-finalizes one. Gated by AISENSY_TOPIC and AISENSY_AGENT_SENDERS (see above): until those
+    are set from a real captured payload, this deliberately drafts nothing. Every event is still
+    logged by receive_webhook, which is what the trial needs."""
     topic = str((body or {}).get("topic") or "")
-    if topic and topic != "message.sender.user":
-        return f"skipped (topic={topic})"
+    if topic and topic != AISENSY_TOPIC:
+        return f"skipped (topic={topic}; expecting {AISENSY_TOPIC} — set the AISENSY_TOPIC env var once the real payload is confirmed)"
     msg = ((body or {}).get("data") or {}).get("message") or (body or {}).get("message") or {}
     if not isinstance(msg, dict) or not msg:
         return "skipped (no message object)"
+    # Direction gate. message.created fires for both directions, so without this a supplier's
+    # reply gets parsed into a second, duplicate PO.
+    sender = str(msg.get("sender") or "").upper()
+    if not AISENSY_AGENT_SENDERS:
+        return f"skipped (sender={sender or 'unknown'}; AISENSY_AGENT_SENDERS is not set — refusing to draft a PO until we know which sender values mean agent-sent)"
+    if sender not in AISENSY_AGENT_SENDERS:
+        return f"skipped (sender={sender or 'unknown'} — not an agent-sent message)"
     mtype = str(msg.get("message_type") or "").upper()
-    if mtype and mtype != "TEXT":
+    if mtype and mtype not in ("TEXT", "TEMPLATE"):
         return f"skipped (type={mtype})"
     text = _aisensy_extract_text(msg.get("message_content")).strip()
     if not text:
-        return "skipped (empty text)"
+        return f"skipped (no text found in {mtype or 'message'})"
     message_id = str(msg.get("id") or msg.get("messageId") or "")
-    phone = str(msg.get("phone_number") or msg.get("sender") or "")
+    # phone_number is the CONTACT's number regardless of direction. Never fall back to `sender` —
+    # that is a role enum (e.g. "AGENT"), not a phone number.
+    phone = str(msg.get("phone_number") or "")
     if message_id:
         dup = await db.purchase_orders.find_one({"whatsapp_message_id": message_id}, {"_id": 0, "id": 1, "code": 1})
         if dup:
@@ -4760,8 +4838,14 @@ async def _process_aisensy_webhook(body: Any) -> str:
     raw_lines = result.get("lines") or []
     if not raw_lines:
         return "skipped (no items extracted)"
-    suppliers = await db.suppliers.find({}, {"_id": 0, "id": 1, "name": 1}).to_list(2000)
-    supplier_id, supplier_name = _match_supplier_name(result.get("supplier_name") or "", suppliers)
+    # Phone match first — it's deterministic. Fall back to the AI's name guess only if the
+    # contact's number isn't on any supplier record.
+    supplier_id, supplier_name = await _aisensy_supplier_by_phone(phone)
+    matched_by = "phone" if supplier_id else ""
+    if not supplier_id:
+        suppliers = await db.suppliers.find({}, {"_id": 0, "id": 1, "name": 1}).to_list(2000)
+        supplier_id, supplier_name = _match_supplier_name(result.get("supplier_name") or "", suppliers)
+        matched_by = "name" if supplier_id else "unmatched"
     po_lines = []
     for l in raw_lines:
         try:
@@ -4781,12 +4865,13 @@ async def _process_aisensy_webhook(body: Any) -> str:
         status="draft", source="whatsapp_ai",
         whatsapp_message_id=message_id, whatsapp_raw_text=text,
         ai_confidence=str(result.get("confidence") or ""),
-        notes=f'Auto-drafted from WhatsApp ({phone}): "{text}"',
+        notes=f'Auto-drafted from {("WhatsApp " + phone) if phone else "WhatsApp"} '
+              f'(supplier matched by {matched_by}): "{text}"',
     ).model_dump()
     doc["code"] = await gen_code("PO", "po")
     doc.update(compute_totals(doc["lines"], 0))
     await db.purchase_orders.insert_one(doc)
-    return f"draft PO {doc['code']} created ({len(po_lines)} line(s), confidence={doc['ai_confidence']})"
+    return f"draft PO {doc['code']} created ({len(po_lines)} line(s), confidence={doc['ai_confidence']}, supplier by {matched_by})"
 
 async def _process_aisensy_background(event_id: str, body: Any):
     """AiSensy expects a 2xx ack within 5s; the AI parse call can take a few seconds, so it runs
@@ -4808,10 +4893,16 @@ async def receive_webhook(source: str, token: str, request: Request, background_
     Logs every event raw so the real payload format can be inspected, then best-effort maps it."""
     cfg = await get_setting("webhooks") or {}
     src = cfg.get(source) or {}
-    if not src or not src.get("enabled", True):
-        raise HTTPException(404, "Webhook source not enabled")
+    # Token first: a wrong token means this isn't the caller we think it is, so 401 is correct
+    # and does not risk disabling a legitimate integration.
     if not token or token != src.get("secret"):
         raise HTTPException(401, "Invalid webhook token")
+    if not src.get("enabled", True):
+        # Valid token, source toggled off in the ERP. AiSensy disables a webhook after repeated
+        # failures, so returning 4xx here would let a temporary toggle-off break it permanently.
+        if source == "aisensy":
+            return {"ok": True, "received": True, "result": "ignored (source disabled in ERP)"}
+        raise HTTPException(404, "Webhook source not enabled")
     raw = await request.body()
     try:
         import json
@@ -4820,12 +4911,21 @@ async def receive_webhook(source: str, token: str, request: Request, background_
         body = {"_raw": raw.decode("utf-8", "ignore")[:5000]}
     if source == "aisensy":
         shared = src.get("signing_secret") or ""
-        if shared and not _verify_aisensy_signature(raw, request.headers.get("X-AiSensy-Signature", ""), shared):
-            raise HTTPException(401, "Invalid webhook signature")
-        ev = {"id": new_id(), "source": source, "received_at": now_iso(), "body": body, "processed": False, "result": "queued"}
+        sig = request.headers.get("X-AiSensy-Signature", "")
+        sig_ok = (not shared) or _verify_aisensy_signature(raw, sig, shared)
+        ev = {"id": new_id(), "source": source, "received_at": now_iso(), "body": body,
+              "processed": False,
+              "result": "queued" if sig_ok else "signature mismatch — logged, not processed",
+              # Kept so the real signing format can be derived from a live delivery if our
+              # HMAC-SHA256-hex assumption turns out to be wrong.
+              "sig_header": sig[:200]}
         await db.webhook_events.insert_one(dict(ev))
-        background_tasks.add_task(_process_aisensy_background, ev["id"], body)
-        return {"ok": True, "received": True, "result": "queued"}
+        if sig_ok:
+            background_tasks.add_task(_process_aisensy_background, ev["id"], body)
+        # ALWAYS 2xx. AiSensy retries once after 5 minutes and disables the webhook outright after
+        # repeated failures, so a signature-format mismatch, a cold start, or a parse fault must
+        # never reach them as an error. The event row above records what actually happened.
+        return {"ok": True, "received": True, "result": ev["result"]}
     ev = {"id": new_id(), "source": source, "received_at": now_iso(), "body": body, "processed": False, "result": ""}
     try:
         ev["result"] = await _process_webhook(source, body)
