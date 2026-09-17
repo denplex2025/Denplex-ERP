@@ -43,11 +43,19 @@ export default function LineItemDoc({
   const aiFileRef = useRef(null);
   const aiPhotoRef = useRef(null);
 
+  const [company, setCompany] = useState({});
+
   const load = async () => {
     const r = await api.get(endpoint); setItems(r.data);
     const p = await api.get(partyEndpoint); setParties(p.data);
   };
   useEffect(() => { load(); }, []);
+  useEffect(() => {
+    // Company name for the WhatsApp message. Silent: a failure here must not block the page.
+    api.get("/settings/integrations", { silent: true })
+      .then(r => setCompany(r.data || {}))
+      .catch(() => {});
+  }, []);
 
   const openNew = () => {
     if (createTo) { navigate(createTo); return; }
@@ -146,23 +154,67 @@ export default function LineItemDoc({
     try { await api.delete(`${endpoint}/${row.id}`); toast.success("Deleted"); load(); } catch (e) { toast.error("Failed"); }
   };
 
-  const sendWhatsApp = (row) => {
-    const party = parties.find(p => p.id === row[`${partyKey}_id`]);
-    if (!party?.phone) { toast.error("No phone number on file for this party"); return; }
-    const msg = encodeURIComponent(`Hi ${party.name},\n\nPlease find ${title.replace(/s$/, '')} ${row.code} attached.\nTotal: ₹${row.total}\n\n— Precision ERP`);
-    window.open(`https://wa.me/${String(party.phone).replace(/\D/g,'')}?text=${msg}`, "_blank");
+  // wa.me needs full international format with no "+". A bare 10-digit Indian mobile silently
+  // resolves to the wrong chat (or nothing), so normalise before building the link.
+  const waPhone = (raw) => {
+    const d = String(raw || "").replace(/\D/g, "");
+    if (!d) return "";
+    if (d.length === 10) return "91" + d;                       // 9876543210
+    if (d.length === 11 && d.startsWith("0")) return "91" + d.slice(1);   // 09876543210
+    if (d.length === 12 && d.startsWith("91")) return d;        // 919876543210
+    if (d.length === 13 && d.startsWith("091")) return d.slice(1);
+    return d;                                                   // already international
   };
 
-  const sendTwilioWA = async (row) => {
-    const party = parties.find(p => p.id === row[`${partyKey}_id`]);
-    if (!party?.phone) { toast.error("No phone on file"); return; }
-    const portalLink = row.po_ref ? `${window.location.origin}/portal?ref=${row.po_ref}` : `${window.location.origin}/portal`;
-    const body = `Hi ${party.name}, your ${title.replace(/s$/, '')} ${row.code} is ready. Total ₹${row.total}.\nTrack: ${portalLink}`;
-    try {
-      await api.post("/whatsapp/send", { to_phone: party.phone, body });
-      toast.success("WhatsApp queued via Twilio");
-    } catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
+  // Imported records carry only the party NAME - the Vyapar importer always writes
+  // customer_id/supplier_id as "". Matching on id alone made every imported row report
+  // "no phone on file". Fall back to an exact name match, same fix as the party statement.
+  const partyFor = (row) => {
+    const id = row[`${partyKey}_id`];
+    const byId = id && parties.find(p => p.id === id);
+    if (byId) return byId;
+    const nm = String(row[partyNameField] || "").trim().toLowerCase();
+    if (!nm) return null;
+    return parties.find(p => String(p.name || "").trim().toLowerCase() === nm) || null;
   };
+
+  const sendWhatsApp = (row) => {
+    const docLabel = title.replace(/s$/, "");
+    const party = partyFor(row);
+    if (!party) {
+      toast.error(`"${row[partyNameField] || "This party"}" isn't in the ${partyField} list yet — add them with a phone number first`);
+      return;
+    }
+    const phone = waPhone(party.phone);
+    if (!phone) { toast.error(`No phone number on file for ${party.name}`); return; }
+
+    const all = row.lines || [];
+    const shown = all.slice(0, 15).map((l, i) => {
+      const qty = `${l.qty ?? ""} ${l.unit || "Nos"}`.trim();
+      const rate = Number(l.rate) ? ` @ ${inr(l.rate)}` : "";   // inr() already prefixes the ₹
+      return `${i + 1}. ${l.description || l.item_code || "Item"} — ${qty}${rate}`;
+    });
+    const msg = [
+      company.company_name || "Denplex Engineering Company",
+      `${docLabel} ${row.code} · ${fmtDate(row.date)}`,
+      "",
+      ...(shown.length ? shown : ["(details in the attached document)"]),
+      ...(all.length > 15 ? [`…and ${all.length - 15} more item(s)`] : []),
+      "",
+      `Total${Number(row.gst_total) ? " incl. GST" : ""}: ${inr(row.total)}`,
+      ...(row.delivery_date ? [`Delivery by: ${fmtDate(row.delivery_date)}`] : []),
+      ...(row.notes ? ["", String(row.notes)] : []),
+    ].join("\n");
+
+    // Opens whichever WhatsApp is installed (personal or business) with the chat and the
+    // message pre-filled - the send is still a deliberate human action.
+    window.open(`https://wa.me/${phone}?text=${encodeURIComponent(msg)}`, "_blank");
+  };
+
+  // The second "WhatsApp via Twilio" button that used to sit here has been removed. Twilio was
+  // dropped in favour of AiSensy, so /whatsapp/send had no working provider behind it and the
+  // button failed every time it was pressed. Two near-identical green icons, one of them always
+  // broken, was worse than one that works.
 
   const downloadPdf = async (row) => {
     try {
@@ -240,8 +292,7 @@ export default function LineItemDoc({
                       <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => previewPdf(r)} title="Preview PDF" data-testid={`row-preview-${r.id}`}><Eye className="h-4 w-4 text-slate-700" /></Button>
                       <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => downloadPdf(r)} title="Download PDF" data-testid={`row-pdf-${r.id}`}><FileDown className="h-4 w-4 text-slate-700" /></Button>
                       <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => emailDoc(r)} title="Email via your mailbox" data-testid={`row-email-${r.id}`}><Mail className="h-4 w-4 text-red-600" /></Button>
-                      <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => sendWhatsApp(r)} title="WhatsApp web"><MessageCircle className="h-4 w-4 text-emerald-600" /></Button>
-                      <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => sendTwilioWA(r)} title="WhatsApp via Twilio" data-testid={`row-twilio-${r.id}`}><MessageCircle className="h-4 w-4 text-emerald-800" strokeWidth={2.5} /></Button>
+                      <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => sendWhatsApp(r)} title={`Send on WhatsApp — opens the chat with ${partyField.toLowerCase()} and the details pre-filled`} data-testid={`row-whatsapp-${r.id}`}><MessageCircle className="h-4 w-4 text-emerald-600" /></Button>
                       <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => openEdit(r)} data-testid={`row-edit-${r.id}`}><Edit className="h-4 w-4" /></Button>
                       <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => del(r)} data-testid={`row-delete-${r.id}`}><Trash2 className="h-4 w-4 text-red-600" /></Button>
                     </Td>
