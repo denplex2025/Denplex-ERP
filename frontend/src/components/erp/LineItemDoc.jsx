@@ -242,8 +242,12 @@ export default function LineItemDoc({
   };
 
   const emailDoc = async (row) => {
-    const party = parties.find(p => p.id === row[`${partyKey}_id`]);
-    const toEmail = party?.email; if (!toEmail) { toast.error("Customer email missing"); return; }
+    // Same id-vs-name problem the WhatsApp button had: imported records carry only the party
+    // name, so matching on id alone reported "email missing" on every one of them.
+    const party = partyFor(row);
+    if (!party) { toast.error(`"${row[partyNameField] || "This party"}" isn't in the ${partyField} list yet — add them first`); return; }
+    const toEmail = party.email;
+    if (!toEmail) { toast.error(`No email on file for ${party.name}`); return; }
     try {
       const r = await api.get(`${endpoint}/${row.id}/pdf`, { responseType: "blob" });
       const reader = new FileReader();
