@@ -8876,21 +8876,29 @@ class VyaparImportIn(BaseModel):
 #                                405-dangling-allocation orphan bug fixed on 29-Aug
 #   eway_* / irn / ack_* / signed_qr / einvoice_*  - filed with the government, must be retained
 #   po_id and GRN references   - procurement linkage that exists only in the ERP
-#   customer_id / supplier_id  - the importer always writes "", so overwriting would wipe any
-#                                party linking done on the ERP side
 #   created_at, source, vyapar_id, and any ERP workflow status
 # `code` IS owned by Vyapar: a draft that gets raised legitimately changes DRAFT-4516 -> 2627/067.
+# customer_id / supplier_id / party_id ARE owned as of 2026-09-22, now that the importer resolves
+# real ids from the party name instead of writing "". Listing them here means a re-import
+# backfills every record imported before that change - no separate backfill endpoint needed.
+# They are also in VYAPAR_NEVER_BLANK below, so an unresolved (blank) id is never written over a
+# good one.
 VYAPAR_OWNED_DOC_FIELDS = {
     "code", "date", "due_date", "lines", "subtotal", "total", "round_off", "notes",
     "place_of_supply", "is_interstate", "po_date", "po_number", "purchaser_name",
     "payment_mode", "ship_to_address", "cgst", "sgst", "igst", "gst_total",
     "tds", "tds_rate", "tds_section", "status", "outstanding", "is_raised",
-    "customer_name", "supplier_name", "vyapar_txn_type",
+    "customer_name", "supplier_name", "customer_id", "supplier_id", "vyapar_txn_type",
 }
 VYAPAR_OWNED_PAYMENT_FIELDS = {
     "code", "date", "amount", "allocated_amount", "payment_type", "ref_no",
-    "allocations", "notes", "party_name", "status",
+    "allocations", "notes", "party_name", "party_id", "status",
 }
+# Fields that must never be overwritten with an empty value. A party the importer couldn't resolve
+# yields "", and blanking an id that is already correct would resurrect exactly the bug this is
+# meant to kill. Blank values for these go to $setOnInsert instead, so new records still get the
+# field and existing ones keep whatever they have.
+VYAPAR_NEVER_BLANK = {"customer_id", "supplier_id", "party_id"}
 VYAPAR_OWNED_EXPENSE_FIELDS = {
     "code", "date", "amount", "paid_amount", "payment_type", "ref_no", "notes",
     "status", "category_id", "category_name",
@@ -8936,8 +8944,15 @@ def _vy_upsert_body(doc: dict, owned: set, update_existing: bool) -> dict:
     never appear in both operators — Mongo rejects that as a conflict — so the split is exact."""
     if not update_existing:
         return {"$setOnInsert": doc}
-    own = {k: v for k, v in doc.items() if k in owned}
-    init = {k: v for k, v in doc.items() if k not in owned}
+    own, init = {}, {}
+    for k, v in doc.items():
+        # A blank id never goes into $set - see VYAPAR_NEVER_BLANK. It falls through to
+        # $setOnInsert instead, so a new record still gets the field while an existing one
+        # keeps the id it already has.
+        if k in owned and not (k in VYAPAR_NEVER_BLANK and not v):
+            own[k] = v
+        else:
+            init[k] = v
     body: Dict[str, Any] = {}
     if own:
         body["$set"] = own
@@ -8965,6 +8980,19 @@ async def vyapar_inspect(file: UploadFile = File(...), user=Depends(require_role
         "path": str(path), "kind": info.get("kind"), "created_at": now_iso(),
     })
     return info
+
+async def _vy_breathe(n: int, every: int = 200) -> None:
+    """Hand control back to the event loop every `every` rows.
+
+    _do_import_sqlite is `async def` but its row loops contain no awaits at all now that existing
+    documents are preloaded, so a 4,400-row pass used to run start-to-finish without ever
+    yielding. FastAPI has one event loop, so for the duration NOTHING else was served - during the
+    9-Sep import even a static /docs page took 6.3 seconds. asyncio.sleep(0) yields once so other
+    requests can interleave; the import gets marginally slower, the rest of the ERP stays usable.
+    """
+    if n and n % every == 0:
+        await asyncio.sleep(0)
+
 
 async def _flush_bulk(collection, ops: List["UpdateOne"]) -> None:
     """Flush a batch of upsert ops in one round-trip instead of one await per row — this is the
@@ -9117,6 +9145,29 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
         if not opts.dry_run:
             await _flush_bulk(db.customers, cust_ops)
             await _flush_bulk(db.suppliers, supp_ops)
+
+    # --- Party name -> ERP id, so documents can carry a REAL customer_id / supplier_id ----------
+    # The importer only ever knew the party NAME (from kb_names), so it wrote customer_id and
+    # supplier_id as "" on every document and payment. Everything downstream that matches on id
+    # then silently found nothing. That one assumption has broken four separate features:
+    # the party statement, the WhatsApp button, the Email button, and the dashboard's
+    # "receivable from N parties" count (always 0). Patching each call site was not working -
+    # every new feature hit it again - so resolve the id here, once, at the source.
+    # Read AFTER the flush above so newly-created parties are included, and keyed on the same
+    # lowercased/trimmed name the upsert used.
+    cust_id_by_name: Dict[str, str] = {}
+    supp_id_by_name: Dict[str, str] = {}
+    for _coll, _target in ((db.customers, cust_id_by_name), (db.suppliers, supp_id_by_name)):
+        async for _p in _coll.find({}, {"_id": 0, "id": 1, "name": 1}):
+            _n = str(_p.get("name") or "").strip().lower()
+            if _n and _p.get("id"):
+                _target.setdefault(_n, _p["id"])
+
+    def _party_id_for(kind: str, name: str) -> str:
+        """'' when the party isn't on file - never guess. _vy_upsert_body keeps a blank out of
+        $set, so an unresolved id can never blank one that is already correct."""
+        return (cust_id_by_name if kind == "customer" else supp_id_by_name).get(
+            str(name or "").strip().lower(), "")
 
     # Build name_id -> party_name map for txn rows
     name_lookup: Dict[int, str] = {}
@@ -9326,7 +9377,10 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
             })
 
     cur.execute("SELECT * FROM kb_transactions")
+    _row_n = 0
     for r in cur.fetchall():
+        _row_n += 1
+        await _vy_breathe(_row_n)
         t = int(r["txn_type"]) if r["txn_type"] is not None else 0
         if t in (3, 4, 7):
             continue                                   # payments + expenses are handled in their own passes
@@ -9416,14 +9470,14 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
                 doc["tds_rate"] = tds_info["rate"]
                 doc["tds_section"] = tds_info["name"]
         if party_kind == "customer":
-            doc["customer_id"] = ""
+            doc["customer_id"] = _party_id_for("customer", party_name)
             doc["customer_name"] = party_name
             doc["cgst"] = cgst; doc["sgst"] = sgst; doc["igst"] = igst
             doc["gst_total"] = tax_total
             doc["status"] = "paid" if cur_bal <= 0.01 else "sent"
             doc["outstanding"] = round(max(cur_bal, 0.0), 2)  # Vyapar's own live balance = ground truth
         else:
-            doc["supplier_id"] = ""
+            doc["supplier_id"] = _party_id_for("supplier", party_name)
             doc["supplier_name"] = party_name
             # BUG FIX (2026-07-23): this branch used to omit cgst/sgst/igst entirely — only the
             # customer/invoice branch above wrote them, even though `cgst`/`sgst`/`igst` were computed
@@ -9499,7 +9553,10 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
     payin_ops: List[UpdateOne] = []
     payout_ops: List[UpdateOne] = []
     cur.execute("SELECT * FROM kb_transactions WHERE txn_type IN (3,4)")
+    _pay_n = 0
     for r in cur.fetchall():
+        _pay_n += 1
+        await _vy_breathe(_pay_n)
         t = int(r["txn_type"]); is_in = (t == 3)
         if is_in and not opts.sales: continue
         if (not is_in) and not opts.purchases: continue
@@ -9515,7 +9572,9 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
                     inv_open[doc_txn][2] -= a
         allocated = round(sum(x["amount"] for x in allocs), 2)
         code = (f"PMT-IN-VY-{r['txn_id']}" if is_in else f"PMT-OUT-VY-{r['txn_id']}")
-        pdoc = {"id": new_id(), "code": code, "party_id": "", "party_name": party,
+        pdoc = {"id": new_id(), "code": code,
+                "party_id": _party_id_for("customer" if is_in else "supplier", party),
+                "party_name": party,
                 "date": str(r["txn_date"] or "")[:10] or now_iso()[:10], "amount": round(amt, 2),
                 "allocated_amount": allocated, "payment_type": _map_ptype_payment(r["txn_payment_type_id"]),
                 "ref_no": (r["txn_ref_number_char"] or "").strip(), "bank_name": "", "allocations": allocs,
@@ -9539,7 +9598,8 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
     for cp in cash_on_doc:
         pdoc = {"id": new_id(),
                 "code": ("PMT-IN-VYCASH-" if cp["is_in"] else "PMT-OUT-VYCASH-") + str(cp["txn_id"]),
-                "party_id": "", "party_name": cp["party"], "date": cp["date"], "amount": cp["amount"],
+                "party_id": _party_id_for("customer" if cp["is_in"] else "supplier", cp["party"]),
+                "party_name": cp["party"], "date": cp["date"], "amount": cp["amount"],
                 "allocated_amount": cp["amount"], "payment_type": _map_ptype_payment(cp["ptype_id"]),
                 "ref_no": "", "bank_name": "",
                 "allocations": [{"document_id": cp["doc_id"], "document_code": cp["doc_code"],
@@ -9585,7 +9645,10 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
             pass
         exp_ops: List[UpdateOne] = []
         cur.execute("SELECT * FROM kb_transactions WHERE txn_type = 7")
+        _exp_n = 0
         for r in cur.fetchall():
+            _exp_n += 1
+            await _vy_breathe(_exp_n)
             e_cash = float(r["txn_cash_amount"] or 0); e_bal = float(r["txn_balance_amount"] or 0)
             cat_id = int(r["txn_category_id"]) if r["txn_category_id"] is not None else -1
             cat = cat_map.get(cat_id, {"id": "", "name": "Other"})
@@ -9620,6 +9683,11 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
             derived_open[v[0]][v[1]] = derived_open[v[0]].get(v[1], 0.0) + v[2]
     if opts.parties:
         try:
+            # Batched. This used to issue one await db.<coll>.update_one() per party per side -
+            # with 423 parties that is up to ~850 sequential round-trips to Atlas, and it was a
+            # large part of why a full import took over ten minutes.
+            open_cust_ops: List[UpdateOne] = []
+            open_supp_ops: List[UpdateOne] = []
             cur.execute('SELECT full_name, amount FROM "kb_names" WHERE name_type = 1')
             for r in cur.fetchall():
                 nm = (r["full_name"] or "").strip()
@@ -9632,21 +9700,24 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
                 cust_diff = round(max(vy, 0.0) - derived_open["customer"].get(nm, 0.0), 2)
                 if abs(cust_diff) > 0.01:
                     if not opts.dry_run:
-                        await db.customers.update_one(
+                        open_cust_ops.append(UpdateOne(
                             {"name": nm},
                             {"$set": {"opening_balance": cust_diff, "vyapar_balance": vy},
                              "$setOnInsert": {"id": new_id(), "source": "vyapar", "created_at": now_iso()}},
-                            upsert=True)
+                            upsert=True))
                     res["opening_balances"] += 1
                 supp_diff = round(max(-vy, 0.0) - derived_open["supplier"].get(nm, 0.0), 2)
                 if abs(supp_diff) > 0.01:
                     if not opts.dry_run:
-                        await db.suppliers.update_one(
+                        open_supp_ops.append(UpdateOne(
                             {"name": nm},
                             {"$set": {"opening_balance": supp_diff, "vyapar_balance": vy},
                              "$setOnInsert": {"id": new_id(), "source": "vyapar", "created_at": now_iso()}},
-                            upsert=True)
+                            upsert=True))
                     res["opening_balances"] += 1
+            if not opts.dry_run:
+                await _flush_bulk(db.customers, open_cust_ops)
+                await _flush_bulk(db.suppliers, open_supp_ops)
         except Exception:
             pass
 
@@ -13252,7 +13323,10 @@ _INDEX_PLAN = {
     "registers":         [["id"], ["department"]],
     "iso_documents":     [["id"], ["department"], ["status"]],
     "users":             [["id"], ["email"]],
-    "audit_logs":        [["at"]],
+    # GET /audit-logs sorts by created_at, but this was indexed on "at" - a field the collection
+    # doesn't have - so every call was a full scan plus an in-memory sort. It is why that endpoint
+    # timed out on 2026-09-22.
+    "audit_logs":        [["created_at"], ["action"]],
     "recycle_bin":       [["id"], ["deleted_at"]],
     "fin_accounts":      [["id"]],
     "instruments":       [["id"], ["due_date"]],
