@@ -1089,12 +1089,41 @@ function VyaparImportPanel() {
     } finally { setBusy(false); e.target.value = ""; }
   };
 
+  // Remembered across reloads: a full import with updates on can outlast the poll below, and the
+  // job id used to be thrown away when the poll gave up - leaving a finished import whose result
+  // was unreachable. It happened on 2026-09-22.
+  const [lastJobId, setLastJobId] = useState(() => {
+    try { return localStorage.getItem("vyapar_last_job") || ""; } catch { return ""; }
+  });
+
+  const checkLastJob = async (jid) => {
+    const id = jid || lastJobId;
+    if (!id) { toast.error("No recent import to check"); return; }
+    setBusy(true); setProgress("Fetching import result…");
+    try {
+      const j = await api.get(`/integrations/vyapar/import/jobs/${id}`);
+      if (j.data.status === "running") {
+        setProgress("Still running on the server. Leave it a few minutes and check again.");
+      } else if (j.data.status === "done") {
+        setResults(j.data.result); setProgress("");
+        toast.success(`Imported: ${j.data.result?.summary || "done"}`);
+      } else {
+        setProgress(""); toast.error(j.data.error || "Import failed");
+      }
+    } catch (e) { toast.error("Couldn't find that import job"); setProgress(""); }
+    setBusy(false);
+  };
+
   const runImport = async () => {
     if (!analysis?.token) { toast.error("Upload a file first"); return; }
     setBusy(true); setResults(null); setProgress("Starting import…");
     try {
       const r = await api.post("/integrations/vyapar/import", { token: analysis.token, ...opts });
       const jobId = r.data.job_id;
+      if (jobId) {
+        setLastJobId(jobId);
+        try { localStorage.setItem("vyapar_last_job", jobId); } catch {}
+      }
       if (!jobId) { setResults(r.data); toast.success(`Imported: ${r.data.summary || "done"}`); setBusy(false); return; }
       // Large imports (thousands of transactions) run in the background so the
       // request never gets killed by a platform timeout — poll for completion.
@@ -1104,9 +1133,14 @@ function VyaparImportPanel() {
         try {
           const j = await api.get(`/integrations/vyapar/import/jobs/${jobId}`, { silent: true });
           if (j.data.status === "running") {
-            setProgress(`Importing… (${tries * 3}s elapsed — large backups can take a few minutes)`);
-            if (tries < 200) setTimeout(poll, 3000);
-            else { toast.error("Import is taking unusually long — check back or re-open Settings."); setBusy(false); }
+            setProgress(`Importing… (${tries * 3}s elapsed — large backups can take several minutes)`);
+            if (tries < 400) setTimeout(poll, 3000);
+            else {
+              // The job keeps running on the server regardless; only this browser gave up.
+              setProgress("Still running on the server. The import is NOT lost — wait a few minutes, then press \"Check last import\". Do not start it again.");
+              toast.message("Import is still running on the server — use \"Check last import\" shortly.");
+              setBusy(false);
+            }
           } else if (j.data.status === "done") {
             setResults(j.data.result); setProgress(""); setBusy(false);
             toast.success(`Imported: ${j.data.result?.summary || "done"}`);
@@ -1193,6 +1227,11 @@ function VyaparImportPanel() {
                   <Button onClick={() => runLinkFix(false)} disabled={busy} variant="outline" className="rounded-sm" data-testid="run-relink">
                     {busy ? "Working…" : "Preview payment links"}
                   </Button>
+                  {lastJobId && (
+                    <Button onClick={() => checkLastJob()} disabled={busy} variant="outline" className="rounded-sm" data-testid="check-last-import">
+                      {busy ? "Working…" : "Check last import"}
+                    </Button>
+                  )}
                 </div>
                 {progress && <div className="text-xs text-slate-500" data-testid="vyapar-progress">{progress}</div>}
               </>
