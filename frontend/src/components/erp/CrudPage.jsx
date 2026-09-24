@@ -8,6 +8,7 @@ import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
 import { PageHeader, Card, Empty, Th, Td, fmtDate } from "@/components/erp/Primitives";
+import { waPhone } from "@/lib/whatsapp";
 import { Plus, Edit, Trash2, Upload, Sparkles, MessageCircle } from "lucide-react";
 import { toast } from "sonner";
 
@@ -114,8 +115,8 @@ export function CrudPage({
                   <tr key={row.id} className="hover:bg-slate-50">
                     {columns.map(c => <Td key={c.key}>{c.render ? c.render(row) : (row[c.key] ?? "—")}</Td>)}
                     <Td className="text-right whitespace-nowrap">
-                      {whatsappField && row[whatsappField] && (
-                        <a href={`https://wa.me/${String(row[whatsappField]).replace(/\D/g,'')}`} target="_blank" rel="noreferrer">
+                      {whatsappField && waPhone(row[whatsappField]) && (
+                        <a href={`https://wa.me/${waPhone(row[whatsappField])}`} target="_blank" rel="noreferrer">
                           <Button size="icon" variant="ghost" className="rounded-sm h-8 w-8" data-testid={`row-whatsapp-${row.id}`}>
                             <MessageCircle className="h-4 w-4 text-emerald-600" />
                           </Button>

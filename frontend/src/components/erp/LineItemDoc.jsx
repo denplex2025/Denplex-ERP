@@ -8,6 +8,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { PageHeader, Card, Th, Td, Empty, inr, fmtDate } from "@/components/erp/Primitives";
+import { openWhatsAppForDoc } from "@/lib/whatsapp";
 import { StatusBadge } from "@/components/erp/CrudPage";
 import { Plus, Edit, Trash2, X, MessageCircle, FileDown, Mail, Eye, Download as DLIcon, Sparkles, Loader2 } from "lucide-react";
 import { toast } from "sonner";
@@ -154,61 +155,20 @@ export default function LineItemDoc({
     try { await api.delete(`${endpoint}/${row.id}`); toast.success("Deleted"); load(); } catch (e) { toast.error("Failed"); }
   };
 
-  // wa.me needs full international format with no "+". A bare 10-digit Indian mobile silently
-  // resolves to the wrong chat (or nothing), so normalise before building the link.
-  const waPhone = (raw) => {
-    const d = String(raw || "").replace(/\D/g, "");
-    if (!d) return "";
-    if (d.length === 10) return "91" + d;                       // 9876543210
-    if (d.length === 11 && d.startsWith("0")) return "91" + d.slice(1);   // 09876543210
-    if (d.length === 12 && d.startsWith("91")) return d;        // 919876543210
-    if (d.length === 13 && d.startsWith("091")) return d.slice(1);
-    return d;                                                   // already international
-  };
-
-  // Imported records carry only the party NAME - the Vyapar importer always writes
-  // customer_id/supplier_id as "". Matching on id alone made every imported row report
-  // "no phone on file". Fall back to an exact name match, same fix as the party statement.
-  const partyFor = (row) => {
-    const id = row[`${partyKey}_id`];
-    const byId = id && parties.find(p => p.id === id);
-    if (byId) return byId;
-    const nm = String(row[partyNameField] || "").trim().toLowerCase();
-    if (!nm) return null;
-    return parties.find(p => String(p.name || "").trim().toLowerCase() === nm) || null;
-  };
-
+  // Phone normalisation, party lookup and message building all live in lib/whatsapp.js now -
+  // they used to be duplicated across five files, and fixing only this one on 2026-09-17 left
+  // Sale Invoices still sending the old "please find attached" message with an unnormalised
+  // number. See that file for the detail.
   const sendWhatsApp = (row) => {
-    const docLabel = title.replace(/s$/, "");
-    const party = partyFor(row);
-    if (!party) {
-      toast.error(`"${row[partyNameField] || "This party"}" isn't in the ${partyField} list yet — add them with a phone number first`);
-      return;
-    }
-    const phone = waPhone(party.phone);
-    if (!phone) { toast.error(`No phone number on file for ${party.name}`); return; }
-
-    const all = row.lines || [];
-    const shown = all.slice(0, 15).map((l, i) => {
-      const qty = `${l.qty ?? ""} ${l.unit || "Nos"}`.trim();
-      const rate = Number(l.rate) ? ` @ ${inr(l.rate)}` : "";   // inr() already prefixes the ₹
-      return `${i + 1}. ${l.description || l.item_code || "Item"} — ${qty}${rate}`;
+    const r = openWhatsAppForDoc({
+      parties, row,
+      idField: `${partyKey}_id`,
+      nameField: partyNameField,
+      companyName: company.company_name,
+      docLabel: title.replace(/s$/, ""),
+      partyLabel: partyField,
     });
-    const msg = [
-      company.company_name || "Denplex Engineering Company",
-      `${docLabel} ${row.code} · ${fmtDate(row.date)}`,
-      "",
-      ...(shown.length ? shown : ["(details in the attached document)"]),
-      ...(all.length > 15 ? [`…and ${all.length - 15} more item(s)`] : []),
-      "",
-      `Total${Number(row.gst_total) ? " incl. GST" : ""}: ${inr(row.total)}`,
-      ...(row.delivery_date ? [`Delivery by: ${fmtDate(row.delivery_date)}`] : []),
-      ...(row.notes ? ["", String(row.notes)] : []),
-    ].join("\n");
-
-    // Opens whichever WhatsApp is installed (personal or business) with the chat and the
-    // message pre-filled - the send is still a deliberate human action.
-    window.open(`https://wa.me/${phone}?text=${encodeURIComponent(msg)}`, "_blank");
+    if (!r.ok) toast.error(r.error);
   };
 
   // The second "WhatsApp via Twilio" button that used to sit here has been removed. Twilio was

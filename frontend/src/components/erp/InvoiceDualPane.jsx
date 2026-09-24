@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { PageHeader, Card, Th, Td, Empty, inr, fmtDate } from "@/components/erp/Primitives";
 import { StatusBadge } from "@/components/erp/CrudPage";
+import { openWhatsAppForDoc, findParty } from "@/lib/whatsapp";
 import { Plus, Search, Eye, FileDown, Mail, MessageCircle, Edit, Trash2, Download as DLIcon } from "lucide-react";
 import { toast } from "sonner";
 
@@ -19,6 +20,7 @@ export function InvoiceDualPane({ testid, overline, title, subtitle, endpoint, p
   const navigate = useNavigate();
   const [items, setItems] = useState([]);
   const [parties, setParties] = useState([]);
+  const [company, setCompany] = useState({});
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("All");
@@ -37,6 +39,12 @@ export function InvoiceDualPane({ testid, overline, title, subtitle, endpoint, p
     finally { setLoading(false); }
   };
   useEffect(() => { load(); }, []);
+  // Company name for the WhatsApp message. Silent: a failure here must not block the page.
+  useEffect(() => {
+    api.get("/settings/integrations", { silent: true })
+      .then((r) => setCompany(r.data || {}))
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (!selectedId) { setDetail(null); return; }
@@ -90,23 +98,24 @@ export function InvoiceDualPane({ testid, overline, title, subtitle, endpoint, p
     setPreviewUrl(""); setPreviewOpen(false);
   };
 
-  const partyOf = (row) => parties.find((p) => p.id === row?.[`${partyKey}_id`]);
+  // Falls back to an exact name match when the id is empty — Vyapar-imported records carried
+  // customer_id/supplier_id as "" until the 2026-09-22 importer fix. See lib/whatsapp.js.
+  const partyOf = (row) => findParty(parties, row, { idField: `${partyKey}_id`, nameField: partyNameField });
   const sendWhatsApp = (row) => {
-    const p = partyOf(row);
-    if (!p?.phone) { toast.error("No phone number on file for this party"); return; }
-    const msg = encodeURIComponent(`Hi ${p.name},\n\nPlease find ${title.replace(/s$/, "")} ${row.code} attached.\nTotal: ₹${row.total}\n\n— Denplex Engineering Company`);
-    window.open(`https://wa.me/${String(p.phone).replace(/\D/g, "")}?text=${msg}`, "_blank");
+    const r = openWhatsAppForDoc({
+      parties, row,
+      idField: `${partyKey}_id`, nameField: partyNameField,
+      companyName: company.company_name,
+      docLabel: title.replace(/s$/, ""), partyLabel: partyField,
+    });
+    if (!r.ok) toast.error(r.error);
   };
-  const sendTwilioWA = async (row) => {
-    const p = partyOf(row);
-    if (!p?.phone) { toast.error("No phone on file"); return; }
-    const body = `Hi ${p.name}, your ${title.replace(/s$/, "")} ${row.code} is ready. Total ₹${row.total}.`;
-    try { await api.post("/whatsapp/send", { to_phone: p.phone, body }); toast.success("WhatsApp queued via Twilio"); }
-    catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
-  };
+  // The "WhatsApp via Twilio" button that used to sit here is gone: /whatsapp/send lost its
+  // provider when Twilio was dropped, so it failed on every press.
   const emailDoc = async (row) => {
     const p = partyOf(row);
-    if (!p?.email) { toast.error("Customer email missing"); return; }
+    if (!p) { toast.error(`"${row?.[partyNameField] || "This party"}" isn't in the ${partyField} list yet — add them first`); return; }
+    if (!p.email) { toast.error(`No email on file for ${p.name}`); return; }
     try {
       const r = await api.get(`${endpoint}/${row.id}/pdf`, { responseType: "blob" });
       const reader = new FileReader();
@@ -217,7 +226,6 @@ export function InvoiceDualPane({ testid, overline, title, subtitle, endpoint, p
                   <Button size="icon" variant="ghost" className="rounded-sm h-8 w-8" onClick={() => downloadPdf(selectedRow)} title="Download PDF" data-testid="inv-pdf"><FileDown className="h-4 w-4 text-slate-700" /></Button>
                   <Button size="icon" variant="ghost" className="rounded-sm h-8 w-8" onClick={() => emailDoc(selectedRow)} title="Email"><Mail className="h-4 w-4 text-red-600" /></Button>
                   <Button size="icon" variant="ghost" className="rounded-sm h-8 w-8" onClick={() => sendWhatsApp(selectedRow)} title="WhatsApp web"><MessageCircle className="h-4 w-4 text-emerald-600" /></Button>
-                  <Button size="icon" variant="ghost" className="rounded-sm h-8 w-8" onClick={() => sendTwilioWA(selectedRow)} title="WhatsApp via Twilio"><MessageCircle className="h-4 w-4 text-emerald-800" strokeWidth={2.5} /></Button>
                   {editTo && <Button size="icon" variant="ghost" className="rounded-sm h-8 w-8" onClick={() => navigate(editTo(selectedRow))} data-testid="inv-edit"><Edit className="h-4 w-4" /></Button>}
                   <Button size="icon" variant="ghost" className="rounded-sm h-8 w-8" onClick={() => del(selectedRow)} data-testid="inv-delete"><Trash2 className="h-4 w-4 text-red-600" /></Button>
                 </div>
