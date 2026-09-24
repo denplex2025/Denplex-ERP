@@ -14,6 +14,7 @@ import {
 import { useColumnWidths, ColResizeHandle } from "@/components/erp/ColumnResize";
 import FYFilter from "@/components/erp/FYFilter";
 import { currentFYLabel, currentFYRange } from "@/lib/fiscalYear";
+import { openWhatsAppForDoc, findParty } from "@/lib/whatsapp";
 import { Plus, Search, Eye, FileDown, Mail, MessageCircle, Edit, Trash2, Download as DLIcon, Printer, FileSpreadsheet, MapPin } from "lucide-react";
 import { toast } from "sonner";
 
@@ -36,6 +37,7 @@ export default function Invoices() {
   const [items, setItems] = useState([]);
   const [parties, setParties] = useState([]);
   const [settled, setSettled] = useState({});
+  const [company, setCompany] = useState({});
   const [loading, setLoading] = useState(true);
   // Default to the current Financial Year (not all-time since 2023) — Vyapar-imported history
   // otherwise dominates the totals. Users can still pick a different FY, "All Data", or edit the
@@ -63,6 +65,12 @@ export default function Invoices() {
     finally { setLoading(false); }
   };
   useEffect(() => { load(); }, []);
+  // Company name for the WhatsApp message. Silent: a failure here must not block the page.
+  useEffect(() => {
+    api.get("/settings/integrations", { silent: true })
+      .then((r) => setCompany(r.data || {}))
+      .catch(() => {});
+  }, []);
 
   const baseFiltered = useMemo(() => items.filter((inv) => {
     const d = (inv.date || "").slice(0, 10);
@@ -95,7 +103,10 @@ export default function Invoices() {
   const hasActiveFilters = filters.statuses.length > 0 || !!filters.code.value || !!filters.party.value
     || !!filters.date.value || !!filters.dueDate.value || filters.amount.value !== "" || filters.balance.value !== "";
 
-  const partyOf = (row) => parties.find((p) => p.id === row.customer_id);
+  // Matches on customer_id, falling back to an exact name match. Vyapar-imported invoices carried
+  // customer_id as "" until the 2026-09-22 importer fix, and older records only pick up a real id
+  // after a re-import - so the id alone can't be trusted.
+  const partyOf = (row) => findParty(parties, row, { idField: "customer_id", nameField: "customer_name" });
 
   const del = async (row) => {
     if (!window.confirm("Delete?")) return;
@@ -118,21 +129,20 @@ export default function Invoices() {
   };
   const closePreview = () => { if (previewUrl) window.URL.revokeObjectURL(previewUrl); setPreviewUrl(""); setPreviewOpen(false); };
   const sendWhatsApp = (row) => {
-    const p = partyOf(row);
-    if (!p?.phone) { toast.error("No phone number on file for this party"); return; }
-    const msg = encodeURIComponent(`Hi ${p.name},\n\nPlease find Sale Invoice ${row.code} attached.\nTotal: ₹${row.total}\n\n— Denplex Engineering Company`);
-    window.open(`https://wa.me/${String(p.phone).replace(/\D/g, "")}?text=${msg}`, "_blank");
+    const r = openWhatsAppForDoc({
+      parties, row,
+      idField: "customer_id", nameField: "customer_name",
+      companyName: company.company_name,
+      docLabel: "Sale Invoice", partyLabel: "Customer",
+    });
+    if (!r.ok) toast.error(r.error);
   };
-  const sendTwilioWA = async (row) => {
-    const p = partyOf(row);
-    if (!p?.phone) { toast.error("No phone on file"); return; }
-    const body = `Hi ${p.name}, your Sale Invoice ${row.code} is ready. Total ₹${row.total}.`;
-    try { await api.post("/whatsapp/send", { to_phone: p.phone, body }); toast.success("WhatsApp queued via Twilio"); }
-    catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
-  };
+  // The "WhatsApp via Twilio" button that used to sit here is gone: /whatsapp/send lost its
+  // provider when Twilio was dropped, so it failed on every press.
   const emailDoc = async (row) => {
     const p = partyOf(row);
-    if (!p?.email) { toast.error("Customer email missing"); return; }
+    if (!p) { toast.error(`"${row.customer_name || "This customer"}" isn't in the Customer list yet — add them first`); return; }
+    if (!p.email) { toast.error(`No email on file for ${p.name}`); return; }
     try {
       const r = await api.get(`/invoices/${row.id}/pdf`, { responseType: "blob" });
       const reader = new FileReader();
@@ -289,7 +299,6 @@ export default function Invoices() {
                         <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => downloadPdf(row)} title="Download PDF"><FileDown className="h-4 w-4 text-slate-700" /></Button>
                         <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => emailDoc(row)} title="Email"><Mail className="h-4 w-4 text-red-600" /></Button>
                         <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => sendWhatsApp(row)} title="WhatsApp web"><MessageCircle className="h-4 w-4 text-emerald-600" /></Button>
-                        <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => sendTwilioWA(row)} title="WhatsApp via Twilio"><MessageCircle className="h-4 w-4 text-emerald-800" strokeWidth={2.5} /></Button>
                         <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => navigate(`/app/invoices/${row.id}/edit`)} title="Edit"><Edit className="h-4 w-4" /></Button>
                         <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => del(row)} title="Delete"><Trash2 className="h-4 w-4 text-red-600" /></Button>
                       </Td>

@@ -13,6 +13,7 @@ import {
 import { useColumnWidths, ColResizeHandle } from "@/components/erp/ColumnResize";
 import FYFilter from "@/components/erp/FYFilter";
 import { currentFYLabel, currentFYRange } from "@/lib/fiscalYear";
+import { openWhatsAppForDoc, findParty } from "@/lib/whatsapp";
 import { Plus, Search, Eye, FileDown, Mail, MessageCircle, Trash2, Download as DLIcon, Printer, FileSpreadsheet } from "lucide-react";
 import { toast } from "sonner";
 
@@ -52,6 +53,7 @@ export default function PurchaseBills() {
   const [items, setItems] = useState([]);
   const [parties, setParties] = useState([]);
   const [settled, setSettled] = useState({});
+  const [company, setCompany] = useState({});
   const [loading, setLoading] = useState(true);
   // Default to the current Financial Year (not all-time since 2023) — see Invoices.jsx for the
   // same pattern on the sales side.
@@ -77,6 +79,12 @@ export default function PurchaseBills() {
     finally { setLoading(false); }
   };
   useEffect(() => { load(); }, []);
+  // Company name for the WhatsApp message. Silent: a failure here must not block the page.
+  useEffect(() => {
+    api.get("/settings/integrations", { silent: true })
+      .then((r) => setCompany(r.data || {}))
+      .catch(() => {});
+  }, []);
 
   const baseFiltered = useMemo(() => items.filter((b) => {
     const d = (b.date || "").slice(0, 10);
@@ -116,7 +124,9 @@ export default function PurchaseBills() {
   const hasActiveFilters = filters.statuses.length > 0 || !!filters.code.value || !!filters.party.value
     || !!filters.date.value || !!filters.dueDate.value || filters.amount.value !== "" || filters.balance.value !== "";
 
-  const partyOf = (row) => parties.find((p) => p.id === row.supplier_id);
+  // Matches on supplier_id, falling back to an exact name match — Vyapar-imported bills carried
+  // supplier_id as "" until the 2026-09-22 importer fix. See lib/whatsapp.js.
+  const partyOf = (row) => findParty(parties, row, { idField: "supplier_id", nameField: "supplier_name" });
 
   const del = async (row) => {
     if (!window.confirm("Delete?")) return;
@@ -139,14 +149,18 @@ export default function PurchaseBills() {
   };
   const closePreview = () => { if (previewUrl) window.URL.revokeObjectURL(previewUrl); setPreviewUrl(""); setPreviewOpen(false); };
   const sendWhatsApp = (row) => {
-    const p = partyOf(row);
-    if (!p?.phone) { toast.error("No phone number on file for this party"); return; }
-    const msg = encodeURIComponent(`Hi ${p.name},\n\nRe: Purchase Bill ${row.code}.\nTotal: ₹${row.total}\n\n— Denplex Engineering Company`);
-    window.open(`https://wa.me/${String(p.phone).replace(/\D/g, "")}?text=${msg}`, "_blank");
+    const r = openWhatsAppForDoc({
+      parties, row,
+      idField: "supplier_id", nameField: "supplier_name",
+      companyName: company.company_name,
+      docLabel: "Purchase Bill", partyLabel: "Supplier",
+    });
+    if (!r.ok) toast.error(r.error);
   };
   const emailDoc = async (row) => {
     const p = partyOf(row);
-    if (!p?.email) { toast.error("Supplier email missing"); return; }
+    if (!p) { toast.error(`"${row.supplier_name || "This supplier"}" isn't in the Supplier list yet — add them first`); return; }
+    if (!p.email) { toast.error(`No email on file for ${p.name}`); return; }
     try {
       const r = await api.get(`/vendor-bills/${row.id}/pdf`, { responseType: "blob" });
       const reader = new FileReader();
