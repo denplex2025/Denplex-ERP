@@ -8,6 +8,7 @@ import Login from "@/pages/Login";
 import ForgotPassword from "@/pages/ForgotPassword";
 import ResetPassword from "@/pages/ResetPassword";
 import Portal from "@/pages/Portal";
+import Privacy from "@/pages/Privacy";
 import AppLayout from "@/pages/AppLayout";
 import Dashboard from "@/pages/Dashboard";
 import Inventory from "@/pages/Inventory";
@@ -99,6 +100,9 @@ function App() {
             <Route path="/forgot-password" element={<ForgotPassword />} />
             <Route path="/reset-password" element={<ResetPassword />} />
             <Route path="/portal" element={<Portal />} />
+            {/* Public on purpose: Meta requires an anonymously-reachable privacy policy URL
+                before it will let the WhatsApp app publish. Do not move under <Protected>. */}
+            <Route path="/privacy" element={<Privacy />} />
             <Route path="/trial" element={<Trial />} />
             <Route path="/app" element={<Protected><AppLayout /></Protected>}>
               <Route index element={<Dashboard />} />
