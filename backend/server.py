@@ -4683,7 +4683,10 @@ async def get_meta_config(user=Depends(require_roles("admin", "manager"))):
     return {"enabled": src.get("enabled", True),
             "url": f"{WEBHOOK_BASE}/api/webhooks/meta/{src['secret']}",
             "verify_token": src["verify_token"],
-            "app_secret": src.get("app_secret", ""),
+            # Never echo the app secret back. Nothing needs to read it except the signature
+            # check, and a value that is only ever written can't leak through a screenshot,
+            # a browser cache, or an over-broad admin role later.
+            "app_secret_set": bool(src.get("app_secret")),
             "waba_id": src.get("waba_id", "")}
 
 
