@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Toaster } from "sonner";
 import {
   LayoutDashboard, Boxes, Layers, ClipboardList, FileText,
-  ShoppingCart, Receipt, Users, UserPlus, Truck, ShieldCheck,
+  ShoppingCart, Users, UserPlus, Truck, ShieldCheck,
   FileBox, Settings as SettingsIcon, LogOut, Menu, Calculator, UsersRound, Megaphone, Wrench, ScrollText,
   ArrowDownToLine, ArrowUpFromLine, Banknote, Undo2, Cog, CalendarRange, Search, Trash2, SlidersHorizontal, AlarmClock, Webhook, Library, Landmark, Wallet, Sparkles, BookOpen,
   ClipboardCheck, Gavel, PackageCheck, BarChart3, ChevronLeft, ChevronRight
@@ -14,6 +14,7 @@ import api from "@/lib/api";
 import GlobalSpinner from "@/components/erp/GlobalSpinner";
 import FloatingActions from "@/components/erp/FloatingActions";
 import Aria from "@/components/erp/Aria";
+import { ReceiptIcon, hydrateCurrency } from "@/lib/currency";
 
 function GlobalSearch() {
   const nav = useNavigate();
@@ -89,9 +90,9 @@ const NAV_GROUPS = [
       { to: "/app/docs/sale-orders", label: "Sale Orders", icon: FileText, testid: "nav-sale-orders" },
       { to: "/app/sale-orders/new", label: "New Sale Order", icon: FileText, testid: "nav-so-new", end: true },
       { to: "/app/docs/delivery-challans", label: "Delivery Challans", icon: Truck, testid: "nav-delivery-challans" },
-      { to: "/app/invoices", label: "Sale Invoices", icon: Receipt, testid: "nav-invoices" },
-      { to: "/app/invoices/new", label: "New Sale Invoice", icon: Receipt, testid: "nav-invoice-new", end: true },
-      { to: "/app/docs/credit-notes", label: "Credit Notes", icon: Receipt, testid: "nav-credit-notes" },
+      { to: "/app/invoices", label: "Sale Invoices", icon: ReceiptIcon, testid: "nav-invoices" },
+      { to: "/app/invoices/new", label: "New Sale Invoice", icon: ReceiptIcon, testid: "nav-invoice-new", end: true },
+      { to: "/app/docs/credit-notes", label: "Credit Notes", icon: ReceiptIcon, testid: "nav-credit-notes" },
       { to: "/app/sale-returns", label: "Sale Returns", icon: Undo2, testid: "nav-sale-returns" },
       { to: "/app/payments-in", label: "Payment-In", icon: ArrowDownToLine, testid: "nav-payments-in" },
     ],
@@ -143,8 +144,8 @@ const NAV_GROUPS = [
       { to: "/app/purchase-orders", label: "Purchase Order (PO) Management", icon: ShoppingCart, testid: "nav-purchase-orders" },
       { to: "/app/purchase-orders/new", label: "New Purchase Order", icon: ShoppingCart, testid: "nav-po-new", end: true },
       { to: "/app/procurement/goods-receipt", label: "Goods Receipt", icon: PackageCheck, testid: "nav-goods-receipt" },
-      { to: "/app/purchase-bills", label: "Invoice Automation & Payment", icon: Receipt, testid: "nav-vendor-bills" },
-      { to: "/app/purchase-bills/new", label: "New Purchase Bill", icon: Receipt, testid: "nav-pb-new", end: true },
+      { to: "/app/purchase-bills", label: "Invoice Automation & Payment", icon: ReceiptIcon, testid: "nav-vendor-bills" },
+      { to: "/app/purchase-bills/new", label: "New Purchase Bill", icon: ReceiptIcon, testid: "nav-pb-new", end: true },
       { to: "/app/payments-out", label: "Payment-Out", icon: ArrowUpFromLine, testid: "nav-payments-out" },
       { to: "/app/procurement/spend-analytics", label: "Inventory & Spend Analytics", icon: BarChart3, testid: "nav-spend-analytics" },
       { to: "/app/purchase-returns", label: "Purchase Returns", icon: Undo2, testid: "nav-purchase-returns" },
@@ -268,6 +269,10 @@ export default function AppLayout() {
     r.setProperty("--erp-gap", `${lerp(6, 16).toFixed(2)}px`);        // grid gaps
     r.setProperty("--erp-pad", `${lerp(12, 32).toFixed(2)}px`);       // page padding
     r.setProperty("--erp-avail", `${avail}px`);
+  }, []);
+
+  useEffect(() => {
+    api.get("/masters").then(r => hydrateCurrency(r.data)).catch(() => {});
   }, []);
 
   useEffect(() => {

@@ -10,11 +10,28 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { PageHeader, Card } from "@/components/erp/Primitives";
 import { Save, Copy, ShieldCheck, ShieldOff, Plus, Trash2, RefreshCw, Star, ExternalLink, Inbox, Upload, FileText, Eye, FileSpreadsheet, Database } from "lucide-react";
 import { toast } from "sonner";
+import { CURRENCIES, money, getCurrency, setCurrency } from "@/lib/currency";
 
 export default function Settings() {
   const [tab, setTab] = useState("company");
+  const [currency, setCur] = useState(() => getCurrency().code);
   const [s, setS] = useState({});
   const [twoFa, setTwoFa] = useState({ enabled: false });
+
+  // Applied locally first so every figure on screen updates immediately, then persisted. If the
+  // save fails the local change is rolled back rather than left looking saved.
+  const saveCurrency = async (code) => {
+    const prev = getCurrency().code;
+    setCurrency(code); setCur(code);
+    try {
+      const c = CURRENCIES.find(x => x.code === code);
+      await api.put("/masters/currency", { value: { code: c.code, symbol: c.symbol, locale: c.locale } });
+      toast.success(`Currency set to ${code}`);
+    } catch (e) {
+      setCurrency(prev); setCur(prev);
+      toast.error("Could not save the currency");
+    }
+  };
   const [setupOpen, setSetupOpen] = useState(false);
   const [setup, setSetup] = useState(null);
   const [code, setCode] = useState("");
@@ -116,6 +133,33 @@ export default function Settings() {
         </TabsList>
 
         <TabsContent value="company">
+          <Card className="p-6 mb-4">
+            <h3 className="font-display text-lg font-semibold mb-1">Currency</h3>
+            <p className="text-xs text-slate-500 mb-4">
+              Applies everywhere — screens, reports, exports and document PDFs. This changes how amounts are
+              <strong> displayed</strong>; it does not convert any stored value, so switch it only when the books
+              themselves are in that currency.
+            </p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-end">
+              <Fld label="Company Currency">
+                <select
+                  value={currency}
+                  onChange={e => saveCurrency(e.target.value)}
+                  className="w-full h-9 text-sm border border-slate-200 rounded-sm px-2 bg-white"
+                  data-testid="settings-currency"
+                >
+                  {CURRENCIES.map(c => (
+                    <option key={c.code} value={c.code}>{c.code} — {c.name} ({c.symbol})</option>
+                  ))}
+                </select>
+              </Fld>
+              <div className="text-sm text-slate-600">
+                <div className="text-[11px] uppercase tracking-wider text-slate-500 mb-1">Preview</div>
+                {/* Grouping matters as much as the symbol: en-IN gives 42,90,878 and en-US 4,290,878. */}
+                <div className="font-mono-tech text-base text-slate-900">{money(4290878.5, { decimals: 2 })}</div>
+              </div>
+            </div>
+          </Card>
           <Card className="p-6">
             <h3 className="font-display text-lg font-semibold mb-4">Business identity</h3>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
