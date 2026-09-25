@@ -62,6 +62,17 @@ export default function Webhooks() {
     catch (e) { toast.error("Failed"); }
   };
 
+  const createFromSuggestion = async (id) => {
+    try {
+      const r = await api.post(`/webhooks/events/${id}/create-po`);
+      toast.success(`Draft ${r.data.code} created`); load();
+    } catch (e) { toast.error(e?.response?.data?.detail || "Could not create the PO"); }
+  };
+  const dismissSuggestion = async (id) => {
+    try { await api.post(`/webhooks/events/${id}/dismiss`); load(); }
+    catch (e) { toast.error("Failed"); }
+  };
+
   const metaToggle = async () => {
     try { await api.post("/webhooks/meta/config", { enabled: !metaCfg.enabled }); toast.success("Updated"); load(); }
     catch (e) { toast.error("Failed"); }
@@ -111,6 +122,28 @@ export default function Webhooks() {
           Meta separates the two directions into different webhook fields, so a reply like "ok, 50 confirmed"
           cannot become a duplicate PO.
         </p>
+
+        <div className="text-[11px] rounded-sm border border-slate-200 bg-slate-50 p-2.5 space-y-1.5">
+          <div className="font-semibold text-slate-700">Which of your messages become orders</div>
+          <div><span className="inline-block w-[172px] font-mono-tech text-slate-700">PO: 50 nos MS plate 10mm</span>
+            <span className="text-emerald-700 font-medium">→ draft PO created</span></div>
+          <div><span className="inline-block w-[172px] font-mono-tech text-slate-700">50 nos MS plate 10mm</span>
+            <span className="text-amber-700 font-medium">→ suggestion below, one click to create</span></div>
+          <div><span className="inline-block w-[172px] font-mono-tech text-slate-700">50 nag mokli dejo</span>
+            <span className="text-amber-700 font-medium">→ suggestion below, one click to create</span></div>
+          <div><span className="inline-block w-[172px] font-mono-tech text-slate-700">ok / kem cho / call me</span>
+            <span className="text-slate-500">→ ignored, never sent to the AI</span></div>
+          <p className="text-slate-500 pt-1">
+            Start a message with <code>PO</code>, <code>PO:</code> or <code>#PO</code> to have it drafted without
+            asking. Anything else needs <strong>a number</strong> plus a unit or an asking word before it is even
+            looked at — English or Gujarati in English letters both work (<em>nag, jodi, peti, mokljo, joiye
+            chhe, aapjo, pahonchado</em>), as does Gujarati script. Ordinary chat on this number stays private.
+          </p>
+          <p className="text-slate-500">
+            The number is required: <em>"atla nos mokjo"</em> or <em>"aa mokli dejo"</em> have no quantity, so
+            there is no line to draft. Say how many, or start with <code>PO</code>.
+          </p>
+        </div>
 
         {!metaCfg?.app_secret_set && (
           <div className="flex gap-2 items-start p-2.5 rounded-sm bg-amber-50 border border-amber-200">
@@ -257,9 +290,35 @@ export default function Webhooks() {
                   <tr key={i} className="border-b border-slate-100 align-top">
                     <td className="p-2 whitespace-nowrap text-slate-500">{fmtDate(ev.received_at)}</td>
                     <td className="p-2 uppercase text-xs font-semibold">{ev.source}</td>
-                    <td className="p-2">{ev.processed
-                      ? <span className="text-emerald-700 inline-flex items-center gap-1"><CheckCircle2 className="w-3.5 h-3.5" /> {ev.result}</span>
-                      : <span className="text-amber-700 inline-flex items-center gap-1"><AlertTriangle className="w-3.5 h-3.5" /> {ev.result || "logged"}</span>}</td>
+                    <td className="p-2">
+                      {ev.processed
+                        ? <span className="text-emerald-700 inline-flex items-center gap-1"><CheckCircle2 className="w-3.5 h-3.5" /> {ev.result}</span>
+                        : <span className="text-amber-700 inline-flex items-center gap-1"><AlertTriangle className="w-3.5 h-3.5" /> {ev.result || "logged"}</span>}
+                      {/* A message that read as an order but carried no "PO" marker. Nothing was
+                          created — it waits here for one click, so forgetting the marker costs
+                          a click rather than the order. */}
+                      {ev.suggested_po && !ev.suggested_po.created && (
+                        <div className="mt-2 p-2 rounded-sm bg-amber-50 border border-amber-200 max-w-md">
+                          <div className="text-[11px] font-semibold text-amber-900 mb-1">
+                            Possible order — not created (no "PO" marker)
+                          </div>
+                          <ul className="text-[11px] text-slate-700 mb-2 space-y-0.5">
+                            {(ev.suggested_po.lines || []).slice(0, 6).map((l, j) => (
+                              <li key={j}>• {l.qty} {l.unit} — {l.description}</li>
+                            ))}
+                            {(ev.suggested_po.lines || []).length > 6 && (
+                              <li className="text-slate-500">…and {ev.suggested_po.lines.length - 6} more</li>
+                            )}
+                          </ul>
+                          <div className="flex gap-2">
+                            <Button size="sm" className="rounded-sm h-7 text-[11px] bg-red-600 hover:bg-red-700"
+                              onClick={() => createFromSuggestion(ev.id)}>Create PO</Button>
+                            <Button size="sm" variant="ghost" className="rounded-sm h-7 text-[11px] text-slate-500"
+                              onClick={() => dismissSuggestion(ev.id)}>Not an order</Button>
+                          </div>
+                        </div>
+                      )}
+                    </td>
                     <td className="p-2"><code className="text-[11px] text-slate-500 break-all">{JSON.stringify(ev.body).slice(0, 200)}</code></td>
                   </tr>
                 ))}
