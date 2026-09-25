@@ -4857,6 +4857,12 @@ async def _ai_parse_po_from_text(text: str) -> Optional[dict]:
         "Be strict about what counts. A question about an existing order, a payment or delivery "
         "status update, a request for a quotation, drawings, invoices or documents, and anything "
         "not being bought for the business are all is_po_request: false.\n\n"
+        "NEVER use a verb as an item description. \"mokli\", \"mokljo\", \"bhejo\", \"joiye\", "
+        "\"aapjo\", \"send\" are how the order is asked for, not what is being ordered. If a "
+        "quantity is given but the item itself is never named — \"aa 50 nag mokli dejo\" means "
+        "\"send 50 pieces of THIS\", referring to a photo or an earlier message you cannot see — "
+        "return an empty lines array rather than guessing a description. A line naming no real "
+        "item is worse than no line: someone has to notice it is wrong and delete it.\n\n"
         "Respond with ONLY strict JSON, no markdown fencing, no explanation, in exactly this shape:\n"
         '{"is_po_request": true or false, "supplier_name": string or null, '
         '"lines": [{"description": string, "qty": number, "unit": string, "rate": number or null}], '
