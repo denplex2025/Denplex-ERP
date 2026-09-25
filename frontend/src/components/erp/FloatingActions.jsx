@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Plus, X, Factory, FileText, PackagePlus, ClipboardCheck, Receipt } from "lucide-react";
+import { Plus, X, Factory, FileText, PackagePlus, ClipboardCheck } from "lucide-react";
+import { ReceiptIcon } from "@/lib/currency";
 import { useDraggable } from "@/lib/useDraggable";
 
 const ACTIONS = [
   { key: "wo",       label: "New Work Order",   icon: Factory,        to: "/app/work-orders",  color: "bg-blue-600 hover:bg-blue-700" },
   { key: "quote",    label: "New Quotation",    icon: FileText,       to: "/app/quotations",   color: "bg-purple-600 hover:bg-purple-700" },
-  { key: "invoice",  label: "New Invoice",      icon: Receipt,        to: "/app/invoices",     color: "bg-cyan-600 hover:bg-cyan-700" },
+  { key: "invoice",  label: "New Invoice",      icon: ReceiptIcon,        to: "/app/invoices",     color: "bg-cyan-600 hover:bg-cyan-700" },
   { key: "inv",      label: "Inventory",        icon: PackagePlus,    to: "/app/inventory",    color: "bg-emerald-600 hover:bg-emerald-700" },
   { key: "qc",       label: "QC Entry",         icon: ClipboardCheck, to: "/app/qc",           color: "bg-rose-600 hover:bg-rose-700" },
 ];

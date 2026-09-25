@@ -1,5 +1,6 @@
 // Reusable page primitives
 import { cn } from "@/lib/utils";
+import { money } from "@/lib/currency";
 
 export const PageHeader = ({ overline, title, subtitle, actions }) => (
   <div className="flex items-start justify-between gap-4 flex-wrap mb-6">
@@ -36,9 +37,11 @@ export const Td = ({ children, className }) => (
   <td className={cn("px-4 py-2.5 text-sm text-slate-700 border-b border-slate-100", className)}>{children}</td>
 );
 
+// Kept under the old name so the pages importing it do not all have to change at once, but the
+// symbol and grouping now come from the company currency setting rather than being hardcoded.
+// New code should import { money } from "@/lib/currency" directly.
 export function inr(n) {
-  if (n == null || isNaN(n)) return "₹0";
-  return "₹" + Number(n).toLocaleString("en-IN", { maximumFractionDigits: 2 });
+  return money(n);
 }
 
 export function fmtDate(s) {
