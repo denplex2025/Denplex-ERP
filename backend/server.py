@@ -4924,13 +4924,21 @@ async def _draft_po_from_text(text: str, phone: str, message_id: str) -> str:
 # WABA and receive webhooks DIRECTLY from Meta, free, while AiSensy keeps working. It also avoids
 # AiSensy's Rs 2,000 + GST per month webhook charge.
 #
-# The decisive advantage over the AiSensy route: Meta splits the two directions into two webhook
-# FIELDS, so direction is structural rather than guessed —
-#   "messages"       -> what the supplier sent US        (never becomes a PO)
-#   "message_echoes" -> what WE sent, including messages typed in the WhatsApp Business app on the
-#                       phone (coexistence). THIS is the one that becomes a draft PO.
+# The decisive advantage over the AiSensy route: Meta splits the two directions into separate
+# webhook FIELDS, so direction is structural rather than guessed —
+#   "messages"           -> what the supplier sent US    (never becomes a PO)
+#   "smb_message_echoes" -> what WE typed in the WhatsApp Business app on the phone. "SMB" is
+#                           Meta's label for coexistence (a number on the Business app AND the
+#                           Platform at once), which is exactly 7041065333. THIS is the field
+#                           that carries Neel's own outgoing orders.
+#   "message_echoes"     -> what WE sent through the Cloud API from some other app. Subscribed as
+#                           well: it costs nothing and covers a future ERP-sends-the-PO flow.
 # AiSensy could never tell us which `sender` values meant "agent-sent", which is what killed that
 # approach — a supplier replying "ok, 50 confirmed" would have been parsed into a duplicate PO.
+#
+# Both echo fields are accepted. Subscribing to only "message_echoes" would have looked correct
+# and delivered nothing, because a coexistence number's Business-app sends never use that field.
+META_ECHO_FIELDS = {"message_echoes", "smb_message_echoes"}
 
 def _meta_extract_text(m: dict) -> str:
     """Text out of a Meta message object. Covers plain text, captions on media, button/interactive
@@ -4965,8 +4973,11 @@ def _meta_extract_text(m: dict) -> str:
 def _meta_iter_messages(body: Any):
     """Yield (field, message, contact_wa_id) for every message in a Meta webhook payload.
 
-    Shape: {"entry":[{"changes":[{"field":"messages"|"message_echoes",
+    Shape: {"entry":[{"changes":[{"field":"messages"|"message_echoes"|"smb_message_echoes",
                                  "value":{"messages":[...], "contacts":[...]}}]}]}
+
+    Fields we subscribe to but don't parse here (smb_app_state_sync, history) carry no "messages"
+    array, so they yield nothing and are simply logged by receive_webhook.
     """
     for entry in ((body or {}).get("entry") or []):
         for change in (entry.get("changes") or []):
@@ -4981,11 +4992,11 @@ def _meta_iter_messages(body: Any):
 async def _process_meta_webhook(body: Any) -> str:
     """Turn a message WE sent into a DRAFT PurchaseOrder. Never auto-finalises one.
 
-    Only `message_echoes` is parsed. `messages` (the supplier's side) is logged and ignored —
-    that is what stops a reply becoming a duplicate PO."""
+    Only the echo fields (META_ECHO_FIELDS) are parsed. `messages` (the supplier's side) is logged
+    and ignored — that is what stops a reply becoming a duplicate PO."""
     results = []
     for field, m, wa_id in _meta_iter_messages(body):
-        if field != "message_echoes":
+        if field not in META_ECHO_FIELDS:
             results.append(f"skipped ({field}: inbound, not ours)")
             continue
         text = _meta_extract_text(m).strip()
@@ -4993,8 +5004,10 @@ async def _process_meta_webhook(body: Any) -> str:
             results.append(f"skipped (no text in {m.get('type') or 'message'})")
             continue
         message_id = str(m.get("id") or "")
-        # On an echo, `to` is the supplier. Fall back to the contact wa_id.
-        phone = str(m.get("to") or wa_id or "")
+        # On an echo, `to` is the supplier. Fall back to the contact wa_id. `from` is deliberately
+        # NOT a fallback: on an echo that is OUR own number, which would file every PO against
+        # Denplex itself.
+        phone = str(m.get("to") or (m.get("recipient_id") or "") or wa_id or "")
         if message_id:
             dup = await db.purchase_orders.find_one({"whatsapp_message_id": message_id},
                                                     {"_id": 0, "id": 1, "code": 1})
