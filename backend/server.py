@@ -2837,7 +2837,13 @@ async def _put_setting(key, value):
 
 MASTER_KEYS = {"doc_terms": "masters_doc_terms", "payment_terms": "masters_payment_terms",
                "prefixes": "masters_prefixes", "company_bank": "masters_company_bank",
-               "tds_sections": "masters_tds_sections", "doc_custom_fields": "masters_doc_custom_fields"}
+               "tds_sections": "masters_tds_sections", "doc_custom_fields": "masters_doc_custom_fields",
+               "currency": "masters_currency"}
+
+# Company currency. Stored per company rather than per browser so screens, PDFs and exports all
+# agree. `locale` matters as much as the symbol: en-IN groups 4290878 as 42,90,878 (lakh/crore)
+# while en-US gives 4,290,878, and an Indian invoice with Western grouping reads as foreign.
+DEFAULT_CURRENCY = {"code": "INR", "symbol": "\u20b9", "locale": "en-IN"}
 
 DEFAULT_DOC_CUSTOM_FIELDS = [
     {"name": "Transport Name", "enabled": True, "type": "text"},
@@ -2863,6 +2869,7 @@ async def get_masters(user=Depends(get_current_user)):
         "company_bank": await _get_setting(MASTER_KEYS["company_bank"], {}),
         "tds_sections": await _get_setting(MASTER_KEYS["tds_sections"], DEFAULT_TDS_SECTIONS),
         "doc_custom_fields": await _get_setting(MASTER_KEYS["doc_custom_fields"], DEFAULT_DOC_CUSTOM_FIELDS),
+        "currency": await _get_setting(MASTER_KEYS["currency"], DEFAULT_CURRENCY),
     }
 
 @api.put("/masters/{section}")
