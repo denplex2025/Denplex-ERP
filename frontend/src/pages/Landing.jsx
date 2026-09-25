@@ -194,7 +194,11 @@ const Landing = () => {
 
       <footer className="border-t border-slate-200">
         <div className="max-w-7xl mx-auto px-6 py-6 text-xs text-slate-500 flex justify-between">
-          <div>{c.footer_copyright}</div>
+          <div className="flex items-center gap-4">
+            <span>{c.footer_copyright}</span>
+            {/* Meta's reviewer looks for this link from the home page, so keep it visible. */}
+            <Link to="/privacy" className="hover:text-slate-900 underline-offset-2 hover:underline" data-testid="footer-privacy-link">Privacy Policy</Link>
+          </div>
           <div className="font-mono-tech">{c.footer_version}</div>
         </div>
       </footer>
