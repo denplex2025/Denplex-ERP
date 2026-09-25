@@ -43,8 +43,9 @@
 .hover\:text-red-700:hover { color: var(--erp-accent-dark) !important; }
 
 /* ---------------------------------------------------------------------------------------------
-   Sidebar surfaces.
-
+   Sidebar surfaces. Every rule below reads the variables above, so the panel, its hover and
+   active states, the footer and the drag grip all re-skin together from one theme colour.
+--------------------------------------------------------------------------------------------- */
 .rail { background: var(--erp-rail-bg); color: var(--erp-rail-text); }
 .rail-edge { border-color: var(--erp-rail-bg-dark); }
 .rail-foot { background: var(--erp-rail-bg); border-top: 1px solid var(--erp-rail-bg-dark); }
