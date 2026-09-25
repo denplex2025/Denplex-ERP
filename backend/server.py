@@ -1,6 +1,6 @@
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, Query, Request, Response, UploadFile, File, Form, BackgroundTasks
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, PlainTextResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -4436,7 +4436,11 @@ def _build_irp_einvoice_payload(inv: Dict[str, Any], company: Dict[str, Any], d:
             "Addr1": (d.get("dispatch_address", "") or company.get("company_address", ""))[:100],
             "Loc": d.get("dispatch_place", "") or d.get("dispatch_state", "") or "",
             "Pin": pin(d.get("dispatch_pin")), "Stcd": _gstin_state(seller_gstin),
-            "Ph": (company.get("company_phone", "") or "")[:12], "Em": company.get("company_email", "")},
+            # The GST schema caps Ph at 6-12 chars. Blind-truncating a FORMATTED number silently
+            # corrupted it - "+917041065333" is 13 chars, so [:12] shipped "+91704106533" with the
+            # last digit missing, and the "+" is not valid in that field either. Strip to digits
+            # and take the subscriber number.
+            "Ph": _gst_phone(company.get("company_phone", "")), "Em": company.get("company_email", "")},
         "BuyerDtls": {"Gstin": buyer_gstin, "LglNm": inv.get("customer_name", ""), "TrdNm": inv.get("customer_name", ""),
             "Pos": _gstin_state(buyer_gstin) or _gstin_state(seller_gstin),
             "Addr1": (d.get("ship_address", "") or "")[:100],
@@ -4588,6 +4592,25 @@ async def _process_webhook(source: str, body: Any) -> str:
         n += 1
     return f"attendance upserted: {n}"
 
+_PROCESS_STARTED_AT = now_iso()
+
+
+@api.get("/version")
+async def version():
+    """Which build is actually running. Public and unauthenticated on purpose - after a commit we
+    used to have to guess whether Railway had redeployed, which matters before kicking off a
+    ten-minute import against what might be the old code. Railway injects the commit SHA."""
+    sha = (os.environ.get("RAILWAY_GIT_COMMIT_SHA")
+           or os.environ.get("SOURCE_COMMIT")
+           or os.environ.get("GIT_COMMIT") or "")
+    return {
+        "commit": sha[:12],
+        "commit_full": sha,
+        "started_at": _PROCESS_STARTED_AT,
+        "environment": os.environ.get("RAILWAY_ENVIRONMENT_NAME", ""),
+    }
+
+
 @api.get("/webhooks/config")
 async def get_webhook_config(user=Depends(require_roles("admin", "manager"))):
     cfg = await get_setting("webhooks") or {}
@@ -4642,6 +4665,55 @@ async def set_aisensy_config(body: dict, user=Depends(require_roles("admin", "ma
         src["secret"] = secrets.token_urlsafe(24)
     await db.settings.update_one({"_id": "webhooks"}, {"$set": {"aisensy": src}}, upsert=True)
     return {"ok": True, "url": f"{WEBHOOK_BASE}/api/webhooks/aisensy/{src['secret']}", "secret": src["secret"]}
+
+@api.get("/webhooks/meta/config")
+async def get_meta_config(user=Depends(require_roles("admin", "manager"))):
+    cfg = await get_setting("webhooks") or {}
+    src = cfg.get("meta") or {}
+    changed = False
+    if not src.get("secret"):
+        src["secret"] = secrets.token_urlsafe(24); changed = True
+    if not src.get("verify_token"):
+        # We generate this so it can't be a weak hand-typed value; it gets pasted into Meta's
+        # "Verify token" box when the callback URL is saved.
+        src["verify_token"] = secrets.token_urlsafe(18); changed = True
+    if changed:
+        src.setdefault("enabled", True)
+        await db.settings.update_one({"_id": "webhooks"}, {"$set": {"meta": src}}, upsert=True)
+    return {"enabled": src.get("enabled", True),
+            "url": f"{WEBHOOK_BASE}/api/webhooks/meta/{src['secret']}",
+            "verify_token": src["verify_token"],
+            "app_secret": src.get("app_secret", ""),
+            "waba_id": src.get("waba_id", "")}
+
+
+@api.post("/webhooks/meta/config")
+async def set_meta_config(body: dict, user=Depends(require_roles("admin", "manager"))):
+    cfg = await get_setting("webhooks") or {}
+    src = cfg.get("meta") or {}
+    if body.get("rotate") or not src.get("secret"):
+        src["secret"] = secrets.token_urlsafe(24)
+    if body.get("rotate") or not src.get("verify_token"):
+        src["verify_token"] = secrets.token_urlsafe(18)
+    for k in ("app_secret", "waba_id"):
+        if k in body:
+            src[k] = str(body[k] or "").strip()
+    if "enabled" in body:
+        src["enabled"] = bool(body["enabled"])
+    await db.settings.update_one({"_id": "webhooks"}, {"$set": {"meta": src}}, upsert=True)
+    return {"ok": True,
+            "url": f"{WEBHOOK_BASE}/api/webhooks/meta/{src['secret']}",
+            "verify_token": src["verify_token"]}
+
+
+def _gst_phone(raw: str) -> str:
+    """Phone for the GST e-invoice SellerDtls.Ph field, which accepts 6-12 characters and expects
+    digits. Returns the 10-digit subscriber number, dropping any country code or formatting."""
+    d = re.sub(r"\D", "", str(raw or "")).lstrip("0")
+    if len(d) > 10 and d.startswith("91"):
+        d = d[2:]
+    return d[-10:] if len(d) >= 10 else d
+
 
 def _verify_aisensy_signature(raw: bytes, signature: str, shared_secret: str) -> bool:
     """AiSensy signs webhook deliveries with HMAC-SHA256(shared_secret, raw_body), sent in the
@@ -4798,38 +4870,10 @@ async def _ai_parse_po_from_text(text: str) -> Optional[dict]:
         logging.warning(f"AiSensy PO parse failed: {e}")
         return None
 
-async def _process_aisensy_webhook(body: Any) -> str:
-    """Turns an agent-sent WhatsApp message into a DRAFT PurchaseOrder for review — never
-    auto-finalizes one. Gated by AISENSY_TOPIC and AISENSY_AGENT_SENDERS (see above): until those
-    are set from a real captured payload, this deliberately drafts nothing. Every event is still
-    logged by receive_webhook, which is what the trial needs."""
-    topic = str((body or {}).get("topic") or "")
-    if topic and topic != AISENSY_TOPIC:
-        return f"skipped (topic={topic}; expecting {AISENSY_TOPIC} — set the AISENSY_TOPIC env var once the real payload is confirmed)"
-    msg = ((body or {}).get("data") or {}).get("message") or (body or {}).get("message") or {}
-    if not isinstance(msg, dict) or not msg:
-        return "skipped (no message object)"
-    # Direction gate. message.created fires for both directions, so without this a supplier's
-    # reply gets parsed into a second, duplicate PO.
-    sender = str(msg.get("sender") or "").upper()
-    if not AISENSY_AGENT_SENDERS:
-        return f"skipped (sender={sender or 'unknown'}; AISENSY_AGENT_SENDERS is not set — refusing to draft a PO until we know which sender values mean agent-sent)"
-    if sender not in AISENSY_AGENT_SENDERS:
-        return f"skipped (sender={sender or 'unknown'} — not an agent-sent message)"
-    mtype = str(msg.get("message_type") or "").upper()
-    if mtype and mtype not in ("TEXT", "TEMPLATE"):
-        return f"skipped (type={mtype})"
-    text = _aisensy_extract_text(msg.get("message_content")).strip()
-    if not text:
-        return f"skipped (no text found in {mtype or 'message'})"
-    message_id = str(msg.get("id") or msg.get("messageId") or "")
-    # phone_number is the CONTACT's number regardless of direction. Never fall back to `sender` —
-    # that is a role enum (e.g. "AGENT"), not a phone number.
-    phone = str(msg.get("phone_number") or "")
-    if message_id:
-        dup = await db.purchase_orders.find_one({"whatsapp_message_id": message_id}, {"_id": 0, "id": 1, "code": 1})
-        if dup:
-            return f"duplicate (already {dup.get('code') or dup.get('id')})"
+async def _draft_po_from_text(text: str, phone: str, message_id: str) -> str:
+    """Shared by both webhook routes (Meta and AiSensy): run the message through the AI parser and,
+    if it reads as an order, create a DRAFT PurchaseOrder for review. Never auto-finalises one.
+    Returns a human-readable outcome that gets stored on the webhook_events row."""
     result = await _ai_parse_po_from_text(text)
     if not result:
         return "skipped (AI parse unavailable/failed)"
@@ -4873,6 +4917,138 @@ async def _process_aisensy_webhook(body: Any) -> str:
     await db.purchase_orders.insert_one(doc)
     return f"draft PO {doc['code']} created ({len(po_lines)} line(s), confidence={doc['ai_confidence']}, supplier by {matched_by})"
 
+
+# --- Meta WhatsApp Cloud API ------------------------------------------------------------------
+# Denplex owns WABA 3147719758764391 (number +91 70410 65333) in its OWN Meta Business portfolio,
+# with AiSensy holding partner access. That means we can subscribe our own Meta app to the same
+# WABA and receive webhooks DIRECTLY from Meta, free, while AiSensy keeps working. It also avoids
+# AiSensy's Rs 2,000 + GST per month webhook charge.
+#
+# The decisive advantage over the AiSensy route: Meta splits the two directions into two webhook
+# FIELDS, so direction is structural rather than guessed —
+#   "messages"       -> what the supplier sent US        (never becomes a PO)
+#   "message_echoes" -> what WE sent, including messages typed in the WhatsApp Business app on the
+#                       phone (coexistence). THIS is the one that becomes a draft PO.
+# AiSensy could never tell us which `sender` values meant "agent-sent", which is what killed that
+# approach — a supplier replying "ok, 50 confirmed" would have been parsed into a duplicate PO.
+
+def _meta_extract_text(m: dict) -> str:
+    """Text out of a Meta message object. Covers plain text, captions on media, button/interactive
+    replies, and a template's filled body — a first message to a supplier with no open 24-hour
+    session has to go out as a template, so that path matters."""
+    if not isinstance(m, dict):
+        return ""
+    t = m.get("type") or ""
+    if t == "text":
+        return str((m.get("text") or {}).get("body") or "")
+    for k in ("image", "video", "document", "audio"):
+        cap = (m.get(k) or {}).get("caption")
+        if cap:
+            return str(cap)
+    if t == "button":
+        return str((m.get("button") or {}).get("text") or "")
+    if t == "interactive":
+        i = m.get("interactive") or {}
+        for k in ("button_reply", "list_reply"):
+            if i.get(k):
+                return str(i[k].get("title") or "")
+    # Template sends arrive with the filled parameter values in components.
+    parts = []
+    for comp in ((m.get("template") or {}).get("components") or []):
+        for p in (comp.get("parameters") or []):
+            v = p.get("text") or (p.get("*") if isinstance(p.get("*"), str) else "")
+            if v:
+                parts.append(str(v))
+    return " ".join(parts).strip()
+
+
+def _meta_iter_messages(body: Any):
+    """Yield (field, message, contact_wa_id) for every message in a Meta webhook payload.
+
+    Shape: {"entry":[{"changes":[{"field":"messages"|"message_echoes",
+                                 "value":{"messages":[...], "contacts":[...]}}]}]}
+    """
+    for entry in ((body or {}).get("entry") or []):
+        for change in (entry.get("changes") or []):
+            field = str(change.get("field") or "")
+            value = change.get("value") or {}
+            contacts = value.get("contacts") or []
+            wa_id = str((contacts[0] or {}).get("wa_id") or "") if contacts else ""
+            for m in (value.get("messages") or []):
+                yield field, m, wa_id
+
+
+async def _process_meta_webhook(body: Any) -> str:
+    """Turn a message WE sent into a DRAFT PurchaseOrder. Never auto-finalises one.
+
+    Only `message_echoes` is parsed. `messages` (the supplier's side) is logged and ignored —
+    that is what stops a reply becoming a duplicate PO."""
+    results = []
+    for field, m, wa_id in _meta_iter_messages(body):
+        if field != "message_echoes":
+            results.append(f"skipped ({field}: inbound, not ours)")
+            continue
+        text = _meta_extract_text(m).strip()
+        if not text:
+            results.append(f"skipped (no text in {m.get('type') or 'message'})")
+            continue
+        message_id = str(m.get("id") or "")
+        # On an echo, `to` is the supplier. Fall back to the contact wa_id.
+        phone = str(m.get("to") or wa_id or "")
+        if message_id:
+            dup = await db.purchase_orders.find_one({"whatsapp_message_id": message_id},
+                                                    {"_id": 0, "id": 1, "code": 1})
+            if dup:
+                results.append(f"duplicate (already {dup.get('code') or dup.get('id')})")
+                continue
+        results.append(await _draft_po_from_text(text, phone, message_id))
+    return "; ".join(results) if results else "no messages in payload"
+
+
+async def _process_aisensy_webhook(body: Any) -> str:
+    """Turns an agent-sent WhatsApp message into a DRAFT PurchaseOrder for review — never
+    auto-finalizes one. Gated by AISENSY_TOPIC and AISENSY_AGENT_SENDERS (see above): until those
+    are set from a real captured payload, this deliberately drafts nothing. Every event is still
+    logged by receive_webhook, which is what the trial needs."""
+    topic = str((body or {}).get("topic") or "")
+    if topic and topic != AISENSY_TOPIC:
+        return f"skipped (topic={topic}; expecting {AISENSY_TOPIC} — set the AISENSY_TOPIC env var once the real payload is confirmed)"
+    msg = ((body or {}).get("data") or {}).get("message") or (body or {}).get("message") or {}
+    if not isinstance(msg, dict) or not msg:
+        return "skipped (no message object)"
+    # Direction gate. message.created fires for both directions, so without this a supplier's
+    # reply gets parsed into a second, duplicate PO.
+    sender = str(msg.get("sender") or "").upper()
+    if not AISENSY_AGENT_SENDERS:
+        return f"skipped (sender={sender or 'unknown'}; AISENSY_AGENT_SENDERS is not set — refusing to draft a PO until we know which sender values mean agent-sent)"
+    if sender not in AISENSY_AGENT_SENDERS:
+        return f"skipped (sender={sender or 'unknown'} — not an agent-sent message)"
+    mtype = str(msg.get("message_type") or "").upper()
+    if mtype and mtype not in ("TEXT", "TEMPLATE"):
+        return f"skipped (type={mtype})"
+    text = _aisensy_extract_text(msg.get("message_content")).strip()
+    if not text:
+        return f"skipped (no text found in {mtype or 'message'})"
+    message_id = str(msg.get("id") or msg.get("messageId") or "")
+    # phone_number is the CONTACT's number regardless of direction. Never fall back to `sender` —
+    # that is a role enum (e.g. "AGENT"), not a phone number.
+    phone = str(msg.get("phone_number") or "")
+    if message_id:
+        dup = await db.purchase_orders.find_one({"whatsapp_message_id": message_id}, {"_id": 0, "id": 1, "code": 1})
+        if dup:
+            return f"duplicate (already {dup.get('code') or dup.get('id')})"
+    return await _draft_po_from_text(text, phone, message_id)
+
+async def _process_meta_background(event_id: str, body: Any):
+    """Meta expects a fast 2xx; the AI parse takes a few seconds, so it runs here after the ack
+    and updates the same webhook_events row with the real outcome."""
+    try:
+        result = await _process_meta_webhook(body)
+        await db.webhook_events.update_one({"id": event_id}, {"$set": {"result": result, "processed": True}})
+    except Exception as e:
+        await db.webhook_events.update_one({"id": event_id}, {"$set": {"result": f"error: {e}", "processed": False}})
+
+
 async def _process_aisensy_background(event_id: str, body: Any):
     """AiSensy expects a 2xx ack within 5s; the AI parse call can take a few seconds, so it runs
     here as a background task after the webhook has already been ack'd, updating the same
@@ -4882,6 +5058,31 @@ async def _process_aisensy_background(event_id: str, body: Any):
         await db.webhook_events.update_one({"id": event_id}, {"$set": {"result": result, "processed": True}})
     except Exception as e:
         await db.webhook_events.update_one({"id": event_id}, {"$set": {"result": f"error: {e}", "processed": False}})
+
+@api.get("/webhooks/{source}/{token}")
+async def verify_webhook(source: str, token: str, request: Request):
+    """Meta's webhook verification handshake.
+
+    When you save a callback URL in the Meta app dashboard, Meta sends a GET with hub.mode,
+    hub.verify_token and hub.challenge, and expects the challenge echoed back as PLAIN TEXT.
+    Our receiver was POST-only, so Meta's setup would have failed at the first step.
+
+    Two secrets, doing different jobs: the URL `token` proves the caller found our address, and
+    `hub.verify_token` is what we typed into Meta's dashboard. Both must match."""
+    cfg = await get_setting("webhooks") or {}
+    src = cfg.get(source) or {}
+    if not token or token != src.get("secret"):
+        raise HTTPException(401, "Invalid webhook token")
+    params = request.query_params
+    mode = params.get("hub.mode")
+    challenge = params.get("hub.challenge") or ""
+    verify = params.get("hub.verify_token") or ""
+    expected = src.get("verify_token") or ""
+    if mode == "subscribe" and expected and verify == expected:
+        # Plain text, not JSON - Meta compares the body byte for byte.
+        return PlainTextResponse(challenge)
+    raise HTTPException(403, "Verification failed")
+
 
 @api.get("/webhooks/events")
 async def list_webhook_events(user=Depends(require_roles("admin", "manager"))):
@@ -4909,6 +5110,27 @@ async def receive_webhook(source: str, token: str, request: Request, background_
         body = json.loads(raw.decode("utf-8", "ignore")) if raw else {}
     except Exception:
         body = {"_raw": raw.decode("utf-8", "ignore")[:5000]}
+    if source == "meta":
+        # Meta signs with HMAC-SHA256 over the raw body, sent as "sha256=<hex>" in
+        # X-Hub-Signature-256. The app secret is the key.
+        app_secret = src.get("app_secret") or ""
+        sig = request.headers.get("X-Hub-Signature-256", "")
+        sig_ok = True
+        if app_secret:
+            import hmac as _hmac
+            expected = "sha256=" + _hmac.new(app_secret.encode("utf-8"), raw, hashlib.sha256).hexdigest()
+            sig_ok = _hmac.compare_digest(expected, sig.strip())
+        ev = {"id": new_id(), "source": source, "received_at": now_iso(), "body": body,
+              "processed": False,
+              "result": "queued" if sig_ok else "signature mismatch — logged, not processed",
+              "sig_header": sig[:200]}
+        await db.webhook_events.insert_one(dict(ev))
+        if sig_ok:
+            background_tasks.add_task(_process_meta_background, ev["id"], body)
+        # Always 2xx. Meta retries on non-2xx and disables a webhook that keeps failing, so a
+        # signature-format mismatch or a cold start must never surface as an error.
+        return {"ok": True, "received": True, "result": ev["result"]}
+
     if source == "aisensy":
         shared = src.get("signing_secret") or ""
         sig = request.headers.get("X-AiSensy-Signature", "")
