@@ -4973,11 +4973,20 @@ def _meta_extract_text(m: dict) -> str:
 def _meta_iter_messages(body: Any):
     """Yield (field, message, contact_wa_id) for every message in a Meta webhook payload.
 
-    Shape: {"entry":[{"changes":[{"field":"messages"|"message_echoes"|"smb_message_echoes",
-                                 "value":{"messages":[...], "contacts":[...]}}]}]}
+    The array holding the messages is NOT always called "messages" — the key depends on the
+    field, and getting this wrong is silent (an empty list reads exactly like "nothing to do"):
 
-    Fields we subscribe to but don't parse here (smb_app_state_sync, history) carry no "messages"
-    array, so they yield nothing and are simply logged by receive_webhook.
+        field "messages"            -> value["messages"]         inbound, from the supplier
+        field "smb_message_echoes"  -> value["message_echoes"]   what we typed in the Business app
+        field "message_echoes"      -> value["message_echoes"]   what we sent via the Cloud API
+
+    Confirmed against a real captured payload on 2026-09-25, after the first live test logged
+    "no messages in payload" for an echo that in fact carried the full order text. Both keys are
+    read for every field rather than mapped one-to-one, so a field that changes key, or carries
+    both, still parses.
+
+    Other keys seen on these payloads and correctly ignored: "statuses" (sent/delivered/read
+    receipts, several per message) and "state_sync" (smb_app_state_sync). Neither holds a message.
     """
     for entry in ((body or {}).get("entry") or []):
         for change in (entry.get("changes") or []):
@@ -4985,8 +4994,9 @@ def _meta_iter_messages(body: Any):
             value = change.get("value") or {}
             contacts = value.get("contacts") or []
             wa_id = str((contacts[0] or {}).get("wa_id") or "") if contacts else ""
-            for m in (value.get("messages") or []):
-                yield field, m, wa_id
+            for key in ("messages", "message_echoes"):
+                for m in (value.get(key) or []):
+                    yield field, m, wa_id
 
 
 async def _process_meta_webhook(body: Any) -> str:
