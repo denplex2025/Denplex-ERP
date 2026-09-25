@@ -4847,6 +4847,16 @@ async def _ai_parse_po_from_text(text: str) -> Optional[dict]:
         "Decide if this describes items to purchase, or if it's unrelated (chit-chat, a question, "
         "a status update, etc). If it IS a PO request, extract the supplier name if mentioned and "
         "each line item with quantity, unit, and rate (price) if mentioned.\n\n"
+        "The business is in Gujarat, India. Messages are often Gujarati or Hindi written in "
+        "English letters, mixed with English technical terms — for example \"50 nag mokli dejo\" "
+        "(send 50 pieces), \"20 nos bearing joiye chhe\" (20 bearings are needed), \"aa material "
+        "kal sudhi pahonchado\" (deliver this material by tomorrow). Read these as orders. "
+        "\"nag\"/\"nug\" means pieces (use unit \"Nos\"), \"jodi\" means pairs, \"peti\" a box, "
+        "\"thela\"/\"bori\" a bag. Keep item descriptions in the words the message used — do not "
+        "translate a part name or a grade, and keep dimensions exactly as written.\n\n"
+        "Be strict about what counts. A question about an existing order, a payment or delivery "
+        "status update, a request for a quotation, drawings, invoices or documents, and anything "
+        "not being bought for the business are all is_po_request: false.\n\n"
         "Respond with ONLY strict JSON, no markdown fencing, no explanation, in exactly this shape:\n"
         '{"is_po_request": true or false, "supplier_name": string or null, '
         '"lines": [{"description": string, "qty": number, "unit": string, "rate": number or null}], '
@@ -4873,11 +4883,116 @@ async def _ai_parse_po_from_text(text: str) -> Optional[dict]:
         logging.warning(f"AiSensy PO parse failed: {e}")
         return None
 
-async def _draft_po_from_text(text: str, phone: str, message_id: str) -> str:
-    """Shared by both webhook routes (Meta and AiSensy): run the message through the AI parser and,
-    if it reads as an order, create a DRAFT PurchaseOrder for review. Never auto-finalises one.
-    Returns a human-readable outcome that gets stored on the webhook_events row."""
-    result = await _ai_parse_po_from_text(text)
+# --- Deciding which outgoing messages are orders -----------------------------------------------
+# 7041065333 is a business number, so most of what goes out is work — but not all of it is an
+# order, and the first version sent EVERY outgoing message to the AI and drafted a PO from
+# whatever came back. Three gates now stand in front of that, cheapest first.
+
+# 1. The explicit signal. Typing "PO" at the start is the owner saying "this one is an order",
+#    which is the decision point WhatsApp itself gives us — there is no hook to ask before a
+#    message is sent, so the marker has to be part of the message. Several spellings are accepted
+#    because a marker that only works one way is a marker you will eventually type wrong.
+PO_KEYWORD_RE = re.compile(r"^\s*[#*]?\s*(p\.?\s?o\.?)\s*[:\-–—]?\s+", re.IGNORECASE)
+
+# 2. The cheap local filter, for messages with no marker. A purchase order needs a number and
+#    some notion of how much — "ok", "thanks", "call me at 5" can never be one. This runs before
+#    any AI call, so the common case of ordinary chat costs nothing and is never sent anywhere.
+#
+#    Orders here get typed in Gujarati written with English letters ("50 nag mokli dejo"), so the
+#    word lists below carry the romanised forms as well. Romanisation is inconsistent by nature —
+#    mokljo / moklo / mokalje / moklavjo are all the same word — so these match on stems rather
+#    than trying to enumerate spellings. Over-matching is cheap: it only buys an AI call, and the
+#    AI still has to agree it is an order.
+_ORDER_UNIT_RE = re.compile(
+    r"\b("
+    # English
+    r"nos?|pcs?|pieces?|kgs?|kilo(?:gram)?s?|gms?|grams?|tons?|tonnes?|mtrs?|meters?|metres?|"
+    r"mm|cm|ft|feet|inch(?:es)?|sets?|boxes?|box|packs?|bags?|rolls?|sheets?|bundles?|drums?|"
+    r"litre?s?|liters?|ltrs?|units?|qty|quantity|dozen|coils?|bars?|rods?|plates?|"
+    # Gujarati / Hindi units in Latin script. "nag" (નંગ) is the everyday word for "piece" and is
+    # far more common than "nos" in a spoken order.
+    r"nag|nang|naga|jodi|jod|peti|pettti|petti|thela|thelo|thaila|dabba|daba|"
+    r"kilo|kilos|mitar|mitr|futt|fut|gaadi|gadi|truck|tempo|katta|bora|bori|"
+    r"nug|nuga|vajan|weight"
+    r")\b", re.IGNORECASE)
+
+#    A message can name a quantity without naming a unit — "20 bearing mokli dejo". The verb is
+#    then the signal. These are the ask-for-something verbs, English and romanised Gujarati/Hindi.
+_ORDER_VERB_RE = re.compile(
+    r"\b("
+    # English
+    r"order|orders|supply|dispatch|deliver|delivery|send|require[ds]?|requirement|"
+    r"need(?:ed|s)?|want(?:ed)?|arrange|procure|purchase|"
+    # mokalvu / mokljo / moklo / mokalje / moklavjo / mokalso  (to send)
+    r"mok[al]*[jlvs]\w*|"
+    # bhejvu / bhejo / bhejna / bhejdo  (to send, Hindi)
+    r"bhej\w*|"
+    # joie / joiye / joishe / joiye chhe  (needed / wanted)
+    r"joi\w*|"
+    # aapjo / apjo / aapo / aapva  (give)  and  lavjo / laavjo / lai aavjo  (bring)
+    r"a+pj?o|a+pva|la+vj?o|la+vo|"
+    # banavjo / banavo  (make)
+    r"banav\w*|"
+    # pahonchadjo / pohchado  (deliver)
+    r"p[ao]h[oa]n?ch\w*|"
+    # jarur / jaruri  (need)   chahiye / chaiye  (needed, Hindi)
+    r"jaruri?|cha+h?iye|"
+    # taiyar / tayar karo  (prepare)
+    r"ta[iy]+ar"
+    r")\b", re.IGNORECASE)
+
+# Gujarati and Devanagari digits, in case an order is typed in native script.
+_ANY_DIGIT_RE = re.compile(r"[0-9૦-૯०-९]")
+
+#    Native-script messages (ગુજરાતી / हिन्दी) can't be word-matched without enumerating a
+#    vocabulary, and a wrong list would silently drop real orders. Presence of the script is
+#    treated as signal enough on its own — combined with the digit requirement that is roughly
+#    as selective as the Latin word lists, and the AI still decides.
+_INDIC_SCRIPT_RE = re.compile(r"[઀-૿ऀ-ॿ]")
+
+
+def _strip_po_keyword(text: str) -> tuple:
+    """(explicit, text_without_marker). The marker is removed so the AI reads the order itself
+    rather than a prefix it has to explain away."""
+    m = PO_KEYWORD_RE.match(text or "")
+    return (True, text[m.end():].strip()) if m else (False, (text or "").strip())
+
+
+def _looks_like_order(text: str) -> bool:
+    """Cheap pre-filter: a quantity AND either a unit or an ask-for-something verb.
+
+    The digit is non-negotiable — a purchase order line needs a quantity, so a message without
+    one ("aa mokli dejo") can only ever produce an empty parse. If such a message really is an
+    order, the "PO" marker forces it through regardless, which is what the marker is for.
+
+    Deliberately generous on the word side: it only decides whether a message is worth an AI
+    call, and the AI still has the final say."""
+    t = text or ""
+    if not _ANY_DIGIT_RE.search(t):
+        return False
+    if _INDIC_SCRIPT_RE.search(t):
+        return True
+    return bool(_ORDER_UNIT_RE.search(t)) or bool(_ORDER_VERB_RE.search(t))
+
+
+async def _draft_po_from_text(text: str, phone: str, message_id: str, event_id: str = "") -> str:
+    """Shared by both webhook routes (Meta and AiSensy).
+
+    Two outcomes, depending on whether the owner marked the message as an order:
+
+      "PO: 50 nos MS plate"  -> explicit. A draft PurchaseOrder is created immediately.
+      "50 nos MS plate"      -> implicit. Nothing is created; the parse is stored on the
+                                webhook_events row as a SUGGESTION with a one-click "Create PO"
+                                button on the Webhooks page.
+
+    The implicit path exists so forgetting the marker loses nothing, which was the one real cost
+    of requiring a keyword. Neither path ever finalises a PO — both stop at draft.
+    """
+    explicit, body_text = _strip_po_keyword(text)
+    if not explicit and not _looks_like_order(body_text):
+        # Never reaches the AI. Ordinary chat on a business number stays ordinary chat.
+        return "skipped (no order signal — add \"PO\" at the start to force one)"
+    result = await _ai_parse_po_from_text(body_text)
     if not result:
         return "skipped (AI parse unavailable/failed)"
     if not result.get("is_po_request"):
@@ -4906,19 +5021,87 @@ async def _draft_po_from_text(text: str, phone: str, message_id: str) -> str:
             continue
     if not po_lines:
         return "skipped (no valid items after parsing)"
+    confidence = str(result.get("confidence") or "")
+
+    if not explicit:
+        # No marker: park it as a suggestion instead of creating anything. Stored on the event row
+        # rather than in purchase_orders, so an unwanted guess never appears in the PO list and
+        # never consumes a PO number.
+        if event_id:
+            await db.webhook_events.update_one({"id": event_id}, {"$set": {"suggested_po": {
+                "lines": po_lines, "supplier_id": supplier_id, "supplier_name": supplier_name,
+                "matched_by": matched_by, "confidence": confidence,
+                "phone": phone, "message_id": message_id, "text": text, "created": False,
+            }}})
+            return (f"possible order — {len(po_lines)} line(s), confidence={confidence}. "
+                    f"Not created: no \"PO\" marker. Use Create PO on the Webhooks page.")
+        return "possible order, but no event row to attach it to — not created"
+
     doc = PurchaseOrder(
         supplier_id=supplier_id, supplier_name=supplier_name,
         lines=[POLine(**pl) for pl in po_lines],
         status="draft", source="whatsapp_ai",
         whatsapp_message_id=message_id, whatsapp_raw_text=text,
-        ai_confidence=str(result.get("confidence") or ""),
+        ai_confidence=confidence,
         notes=f'Auto-drafted from {("WhatsApp " + phone) if phone else "WhatsApp"} '
               f'(supplier matched by {matched_by}): "{text}"',
     ).model_dump()
     doc["code"] = await gen_code("PO", "po")
+    # Anything the AI wasn't sure about is drafted anyway, but carries a flag so it can be shown
+    # differently rather than sitting in the list looking as trustworthy as a clean parse.
+    doc["needs_review"] = confidence.lower() != "high" or matched_by == "unmatched"
     doc.update(compute_totals(doc["lines"], 0))
     await db.purchase_orders.insert_one(doc)
-    return f"draft PO {doc['code']} created ({len(po_lines)} line(s), confidence={doc['ai_confidence']}, supplier by {matched_by})"
+    return f"draft PO {doc['code']} created ({len(po_lines)} line(s), confidence={confidence}, supplier by {matched_by})"
+
+
+@api.post("/webhooks/events/{event_id}/create-po")
+async def create_po_from_suggestion(event_id: str, user=Depends(require_roles("admin", "manager"))):
+    """Turn a parked suggestion into a real draft PO. This is the one-click path for a message
+    that was an order but wasn't marked with "PO"."""
+    ev = await db.webhook_events.find_one({"id": event_id}, {"_id": 0})
+    if not ev:
+        raise HTTPException(404, "Event not found")
+    s = ev.get("suggested_po") or {}
+    if not s:
+        raise HTTPException(400, "No suggestion on this event")
+    if s.get("created"):
+        raise HTTPException(400, f"Already created as {s.get('code')}")
+    # Same guard the webhook path uses: the same WhatsApp message must not produce two POs, even
+    # if this endpoint is called twice or the message is redelivered later.
+    if s.get("message_id"):
+        dup = await db.purchase_orders.find_one({"whatsapp_message_id": s["message_id"]}, {"_id": 0, "code": 1})
+        if dup:
+            raise HTTPException(400, f"A PO already exists for this message ({dup.get('code')})")
+    doc = PurchaseOrder(
+        supplier_id=s.get("supplier_id", ""), supplier_name=s.get("supplier_name", ""),
+        lines=[POLine(**pl) for pl in (s.get("lines") or [])],
+        status="draft", source="whatsapp_ai",
+        whatsapp_message_id=s.get("message_id", ""), whatsapp_raw_text=s.get("text", ""),
+        ai_confidence=s.get("confidence", ""),
+        notes=f'Created from a WhatsApp suggestion {s.get("phone") or ""} '
+              f'(supplier matched by {s.get("matched_by")}): "{s.get("text","")}"',
+    ).model_dump()
+    doc["code"] = await gen_code("PO", "po")
+    doc["needs_review"] = True  # it reached here without an explicit marker
+    doc.update(compute_totals(doc["lines"], 0))
+    await db.purchase_orders.insert_one(doc)
+    await db.webhook_events.update_one({"id": event_id}, {"$set": {
+        "suggested_po.created": True, "suggested_po.code": doc["code"],
+        "result": f"draft PO {doc['code']} created from suggestion"}})
+    return {"ok": True, "code": doc["code"], "id": doc["id"]}
+
+
+@api.post("/webhooks/events/{event_id}/dismiss")
+async def dismiss_suggestion(event_id: str, user=Depends(require_roles("admin", "manager"))):
+    """Discard a suggestion that wasn't an order. Keeps the event row and its payload — only the
+    pending prompt goes away."""
+    r = await db.webhook_events.update_one({"id": event_id}, {"$set": {
+        "suggested_po.created": True, "suggested_po.dismissed": True,
+        "result": "suggestion dismissed"}})
+    if not r.matched_count:
+        raise HTTPException(404, "Event not found")
+    return {"ok": True}
 
 
 # --- Meta WhatsApp Cloud API ------------------------------------------------------------------
@@ -5002,7 +5185,7 @@ def _meta_iter_messages(body: Any):
                     yield field, m, wa_id
 
 
-async def _process_meta_webhook(body: Any) -> str:
+async def _process_meta_webhook(body: Any, event_id: str = "") -> str:
     """Turn a message WE sent into a DRAFT PurchaseOrder. Never auto-finalises one.
 
     Only the echo fields (META_ECHO_FIELDS) are parsed. `messages` (the supplier's side) is logged
@@ -5027,11 +5210,11 @@ async def _process_meta_webhook(body: Any) -> str:
             if dup:
                 results.append(f"duplicate (already {dup.get('code') or dup.get('id')})")
                 continue
-        results.append(await _draft_po_from_text(text, phone, message_id))
+        results.append(await _draft_po_from_text(text, phone, message_id, event_id))
     return "; ".join(results) if results else "no messages in payload"
 
 
-async def _process_aisensy_webhook(body: Any) -> str:
+async def _process_aisensy_webhook(body: Any, event_id: str = "") -> str:
     """Turns an agent-sent WhatsApp message into a DRAFT PurchaseOrder for review — never
     auto-finalizes one. Gated by AISENSY_TOPIC and AISENSY_AGENT_SENDERS (see above): until those
     are set from a real captured payload, this deliberately drafts nothing. Every event is still
@@ -5063,13 +5246,13 @@ async def _process_aisensy_webhook(body: Any) -> str:
         dup = await db.purchase_orders.find_one({"whatsapp_message_id": message_id}, {"_id": 0, "id": 1, "code": 1})
         if dup:
             return f"duplicate (already {dup.get('code') or dup.get('id')})"
-    return await _draft_po_from_text(text, phone, message_id)
+    return await _draft_po_from_text(text, phone, message_id, event_id)
 
 async def _process_meta_background(event_id: str, body: Any):
     """Meta expects a fast 2xx; the AI parse takes a few seconds, so it runs here after the ack
     and updates the same webhook_events row with the real outcome."""
     try:
-        result = await _process_meta_webhook(body)
+        result = await _process_meta_webhook(body, event_id)
         await db.webhook_events.update_one({"id": event_id}, {"$set": {"result": result, "processed": True}})
     except Exception as e:
         await db.webhook_events.update_one({"id": event_id}, {"$set": {"result": f"error: {e}", "processed": False}})
@@ -5080,7 +5263,7 @@ async def _process_aisensy_background(event_id: str, body: Any):
     here as a background task after the webhook has already been ack'd, updating the same
     webhook_events row with the real result once done."""
     try:
-        result = await _process_aisensy_webhook(body)
+        result = await _process_aisensy_webhook(body, event_id)
         await db.webhook_events.update_one({"id": event_id}, {"$set": {"result": result, "processed": True}})
     except Exception as e:
         await db.webhook_events.update_one({"id": event_id}, {"$set": {"result": f"error: {e}", "processed": False}})
