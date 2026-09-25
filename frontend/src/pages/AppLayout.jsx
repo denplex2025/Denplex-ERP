@@ -15,6 +15,7 @@ import GlobalSpinner from "@/components/erp/GlobalSpinner";
 import FloatingActions from "@/components/erp/FloatingActions";
 import Aria from "@/components/erp/Aria";
 import { ReceiptIcon, hydrateCurrency } from "@/lib/currency";
+import { hydrateTheme } from "@/lib/theme";
 
 function GlobalSearch() {
   const nav = useNavigate();
@@ -272,7 +273,7 @@ export default function AppLayout() {
   }, []);
 
   useEffect(() => {
-    api.get("/masters").then(r => hydrateCurrency(r.data)).catch(() => {});
+    api.get("/masters").then(r => { hydrateCurrency(r.data); hydrateTheme(r.data); }).catch(() => {});
   }, []);
 
   useEffect(() => {

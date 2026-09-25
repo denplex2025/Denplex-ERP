@@ -11,15 +11,33 @@ import { PageHeader, Card } from "@/components/erp/Primitives";
 import { Save, Copy, ShieldCheck, ShieldOff, Plus, Trash2, RefreshCw, Star, ExternalLink, Inbox, Upload, FileText, Eye, FileSpreadsheet, Database } from "lucide-react";
 import { toast } from "sonner";
 import { CURRENCIES, money, getCurrency, setCurrency } from "@/lib/currency";
+import { THEMES, getTheme, setTheme, normalizeHex, readableOn, contrastOn } from "@/lib/theme";
 
 export default function Settings() {
   const [tab, setTab] = useState("company");
   const [currency, setCur] = useState(() => getCurrency().code);
+  const [theme, setThm] = useState(() => getTheme());
   const [s, setS] = useState({});
   const [twoFa, setTwoFa] = useState({ enabled: false });
 
   // Applied locally first so every figure on screen updates immediately, then persisted. If the
   // save fails the local change is rolled back rather than left looking saved.
+  // Same pattern as currency: apply immediately so the whole app re-skins as you click, then
+  // persist; roll back if the save fails rather than leave it looking saved.
+  const saveTheme = async (hex) => {
+    const prev = getTheme();
+    const next = normalizeHex(hex);
+    setTheme(next); setThm(next);
+    try {
+      const t = THEMES.find(x => x.hex.toUpperCase() === next);
+      await api.put("/masters/theme", { value: { hex: next, name: t ? t.name : "Custom" } });
+      toast.success(`Theme set to ${t ? t.name : next}`);
+    } catch (e) {
+      setTheme(prev); setThm(prev);
+      toast.error("Could not save the theme");
+    }
+  };
+
   const saveCurrency = async (code) => {
     const prev = getCurrency().code;
     setCurrency(code); setCur(code);
@@ -133,6 +151,55 @@ export default function Settings() {
         </TabsList>
 
         <TabsContent value="company">
+          <Card className="p-6 mb-4">
+            <h3 className="font-display text-lg font-semibold mb-1">Theme colour</h3>
+            <p className="text-xs text-slate-500 mb-4">
+              Sets the sidebar, buttons and headings across the ERP. Every shade — hover, active, border — is
+              derived from this one colour, so the states stay in proportion.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {THEMES.map(t => {
+                const active = t.hex.toUpperCase() === String(theme).toUpperCase();
+                return (
+                  <button
+                    key={t.key}
+                    onClick={() => saveTheme(t.hex)}
+                    title={`${t.name} · ${t.hex}`}
+                    data-testid={`theme-${t.key}`}
+                    className={`h-12 w-28 rounded-sm text-[10px] font-semibold uppercase tracking-wider flex items-end justify-center pb-1 transition-transform ${active ? "ring-2 ring-offset-2 ring-slate-800 scale-[1.03]" : "hover:scale-[1.02]"}`}
+                    style={{ background: t.hex, color: readableOn(t.hex) }}
+                  >
+                    {t.name}
+                  </button>
+                );
+              })}
+            </div>
+            <div className="mt-3 flex items-center gap-3 text-xs text-slate-500">
+              <label className="inline-flex items-center gap-2">
+                <span>Custom</span>
+                <input
+                  type="color"
+                  value={String(theme).toUpperCase()}
+                  onChange={e => saveTheme(e.target.value)}
+                  className="h-8 w-14 rounded-sm border border-slate-200 bg-white p-0.5"
+                  data-testid="theme-custom"
+                />
+              </label>
+              <span className="font-mono-tech">{String(theme).toUpperCase()}</span>
+              {/* Labels sit on this colour, so a pale pick is worth warning about rather than
+                  silently shipping grey-on-grey. 4.5:1 is the WCAG AA threshold for body text. */}
+              {contrastOn(theme) < 4.5 && (
+                <span className="text-amber-700">
+                  Low contrast ({contrastOn(theme).toFixed(1)}:1) — small labels may be hard to read.
+                </span>
+              )}
+            </div>
+            <p className="text-[11px] text-slate-500 mt-3">
+              Presets are all reds on purpose: delete and cancel controls share the same red as the brand in the
+              markup, so a blue or green theme would stop them reading as dangerous. A custom colour outside the
+              red family will have that effect.
+            </p>
+          </Card>
           <Card className="p-6 mb-4">
             <h3 className="font-display text-lg font-semibold mb-1">Currency</h3>
             <p className="text-xs text-slate-500 mb-4">
