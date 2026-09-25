@@ -1,1 +1,48 @@
 .App { min-height: 100vh; }
+
+/* ---------------------------------------------------------------------------------------------
+   Density scale — "fit first, scroll last".
+
+   AppLayout writes these custom properties on :root whenever the window resizes or the sidebar is
+   dragged, interpolating between a compact floor and a comfortable ceiling based on the width
+   actually available to the content (viewport minus sidebar). Padding and gaps move across their
+   full range; text moves across a much smaller one and bottoms out at 11px, so a table gives up
+   whitespace long before it gives up legibility. Once everything is at its floor nothing can
+   shrink further and the page scrolls — that is the intended end state, not a layout failure.
+
+   Fallbacks are the comfortable values, so anything rendered before the first measurement (or with
+   JS disabled) looks normal rather than cramped.
+--------------------------------------------------------------------------------------------- */
+
+.erp-dense {
+  font-size: var(--erp-fs, 14px);
+}
+
+.erp-dense th,
+.erp-dense td {
+  padding: var(--erp-cell-y, 8px) var(--erp-cell-x, 12px);
+}
+
+/* Headers stay a notch smaller than the body text at every density, so the hierarchy holds
+   instead of collapsing into one size when things get tight. */
+.erp-dense th {
+  font-size: var(--erp-fs-sm, 12px);
+}
+
+.erp-grid {
+  gap: var(--erp-gap, 16px);
+}
+
+/* Opt-in horizontal scroll for wide tables. Pairs with .erp-dense: the table shrinks as far as
+   the scale allows, and only what is still too wide after that becomes a scroll. */
+.erp-scroll-x {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Numeric columns read badly when digits jump width as values change. */
+.erp-dense .num,
+.erp-dense [data-num] {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
