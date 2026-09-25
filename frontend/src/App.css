@@ -1,6 +1,41 @@
 .App { min-height: 100vh; }
 
 /* ---------------------------------------------------------------------------------------------
+   Sidebar palette. Kept as variables so the shade can be nudged in one place — the markup never
+   names a colour. Tomato, pulled a little deeper than #FF6347 so white labels stay readable
+   against it; pure tomato sits around 3:1 contrast with white, which is fine for icons but thin
+   for 13px text. Raise --erp-rail-bg toward #FF6347 for a brighter panel, at the cost of some
+   legibility on the smaller labels.
+--------------------------------------------------------------------------------------------- */
+:root {
+  --erp-rail-bg: #E14E37;        /* panel */
+  --erp-rail-bg-dark: #C8402B;   /* footer, borders, the collapse button */
+  --erp-rail-hover: #F06A54;     /* hover row */
+  --erp-rail-text: #FFFFFF;      /* labels + icons */
+  --erp-rail-muted: #FFD2C8;     /* group headings, "signed in" caption */
+  --erp-rail-active-bg: #FFFFFF; /* current page */
+  --erp-rail-active-fg: #C8402B;
+}
+
+.rail { background: var(--erp-rail-bg); color: var(--erp-rail-text); }
+.rail-edge { border-color: var(--erp-rail-bg-dark); }
+.rail-foot { background: var(--erp-rail-bg); border-top: 1px solid var(--erp-rail-bg-dark); }
+.rail-head { color: var(--erp-rail-muted); }
+.rail-divider { border-top: 1px solid var(--erp-rail-hover); }
+
+.rail-item { color: var(--erp-rail-text); }
+.rail-item:hover { background: var(--erp-rail-hover); color: #fff; }
+.rail-item.is-active { background: var(--erp-rail-active-bg); color: var(--erp-rail-active-fg); font-weight: 600; }
+/* Icons carry the meaning in rail mode, so they never dim — only the label does. */
+.rail-item svg { opacity: 1; }
+.rail-item:not(.is-active) svg { color: #fff; }
+
+.rail-btn { background: var(--erp-rail-bg); color: #fff; border: 1px solid var(--erp-rail-bg-dark); }
+.rail-btn:hover { background: var(--erp-rail-hover); }
+.rail-grip { background: transparent; }
+.rail-grip:hover, .rail-grip.is-dragging { background: var(--erp-rail-hover); }
+
+/* ---------------------------------------------------------------------------------------------
    Density scale — "fit first, scroll last".
 
    AppLayout writes these custom properties on :root whenever the window resizes or the sidebar is
