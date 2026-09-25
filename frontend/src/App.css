@@ -1,21 +1,49 @@
 .App { min-height: 100vh; }
 
 /* ---------------------------------------------------------------------------------------------
-   Sidebar palette. Kept as variables so the shade can be nudged in one place — the markup never
-   names a colour. Tomato, pulled a little deeper than #FF6347 so white labels stay readable
-   against it; pure tomato sits around 3:1 contrast with white, which is fine for icons but thin
-   for 13px text. Raise --erp-rail-bg toward #FF6347 for a brighter panel, at the cost of some
-   legibility on the smaller labels.
+   Theme palette. The markup never names a colour — it reads these variables, so the whole app
+   re-skins from one hex.
+
+   The values below are only fallbacks, used before JS runs. lib/theme.js overwrites them on
+   :root at start-up from the company's chosen colour, deriving every shade (hover, active,
+   border, muted) from that single hex so the states stay in proportion.
 --------------------------------------------------------------------------------------------- */
 :root {
-  --erp-rail-bg: #E14E37;        /* panel */
-  --erp-rail-bg-dark: #C8402B;   /* footer, borders, the collapse button */
-  --erp-rail-hover: #F06A54;     /* hover row */
+  --erp-rail-bg: #D1001C;        /* panel — Blood Orange */
+  --erp-rail-bg-dark: #A30016;   /* footer, borders, the collapse button */
+  --erp-rail-hover: #DC2440;     /* hover row */
   --erp-rail-text: #FFFFFF;      /* labels + icons */
-  --erp-rail-muted: #FFD2C8;     /* group headings, "signed in" caption */
+  --erp-rail-muted: #FFC2CA;     /* group headings, "signed in" caption */
   --erp-rail-active-bg: #FFFFFF; /* current page */
-  --erp-rail-active-fg: #C8402B;
+  --erp-rail-active-fg: #A30016;
+  --erp-accent: #D1001C;         /* primary buttons, headings */
+  --erp-accent-dark: #A30016;
+  --erp-accent-soft: #FBE6E9;
 }
+
+/* ---------------------------------------------------------------------------------------------
+   Theme reaches the rest of the app by remapping the red utility classes it already uses, rather
+   than editing a hundred files to swap `bg-red-600` for a variable. Blunt, and deliberately so:
+   it is contained in this one block and comes out cleanly once the markup names its intent
+   (brand vs danger) instead of a colour.
+
+   The catch, and the reason every preset is a red: destructive controls use the SAME red-600 in
+   the markup as the brand does, so CSS cannot tell "Save" from "Delete". A blue theme would make
+   the delete icon stop reading as dangerous. Staying inside the red family keeps that safe. To
+   offer other hues, first give destructive controls their own class.
+--------------------------------------------------------------------------------------------- */
+.bg-red-600 { background-color: var(--erp-accent) !important; }
+.bg-red-700 { background-color: var(--erp-accent-dark) !important; }
+.hover\:bg-red-700:hover { background-color: var(--erp-accent-dark) !important; }
+.text-red-600 { color: var(--erp-accent) !important; }
+.text-red-700 { color: var(--erp-accent-dark) !important; }
+.border-red-600 { border-color: var(--erp-accent) !important; }
+.bg-red-50 { background-color: var(--erp-accent-soft) !important; }
+.hover\:bg-red-50:hover { background-color: var(--erp-accent-soft) !important; }
+.hover\:text-red-700:hover { color: var(--erp-accent-dark) !important; }
+
+/* ---------------------------------------------------------------------------------------------
+   Sidebar surfaces.
 
 .rail { background: var(--erp-rail-bg); color: var(--erp-rail-text); }
 .rail-edge { border-color: var(--erp-rail-bg-dark); }
