@@ -11166,6 +11166,17 @@ async def cad_glb(inp: CadGlbIn, user=Depends(get_current_user)):
     return {"mesh_base64": data.get("mesh_base64", ""), "mesh_format": data.get("mesh_format", "stl"), "geometry": data.get("geometry", {})}
 
 # ---------------- Machining quote (STEP upload -> geometry-based cost/time estimate) ----------------
+class MachiningTurningOp(BaseModel):
+    """One lathe cut, priced by T = L / (f x N). Supplied explicitly because whether a
+    cylindrical face is turned or milled is a process-planning decision, not a geometric one."""
+    operation: str = "turning"
+    length_mm: float = 0
+    diameter_mm: float = 0
+    feed_mm_rev: float = 0.2      # for threading, pass the PITCH here — same formula
+    passes: int = 1
+    vc_m_min: float = 0
+
+
 class MachiningQuoteIn(BaseModel):
     step_base64: str
     machine_id: str
@@ -11175,6 +11186,19 @@ class MachiningQuoteIn(BaseModel):
     stock_margin_mm: float = 3
     mill_diameter_mm: float = 10
     flutes: int = 4
+    # Batch size: setup is paid once per batch, so the service divides it across qty. Defaults
+    # to 1 so an existing caller that omits it gets exactly the previous single-part answer.
+    qty: int = 1
+    tolerance_mm: str = "0.125"           # drawing tolerance; see TOLERANCE_FACTORS in the service
+    surface_finish_ra: str = "3.2"        # required Ra in micron; see FINISH_FACTORS
+    turning_ops: List[MachiningTurningOp] = []
+    # Costing inputs. All default to 0 = "not included", so the quote never silently invents a
+    # material price or an overhead rate the shop has not set.
+    material_price_per_kg: float = 0
+    tool_cost: float = 0
+    tool_life_parts: int = 0
+    overhead_pct: float = 0
+    scrap_pct: float = 0
 
 def _axis_capability_note(suggested_axes: int, m_name: str, m_axes: int, m_simult: int) -> Optional[str]:
     """Compare the machining-service's geometry-based axis suggestion against the SELECTED machine's
@@ -11244,6 +11268,17 @@ async def machining_quote(inp: MachiningQuoteIn, user=Depends(get_current_user))
         },
         "tool": {"mill_diameter_mm": inp.mill_diameter_mm, "flutes": inp.flutes},
         "hourly_rate": hourly_rate,
+        "qty": max(inp.qty, 1),
+        "tolerance_mm": inp.tolerance_mm,
+        "surface_finish_ra": inp.surface_finish_ra,
+        "turning_ops": [op.model_dump() for op in (inp.turning_ops or [])],
+        "costing": {
+            "material_price_per_kg": inp.material_price_per_kg,
+            "tool_cost": inp.tool_cost,
+            "tool_life_parts": inp.tool_life_parts,
+            "overhead_pct": inp.overhead_pct,
+            "scrap_pct": inp.scrap_pct,
+        },
     }
 
     try:
@@ -11273,6 +11308,13 @@ async def machining_quote(inp: MachiningQuoteIn, user=Depends(get_current_user))
         "geometry": result.get("geometry", {}), "time_breakdown_min": result.get("time_breakdown_min", {}),
         "cost": result.get("cost", 0), "warnings": result.get("warnings", []),
         "axis_analysis": axis_analysis,
+        # Stored so a past quote can be re-read and understood later: the per-part cost alone
+        # doesn't say what batch size, tolerance or finish produced it, and those move the
+        # number by several times over.
+        "qty": max(inp.qty, 1),
+        "cost_breakdown": result.get("cost_breakdown", {}),
+        "spec_factors": result.get("spec_factors", {}),
+        "turning_breakdown": result.get("turning_breakdown", []),
         "created_by": (user.get("name") or user.get("email", "")) if isinstance(user, dict) else "",
         "created_at": now_iso(),
     }
