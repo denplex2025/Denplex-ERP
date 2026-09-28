@@ -9,7 +9,11 @@ import { toast } from "sonner";
 
 const fileToB64 = (f) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(f); });
 const Fld = ({ label, children }) => (<div><Label className="text-[11px] uppercase tracking-wider text-slate-500">{label}</Label><div className="mt-1">{children}</div></div>);
-const ROW_LABELS = { setup: "Setup", facing: "Facing", roughing: "Roughing", drilling: "Drilling", profile_finish: "Profile finish", total: "Total" };
+const ROW_LABELS = {
+  setup: "Setup (whole batch)", facing: "Facing", roughing: "Roughing", drilling: "Drilling",
+  profile_finish: "Profile finish", turning: "Turning", spec_uplift: "Tolerance / finish uplift",
+  total: "Total",
+};
 
 export default function MachiningQuote() {
   const [machines, setMachines] = useState([]);
@@ -18,6 +22,18 @@ export default function MachiningQuote() {
   const [material, setMaterial] = useState("");
   const [partName, setPartName] = useState("");
   const [hourlyRate, setHourlyRate] = useState("");
+  // Batch size drives setup amortisation — setup is paid once per batch, not once per part.
+  const [qty, setQty] = useState("1");
+  const [tolerance, setTolerance] = useState("0.125");
+  const [finishRa, setFinishRa] = useState("3.2");
+  // Costing inputs. Blank = "not included" rather than zero-priced, so the quote never
+  // silently invents a material rate the shop hasn't entered.
+  const [matPrice, setMatPrice] = useState("");
+  const [scrapPct, setScrapPct] = useState("");
+  const [toolCost, setToolCost] = useState("");
+  const [toolLife, setToolLife] = useState("");
+  const [overheadPct, setOverheadPct] = useState("");
+  const [showCosting, setShowCosting] = useState(false);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
@@ -45,9 +61,20 @@ export default function MachiningQuote() {
     setBusy(true); setResult(null); setError("");
     try {
       const step_base64 = await fileToB64(step);
+      // Blank costing fields are sent as 0, which the service reads as "not included" and says
+      // so in its notes — rather than quietly costing material at zero.
+      const num = (v) => (v === "" || v === null || v === undefined ? 0 : Number(v));
       const r = await api.post("/machining/quote", {
         step_base64, machine_id: machineId, material,
         part_name: partName, hourly_rate: hourlyRate ? Number(hourlyRate) : undefined,
+        qty: Math.max(parseInt(qty, 10) || 1, 1),
+        tolerance_mm: tolerance,
+        surface_finish_ra: finishRa,
+        material_price_per_kg: num(matPrice),
+        scrap_pct: num(scrapPct),
+        tool_cost: num(toolCost),
+        tool_life_parts: parseInt(toolLife, 10) || 0,
+        overhead_pct: num(overheadPct),
       });
       setResult(r.data);
       toast.success("Quote ready");
@@ -107,10 +134,87 @@ export default function MachiningQuote() {
                 {materials.map((m) => (<option key={m} value={m}>{m}</option>))}
               </select>
             </Fld>
-            <Fld label="Hourly rate (₹/hr)">
-              <Input type="number" min="0" value={hourlyRate} onChange={(e) => setHourlyRate(e.target.value)}
-                placeholder="defaults to the machine's rate" />
-            </Fld>
+            <div className="grid grid-cols-2 gap-3">
+              <Fld label="Hourly rate (₹/hr)">
+                <Input type="number" min="0" value={hourlyRate} onChange={(e) => setHourlyRate(e.target.value)}
+                  placeholder="machine's rate" />
+              </Fld>
+              <Fld label="Quantity (batch size)">
+                <Input type="number" min="1" step="1" value={qty} onChange={(e) => setQty(e.target.value)} />
+              </Fld>
+            </div>
+            <p className="text-[11px] text-slate-500 -mt-1">
+              Setup is charged once for the whole batch and divided across the quantity — so a larger
+              order costs less per part.
+            </p>
+
+            <div className="grid grid-cols-2 gap-3">
+              <Fld label="Tolerance">
+                <select value={tolerance} onChange={(e) => setTolerance(e.target.value)}
+                  className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm bg-white h-10">
+                  <option value="0.25">± 0.25 mm — loose</option>
+                  <option value="0.125">± 0.125 mm — standard</option>
+                  <option value="0.05">± 0.05 mm — close</option>
+                  <option value="0.025">± 0.025 mm — precision (needs grinding)</option>
+                  <option value="0.0125">± 0.0125 mm — ultra (grind + lap)</option>
+                </select>
+              </Fld>
+              <Fld label="Surface finish">
+                <select value={finishRa} onChange={(e) => setFinishRa(e.target.value)}
+                  className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm bg-white h-10">
+                  <option value="6.3">Ra 6.3 µm — as milled</option>
+                  <option value="3.2">Ra 3.2 µm — standard</option>
+                  <option value="1.6">Ra 1.6 µm</option>
+                  <option value="0.8">Ra 0.8 µm — fine</option>
+                  <option value="0.2">Ra 0.2 µm — super fine (polish)</option>
+                  <option value="0.1">Ra 0.1 µm — mirror (lap)</option>
+                </select>
+              </Fld>
+            </div>
+            <p className="text-[11px] text-slate-500 -mt-1">
+              Tighter specs mean slower feeds and extra finishing passes, so they stretch cutting time.
+              The larger of the two applies — they are not multiplied together.
+            </p>
+
+            <button type="button" onClick={() => setShowCosting((v) => !v)}
+              className="text-xs font-medium text-red-700 hover:underline">
+              {showCosting ? "− Hide" : "+ Add"} material, tooling &amp; overhead
+            </button>
+            {showCosting && (
+              <div className="rounded-md border border-slate-200 p-3 space-y-3 bg-slate-50">
+                <div className="grid grid-cols-2 gap-3">
+                  <Fld label="Material (₹/kg)">
+                    <Input type="number" min="0" value={matPrice} onChange={(e) => setMatPrice(e.target.value)}
+                      placeholder="leave blank to skip" />
+                  </Fld>
+                  <Fld label="Scrap allowance %">
+                    <Input type="number" min="0" value={scrapPct} onChange={(e) => setScrapPct(e.target.value)}
+                      placeholder="0" />
+                  </Fld>
+                  <Fld label="Tool cost (₹)">
+                    <Input type="number" min="0" value={toolCost} onChange={(e) => setToolCost(e.target.value)}
+                      placeholder="leave blank to skip" />
+                  </Fld>
+                  <Fld label="Parts per tool">
+                    <Input type="number" min="0" step="1" value={toolLife} onChange={(e) => setToolLife(e.target.value)}
+                      placeholder="tool life" />
+                  </Fld>
+                </div>
+                <Fld label="Overhead %">
+                  <Input type="number" min="0" value={overheadPct} onChange={(e) => setOverheadPct(e.target.value)}
+                    placeholder="0" />
+                </Fld>
+                <p className="text-[11px] text-slate-500">
+                  Overhead applies to the machine cost only, never to material or bought-out tooling.
+                  Leave it at 0 until you have confirmed whether your machine hourly rate already
+                  includes factory overhead — otherwise it gets counted twice.
+                </p>
+                <p className="text-[11px] text-slate-500">
+                  Material is costed on the billet, including what becomes swarf — not on the finished
+                  part weight.
+                </p>
+              </div>
+            )}
             <Button onClick={generate} disabled={busy} className="bg-red-600 hover:bg-red-700 text-white w-full">
               {busy ? <><Loader2 className="w-4 h-4 mr-1 animate-spin" /> Generating…</> : "Generate Quote"}
             </Button>
@@ -205,10 +309,88 @@ export default function MachiningQuote() {
                   </table>
                 </div>
 
-                <div className="bg-red-50 border border-red-200 rounded-md p-3 flex items-center justify-between">
-                  <span className="text-sm font-medium text-red-800">Estimated cost</span>
-                  <span className="text-xl font-bold text-red-700">₹{result.cost?.toLocaleString("en-IN")}</span>
-                </div>
+                {result.turning_breakdown?.length > 0 && (
+                  <div>
+                    <div className="text-xs uppercase tracking-wider text-slate-500 mb-1">Turning operations</div>
+                    <table className="w-full text-sm">
+                      <thead className="text-xs text-slate-400">
+                        <tr>
+                          <th className="text-left font-normal">Op</th><th className="text-left font-normal">L (mm)</th>
+                          <th className="text-left font-normal">Ø</th><th className="text-right font-normal">rpm</th>
+                          <th className="text-right font-normal">Passes</th><th className="text-right font-normal">min</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {result.turning_breakdown.map((t, i) => (
+                          <tr key={i} className="border-t">
+                            <td className="py-1">{t.operation}</td><td>{t.length_mm}</td><td>{t.diameter_mm}</td>
+                            <td className="text-right">{t.rpm}</td><td className="text-right">{t.passes}</td>
+                            <td className="text-right">{t.minutes}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                {result.spec_factors && result.spec_factors.applied_factor !== 1 && (
+                  <div className="text-xs text-slate-600 bg-slate-50 border border-slate-200 rounded-md p-2">
+                    <span className="font-medium">Spec uplift ×{result.spec_factors.applied_factor}</span>
+                    {" — "}
+                    {result.spec_factors.tolerance_factor >= result.spec_factors.finish_factor
+                      ? result.spec_factors.tolerance_label
+                      : result.spec_factors.finish_label}
+                    {". Applied to cutting time only."}
+                  </div>
+                )}
+
+                {result.cost_breakdown?.per_part ? (
+                  <div className="border border-red-200 rounded-md overflow-hidden">
+                    <table className="w-full text-sm">
+                      <tbody>
+                        {[["material", "Material"], ["machine", "Machine (incl. operator)"],
+                          ["tooling", "Tooling"], ["overhead", "Overhead"]].map(([k, label]) => (
+                          <tr key={k} className="border-b border-red-100">
+                            <td className="py-1.5 px-3 text-slate-600">{label}</td>
+                            <td className="py-1.5 px-3 text-right tabular-nums">
+                              ₹{(result.cost_breakdown.per_part[k] || 0).toLocaleString("en-IN")}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    <div className="bg-red-50 p-3 flex items-center justify-between">
+                      <span className="text-sm font-medium text-red-800">
+                        Cost per part
+                        {result.cost_breakdown.qty > 1 && (
+                          <span className="font-normal text-red-600"> · {result.cost_breakdown.qty} off</span>
+                        )}
+                      </span>
+                      <span className="text-xl font-bold text-red-700">
+                        ₹{result.cost_breakdown.per_part.total?.toLocaleString("en-IN")}
+                      </span>
+                    </div>
+                    {result.cost_breakdown.qty > 1 && (
+                      <div className="bg-red-50 border-t border-red-100 px-3 pb-3 flex items-center justify-between">
+                        <span className="text-xs text-red-700">Batch total</span>
+                        <span className="text-sm font-semibold text-red-700">
+                          ₹{result.cost_breakdown.batch_total?.toLocaleString("en-IN")}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="bg-red-50 border border-red-200 rounded-md p-3 flex items-center justify-between">
+                    <span className="text-sm font-medium text-red-800">Estimated cost</span>
+                    <span className="text-xl font-bold text-red-700">₹{result.cost?.toLocaleString("en-IN")}</span>
+                  </div>
+                )}
+
+                {result.cost_breakdown?.notes?.length > 0 && (
+                  <ul className="text-[11px] text-slate-500 list-disc pl-4 space-y-0.5">
+                    {result.cost_breakdown.notes.map((n, i) => (<li key={i}>{n}</li>))}
+                  </ul>
+                )}
 
                 {result.assumptions?.length > 0 && (
                   <div>
