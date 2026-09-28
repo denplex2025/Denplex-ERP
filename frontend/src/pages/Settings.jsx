@@ -12,6 +12,22 @@ import { Save, Copy, ShieldCheck, ShieldOff, Plus, Trash2, RefreshCw, Star, Exte
 import { toast } from "sonner";
 import { CURRENCIES, money, getCurrency, setCurrency } from "@/lib/currency";
 import { THEMES, getTheme, setTheme, normalizeHex, readableOn, contrastOn } from "@/lib/theme";
+import { contrastWithWhite } from "@/lib/theme";
+
+// A short palette for printed documents. Deliberately limited: these are inks that survive a
+// mono laser, not a design system. Anything else is still reachable through the colour picker.
+const DOC_INK_PRESETS = [
+  { name: "Black", hex: "#000000" },
+  { name: "Near black", hex: "#0A0A0A" },
+  { name: "Charcoal", hex: "#333333" },
+  { name: "Slate", hex: "#334155" },
+  { name: "Navy", hex: "#1E3A8A" },
+  { name: "Denplex red", hex: "#CC0000" },
+  { name: "Bright red", hex: "#DC2626" },
+  { name: "Maroon", hex: "#7F1D1D" },
+  { name: "Forest", hex: "#14532D" },
+  { name: "Brown", hex: "#78350F" },
+];
 
 export default function Settings() {
   const [tab, setTab] = useState("company");
@@ -1044,31 +1060,92 @@ function InvoiceTemplatePanel() {
             <div className="text-[10px] font-semibold tracking-[0.18em] uppercase text-slate-500 mb-2 border-b border-slate-200 pb-1">
               Font colors
             </div>
-            <div className="grid grid-cols-3 gap-3 mt-2">
+            <p className="text-[11px] text-slate-500 mb-3">
+              These apply to the printed document. Blank means the built-in default.
+              <br />
+              <strong>For body text, near-black prints best.</strong> A mono laser lays pure black down as solid
+              toner, but screens every other colour into a dot pattern — so a dark slate can measure as high
+              contrast and still look washed out at 7pt. Keep colour for the accent, where it is large enough
+              to survive. Colour printing is unaffected.
+            </p>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-2">
               {[
-                { key: "color_heading", label: "Heading (title, company name)" },
-                { key: "color_body", label: "Body (table & general text)" },
-                { key: "color_accent", label: "Accent (totals, underline, borders)" },
-              ].map(({ key, label }) => (
-                <div key={key}>
-                  <Label className="text-xs text-slate-600">{label}</Label>
-                  <div className="flex items-center gap-2 mt-1">
-                    <input
-                      type="color"
-                      value={/^#[0-9a-fA-F]{6}$/.test(t[key] || "") ? t[key] : "#000000"}
-                      onChange={(e)=>setField(key, e.target.value)}
-                      className="h-9 w-9 border border-slate-300 rounded-sm cursor-pointer p-0.5 bg-white"
-                      data-testid={`tpl-${key}`}
-                    />
-                    <Input
-                      value={t[key] || ""}
-                      onChange={(e)=>setField(key, e.target.value)}
-                      placeholder="Default"
-                      className="h-9 text-sm"
-                    />
+                { key: "color_heading", label: "Heading (title, company name)", def: "#0A0A0A" },
+                { key: "color_body", label: "Body (addresses, items, terms)", def: "#0A0A0A" },
+                { key: "color_accent", label: "Accent (totals, underline, borders)", def: "#DC2626" },
+              ].map(({ key, label, def }) => {
+                const val = (t[key] || "").trim();
+                const isHex = /^#[0-9a-fA-F]{6}$/.test(val);
+                const effective = isHex ? val : def;
+                const ratio = contrastWithWhite(effective);
+                return (
+                  <div key={key}>
+                    <Label className="text-xs text-slate-600">{label}</Label>
+
+                    {/* A short palette covers what a business document actually needs. The full
+                        picker stays for anyone who wants their exact brand colour. */}
+                    <div className="flex flex-wrap gap-1 mt-1.5">
+                      {DOC_INK_PRESETS.map(c => (
+                        <button
+                          key={c.hex}
+                          type="button"
+                          title={`${c.name} · ${c.hex}`}
+                          onClick={() => setField(key, c.hex)}
+                          className={`h-6 w-6 rounded-sm border ${effective.toLowerCase() === c.hex.toLowerCase() ? "ring-2 ring-offset-1 ring-slate-800 border-transparent" : "border-slate-300"}`}
+                          style={{ background: c.hex }}
+                          data-testid={`tpl-${key}-${c.hex.slice(1)}`}
+                        />
+                      ))}
+                    </div>
+
+                    <div className="flex items-center gap-2 mt-2">
+                      <input
+                        type="color"
+                        value={effective}
+                        onChange={(e)=>setField(key, e.target.value)}
+                        className="h-9 w-9 border border-slate-300 rounded-sm cursor-pointer p-0.5 bg-white"
+                        data-testid={`tpl-${key}`}
+                      />
+                      <Input
+                        value={t[key] || ""}
+                        onChange={(e)=>setField(key, e.target.value)}
+                        placeholder={`Default ${def}`}
+                        className="h-9 text-sm font-mono-tech"
+                      />
+                      {val && (
+                        <button
+                          type="button"
+                          onClick={() => setField(key, "")}
+                          title="Back to the built-in default"
+                          className="text-[11px] text-slate-500 hover:text-slate-900 underline underline-offset-2 whitespace-nowrap"
+                          data-testid={`tpl-${key}-reset`}
+                        >
+                          Default
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Two different questions. Contrast says whether it is dark enough to read at
+                        all; the near-black check says whether a mono laser will print it as solid
+                        toner rather than dithering it into dots. The old slate default scored 10:1
+                        and still printed faint, which is what that second check is for. */}
+                    <div className="mt-1 text-[11px] leading-snug">
+                      {ratio < 4.5 ? (
+                        <span className="text-amber-700">Too light — prints faint ({ratio.toFixed(1)}:1 on white)</span>
+                      ) : ratio >= 15 ? (
+                        <span className="text-emerald-700">Solid on a mono printer ({ratio.toFixed(1)}:1)</span>
+                      ) : key === "color_accent" ? (
+                        <span className="text-slate-500">Fine for an accent ({ratio.toFixed(1)}:1)</span>
+                      ) : (
+                        <span className="text-amber-700">
+                          Dark enough ({ratio.toFixed(1)}:1) but a mono laser will screen it into dots at small
+                          sizes. Near-black is safer for body text.
+                        </span>
+                      )}
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
             <p className="text-xs text-slate-500 mt-2">Leave a field blank to use the default color for that style preset.</p>
           </div>
