@@ -5925,10 +5925,21 @@ async def update_invoice_template(payload: Dict[str, Any], user=Depends(require_
         clean = {k: v for k, v in payload.items() if k in allowed}
         s["default"] = clean
     else:
-        # Map payload → merge each doc_type
+        # Map payload → merge each doc_type.
+        #
+        # Overrides are stored SPARSELY: only keys that actually differ from the resolved default
+        # are kept. GET hands the UI every doc type already merged with the default, and the UI
+        # PUTs all of them back, so storing them verbatim wrote a full frozen copy of the default
+        # into all nine doc types on the first save. From then on "Default (all docs)" changed
+        # nothing — every type had its own copy that won. Diffing here keeps inheritance alive.
+        incoming_default = payload.get("default")
+        if isinstance(incoming_default, dict):
+            s["default"] = {k: v for k, v in incoming_default.items() if k in allowed}
+        base = {**InvoiceTemplateIn().model_dump(), **(s.get("default") or {})}
         for dt, flags in payload.items():
-            if not isinstance(flags, dict): continue
-            s[dt] = {k: v for k, v in flags.items() if k in allowed}
+            if dt == "default" or not isinstance(flags, dict):
+                continue
+            s[dt] = {k: v for k, v in flags.items() if k in allowed and v != base.get(k)}
     await set_setting("invoice_template", s)
     return s
 
@@ -7620,7 +7631,10 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
     company_lines = [Paragraph(f"<font size=11><b>{company.get('company_name','Denplex Engineering Company')}</b></font>", smallb)]
     if show("show_company_udyam") and company.get("company_udyam"):
         company_lines.append(Spacer(1, 1.5*mm))
-        company_lines.append(Paragraph(f"<font size=8 color='#475569'>UDYAM REGISTRATION NUMBER - <b>{company['company_udyam']}</b></font>", tiny))
+        # No inline colour: the `tiny` style supplies it, like every other line on the document.
+        # This used to hardcode color='#475569', which beat the paragraph style and survived every
+        # attempt to darken the PDF — it is why this line stayed grey after INK went near-black.
+        company_lines.append(Paragraph(f"<font size=8>UDYAM REGISTRATION NUMBER - <b>{company['company_udyam']}</b></font>", tiny))
         company_lines.append(Spacer(1, 1*mm))
     # Multi-unit address takes priority; fall back to single company_address
     _units = company.get("company_units") or []
@@ -8234,7 +8248,7 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
                 sig_block.append(Spacer(1, 12*mm))
         else:
             sig_block.append(Spacer(1, 12*mm))
-        sig_block.append(Paragraph(f"<font color='#475569'>{company.get('signatory_label','Authorised Signatory')}</font>", tiny))
+        sig_block.append(Paragraph(company.get("signatory_label", "Authorised Signatory"), tiny))
 
         bs_tbl = Table([[bank_block, sig_block]], colWidths=[95*mm, 95*mm])
         bs_tbl.setStyle(TableStyle([
