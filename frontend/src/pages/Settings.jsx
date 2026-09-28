@@ -904,6 +904,7 @@ function InvoiceTemplatePanel() {
   const [docType, setDocType] = useState("default");
   const [allTpl, setAllTpl] = useState(null);   // full map keyed by doc_type
   const [previewUrl, setPreviewUrl] = useState("");
+  const [previewBusy, setPreviewBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [editorOpen, setEditorOpen] = useState(false);
 
@@ -933,18 +934,36 @@ function InvoiceTemplatePanel() {
     toast.success(`Reset ${DOC_TYPES.find(d=>d.key===docType)?.label} to default`);
   };
 
-  const livePreview = async () => {
+  // `quiet` suppresses the toasts for the automatic refresh below — an auto-refresh that shouts
+  // "no records found" every keystroke is worse than no auto-refresh.
+  const livePreview = async ({ quiet = false } = {}) => {
     const ep = docType === "default" ? "/invoices" : PREVIEW_ENDPOINTS[docType];
-    if (!ep) { toast.error("Pick a non-default doc type to preview"); return; }
+    if (!ep) { if (!quiet) toast.error("Pick a non-default doc type to preview"); return; }
+    setPreviewBusy(true);
     try {
       const list = await api.get(ep);
-      const first = list.data?.[0]; if (!first) { toast.error(`No ${docType} records found to preview`); return; }
+      const first = list.data?.[0];
+      if (!first) { if (!quiet) toast.error(`No ${docType} records found to preview`); return; }
       await api.put("/settings/invoice-template", allTpl);
       const r = await api.get(`${ep}/${first.id}/pdf`, { responseType: "blob" });
       if (previewUrl) URL.revokeObjectURL(previewUrl);
       setPreviewUrl(URL.createObjectURL(r.data));
-    } catch (e) { toast.error(e?.response?.data?.detail || "Preview failed"); }
+    } catch (e) { if (!quiet) toast.error(e?.response?.data?.detail || "Preview failed"); }
+    finally { setPreviewBusy(false); }
   };
+
+  // The panel says "live preview" but nothing refreshed it — you changed a colour or a preset,
+  // kept looking at a PDF rendered before the change, and concluded the setting did nothing.
+  // Now any template edit re-renders after a pause. Debounced because each refresh is a PUT plus
+  // a PDF build on the server, and typing a hex code fires on every character.
+  const tplFingerprint = JSON.stringify(allTpl?.[docType] || {});
+  useEffect(() => {
+    if (!allTpl) return;
+    if (!previewUrl) return;          // nothing on screen yet: wait for the first manual Preview
+    const t = setTimeout(() => { livePreview({ quiet: true }); }, 900);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tplFingerprint, docType]);
 
   if (loading || !allTpl) return <Card className="p-6"><div className="text-sm text-slate-500">Loading…</div></Card>;
 
@@ -1034,7 +1053,10 @@ function InvoiceTemplatePanel() {
       </Card>
       <Card className="p-3 lg:col-span-3 bg-slate-50">
         <div className="flex items-center justify-between mb-2 px-3">
-          <span className="text-xs uppercase tracking-wider text-slate-600">Live preview · {DOC_TYPES.find(d=>d.key===docType)?.label}</span>
+          <span className="text-xs uppercase tracking-wider text-slate-600">
+            Live preview · {DOC_TYPES.find(d=>d.key===docType)?.label}
+            {previewBusy && <span className="ml-2 normal-case tracking-normal text-slate-400">re-rendering…</span>}
+          </span>
           {previewUrl && <a href={previewUrl} target="_blank" rel="noreferrer" className="text-xs text-red-600 underline">Open in new tab</a>}
         </div>
         {previewUrl ? (
