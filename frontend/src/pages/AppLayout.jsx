@@ -270,6 +270,10 @@ export default function AppLayout() {
     r.setProperty("--erp-gap", `${lerp(6, 16).toFixed(2)}px`);        // grid gaps
     r.setProperty("--erp-pad", `${lerp(12, 32).toFixed(2)}px`);       // page padding
     r.setProperty("--erp-avail", `${avail}px`);
+    // Published so fixed-position elements (the sticky save bars on document forms) can align to
+    // the content area. They used to hardcode lg:left-64, which stopped being true the moment the
+    // sidebar became draggable.
+    r.setProperty("--erp-rail-w", `${w}px`);
   }, []);
 
   useEffect(() => {
