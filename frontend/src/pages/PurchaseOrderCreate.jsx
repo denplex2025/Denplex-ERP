@@ -4,6 +4,7 @@ import api from "@/lib/api";
 import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
 import DocumentForm, { PartyPicker, LineGrid, TotalsBlock, Fld, IdRow } from "@/components/erp/DocumentForm";
+import { isInterstate, stateName } from "@/lib/gstState";
 
 const DEFAULT_TC = "1) Goods must conform to the agreed specification and drawing.\n2) Delivery to be completed on or before the delivery date.\n3) Material test certificates / inspection reports to accompany the supply where applicable.";
 const blankLine = () => ({ item_code: "", description: "", hsn: "", qty: 1, unit: "Nos", rate: 0, discount_pct: 0, discount_amount: 0, gst_rate: 18 });
@@ -12,6 +13,10 @@ export default function PurchaseOrderCreate() {
   const navg = useNavigate();
   const today = new Date().toISOString().slice(0, 10);
   const [suppliers, setSuppliers] = useState([]);
+  const [companyState, setCompanyState] = useState("");
+  // Set when the GST type was decided from the two states rather than chosen by hand, so the
+  // form can say why it changed instead of silently flipping a tax setting.
+  const [gstAuto, setGstAuto] = useState("");
   const [items, setItems] = useState([]);
   const [saving, setSaving] = useState(false);
   const [f, setF] = useState({
@@ -29,6 +34,7 @@ export default function PurchaseOrderCreate() {
         setSuppliers(s.data || []); setItems(it.data || []);
       } catch (e) { /* ignore */ }
     })();
+    api.get("/settings/integrations").then(r => setCompanyState(r.data?.company_state || "")).catch(() => {});
     api.get("/masters").then(r => {
       const t = r.data?.doc_terms?.["Purchase Order"];
       if (t) setF(p => (p.terms_text === DEFAULT_TC || !p.terms_text ? { ...p, terms_text: t } : p));
@@ -38,11 +44,24 @@ export default function PurchaseOrderCreate() {
   // Picking a supplier also sets the place of supply, which decides CGST+SGST vs IGST. Only
   // filled when the user hasn't already typed one, so a manual override is never clobbered.
   const pickSupplier = (s) => {
-    if (!s) { setF(p => ({ ...p, supplier_id: "", supplier_name: "", supplier_gstin: "" })); return; }
+    if (!s) {
+      setF(p => ({ ...p, supplier_id: "", supplier_name: "", supplier_gstin: "" }));
+      setGstAuto("");
+      return;
+    }
+    // Same state as us -> CGST+SGST, different -> IGST. isInterstate returns null when either
+    // state is missing or unrecognised, and in that case the existing choice is left alone: a
+    // guess here would put the wrong tax on a filed document.
+    const inter = isInterstate(companyState, s.state);
     setF(p => ({
-      ...p, supplier_id: s.id, supplier_name: s.name || "", supplier_gstin: s.gstin || "",
-      place_of_supply: p.place_of_supply || s.state || "",
+      ...p,
+      supplier_id: s.id, supplier_name: s.name || "", supplier_gstin: s.gstin || "",
+      place_of_supply: s.state || p.place_of_supply || "",
+      is_interstate: inter === null ? p.is_interstate : inter,
     }));
+    setGstAuto(inter === null
+      ? (s.state ? "" : "No state on this supplier — set GST type yourself")
+      : `${inter ? "IGST" : "CGST+SGST"} — ${stateName(s.state) || "supplier"} vs ${stateName(companyState) || "your state"}`);
   };
 
   // Typing in the description column doubles as an item lookup: an exact match pulls the SKU,
@@ -170,7 +189,7 @@ export default function PurchaseOrderCreate() {
             <IdRow label="GST Type">
               <select
                 value={f.is_interstate ? "inter" : "intra"}
-                onChange={e => set("is_interstate", e.target.value === "inter")}
+                onChange={e => { set("is_interstate", e.target.value === "inter"); setGstAuto(""); }}
                 className="w-full h-9 text-sm border border-slate-200 rounded-sm px-2 bg-white"
                 data-testid="po-gst-type"
               >
@@ -178,6 +197,9 @@ export default function PurchaseOrderCreate() {
                 <option value="inter">Inter-state (IGST)</option>
               </select>
             </IdRow>
+            {gstAuto && (
+              <div className="text-[11px] text-slate-500 text-right" data-testid="po-gst-auto">{gstAuto}</div>
+            )}
           </>
         }
 
