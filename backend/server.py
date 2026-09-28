@@ -7524,7 +7524,12 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
     # the "accent" color (Grand Total highlight, and _accent below for modern/compact presets).
     RED = _hex_or(tpl.get("color_accent"), colors.HexColor("#DC2626"))
     BLACK = _hex_or(tpl.get("color_heading"), colors.HexColor("#0A0A0A"))
-    INK = _hex_or(tpl.get("color_body"), colors.HexColor("#334155"))
+    # Body text: everything that is not a heading — party addresses, item descriptions, terms,
+    # bank details. Was slate-700 (#334155), which reads as blue-grey and prints washed out on a
+    # mono laser; a posted invoice was noticeably harder to read than the company name above it.
+    # Now the same near-black as the headings, so all text on the document prints at one solid
+    # weight. NOTE: a colour saved in Settings > Invoice Template overrides this default.
+    INK = _hex_or(tpl.get("color_body"), colors.HexColor("#0A0A0A"))
     # Near-black, not slate. #475569 looks fine on a screen and prints washed out at 7pt on an
     # office laser — addresses and footers were hard to read on a posted invoice. Kept a shade
     # off pure black so there is still a hierarchy against the headings.
