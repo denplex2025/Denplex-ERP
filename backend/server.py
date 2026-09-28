@@ -10797,6 +10797,18 @@ async def vyapar_reconcile(payload: VyaparReconcileIn, user=Depends(require_role
 # ---------------------------------------------------------------------------
 # AI Fixture Concept Generator — part drawing / 3D (STL) → jig & fixture brief
 # ---------------------------------------------------------------------------
+# The engineering rules (locating, clamping force, fits, materials, review checklist) live in
+# their own module so they can be edited as Denplex learns from real jobs without touching
+# server.py. Guarded: a problem in the rules file must degrade the fixture generator to its
+# previous house-style-only behaviour, not stop the whole ERP from booting.
+try:
+    from fixture_rules import FIXTURE_DESIGN_RULES
+except Exception as _e:      # pragma: no cover
+    # `logger` is bound further down this file, so log through the module directly.
+    logging.getLogger(__name__).warning(
+        "fixture_rules unavailable, fixture concepts will lack design rules: %s", _e)
+    FIXTURE_DESIGN_RULES = ""
+
 DENPLEX_FIXTURE_KB = (
     "\n\nDENPLEX HOUSE STYLE (learned from real Denplex fixtures — follow this):\n"
     "CONSTRUCTION: a flat BASE PLATE (MS or aluminium, ~12-20 mm) cut by LASER or WATERJET with "
@@ -10837,7 +10849,7 @@ FIXTURE_SYSTEM = (
         "larger than the part's X-Y bounding box, and give approximate post heights from the Z extent. Quote the "
         "real dimensions (mm) from the geometry inside locating_scheme, supports and base_plate. Be specific to "
         "THIS part — never generic."
-    )
+    ) + FIXTURE_DESIGN_RULES
 )
 FIXTURE_SCHEMA = (
     'Return ONLY this JSON: {"fixture_type":str, "summary":str, '
