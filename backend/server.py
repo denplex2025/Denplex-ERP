@@ -1477,7 +1477,7 @@ def _qc_header_footer(canvas, doc):
     from reportlab.lib.utils import ImageReader
     from reportlab.lib.colors import HexColor
     W, H = doc.pagesize
-    RED = HexColor("#CC0000"); BLACK = HexColor("#1A1A1A"); GREY = HexColor("#666666")
+    RED = HexColor("#CC0000"); BLACK = HexColor("#1A1A1A"); GREY = HexColor("#333333")
     canvas.saveState()
     # ---- HEADER ----
     try:
@@ -1514,7 +1514,7 @@ def _qc_header_footer(canvas, doc):
         "+91 90333 38999  -  contact@denplex.co  -  www.denplex.co")
     canvas.setFillColor(RED); canvas.setFont(_PDF_FONT_BOLD, 7)
     canvas.drawRightString(W - 12*mm, 13.6*mm, "GST: 24AALFD1671P1Z2")
-    canvas.setFillColor(HexColor("#888888")); canvas.setFont(_PDF_FONT_REGULAR, 7)
+    canvas.setFillColor(HexColor("#444444")); canvas.setFont(_PDF_FONT_REGULAR, 7)
     canvas.drawCentredString(W/2.0, 10*mm, "Complete Engineering Solutions  -  Since 2015  -  600+ Clients Served   |   Page %d" % canvas.getPageNumber())
     canvas.restoreState()
 
@@ -7525,7 +7525,10 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
     RED = _hex_or(tpl.get("color_accent"), colors.HexColor("#DC2626"))
     BLACK = _hex_or(tpl.get("color_heading"), colors.HexColor("#0A0A0A"))
     INK = _hex_or(tpl.get("color_body"), colors.HexColor("#334155"))
-    GREY = colors.HexColor("#475569")
+    # Near-black, not slate. #475569 looks fine on a screen and prints washed out at 7pt on an
+    # office laser — addresses and footers were hard to read on a posted invoice. Kept a shade
+    # off pure black so there is still a hierarchy against the headings.
+    GREY = colors.HexColor("#1A1A1A")
     LIGHTGREY = colors.HexColor("#F4F6F8")
     BORDER = colors.HexColor("#D7DEE7")
 
@@ -13590,7 +13593,7 @@ def _party_stmt_pdf(stmt: dict, company: dict, date_from: str = "", date_to: str
     ss = getSampleStyleSheet()
     el = []
     small = ParagraphStyle("PartyStmtCompany", parent=ss["Normal"], fontSize=8, leading=10,
-                           textColor=colors.HexColor("#475569"))
+                           textColor=colors.HexColor("#1A1A1A"))
     company_block = _stmt_company_block(company, small)
     logo_path = ROOT_DIR / "logo.png"
     if logo_path.exists():
