@@ -39,6 +39,17 @@ function luminance(hex) {
   return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
 }
 export const readableOn = (hex) => (luminance(hex) > 0.45 ? "#1f2937" : "#ffffff");
+
+/**
+ * Contrast of this colour as INK ON WHITE PAPER — the opposite question to readableOn, which
+ * asks what text colour sits on a filled panel. Document text is printed on white, so this is
+ * what decides whether an invoice is legible after it comes off a mono laser.
+ * 4.5:1 is the WCAG AA threshold for body text; below ~7:1 small print starts to look faint.
+ */
+export function contrastWithWhite(hex) {
+  const L = luminance(hex);
+  return (1.0 + 0.05) / (L + 0.05);
+}
 export const contrastOn = (hex) => {
   const L = luminance(hex);
   const other = luminance(readableOn(hex));
