@@ -62,6 +62,73 @@ class ToolIn(BaseModel):
     finishing_feed_factor: float = 0.5  # finish passes run slower than roughing feed
 
 
+# ---------------------------------------------------------------------------
+# Tolerance and surface-finish cost multipliers
+# ---------------------------------------------------------------------------
+# Tighter tolerances and finer finishes cost more because they force slower feeds and extra
+# finishing passes. These factors are applied to CUTTING time only — never to setup (a tight
+# part doesn't take longer to clamp) and never to material (the billet costs the same).
+#
+# The published tables express these as multipliers on total part COST, which bundles in
+# secondary operations like grinding and honing. We apply them to cutting time instead, which
+# is the part we can actually model; where the spec genuinely implies grinding or lapping the
+# estimate will run LOW and the service says so in a warning rather than quietly pretending.
+#
+# Baseline is the middle row of each table (±0.005" / ~±0.125 mm, and Ra 3.2 µm) — ordinary
+# milling and turning with a roughing pass plus one finishing pass. Keys are mm and µm because
+# that is what Denplex's drawings use; the inch equivalents are noted for cross-checking.
+TOLERANCE_FACTORS = {
+    "0.25":   (0.85, "±0.25 mm (±0.010\") loose — single finish pass, standard feeds"),
+    "0.125":  (1.00, "±0.125 mm (±0.005\") standard — baseline, roughing + finishing"),
+    "0.05":   (2.25, "±0.05 mm (±0.002\") close — multiple finishing passes, reduced feed"),
+    "0.025":  (4.00, "±0.025 mm (±0.001\") precision — finishing passes plus grinding or honing"),
+    "0.0125": (7.50, "±0.0125 mm (±0.0005\") ultra — grinding/honing plus lapping"),
+}
+DEFAULT_TOLERANCE = "0.125"
+
+FINISH_FACTORS = {
+    "6.3": (0.90, "Ra 6.3 µm — as-milled, no finishing emphasis"),
+    "3.2": (1.00, "Ra 3.2 µm (125 µin) standard — baseline, normal mill/lathe finish"),
+    "1.6": (1.50, "Ra 1.6 µm — light extra finishing pass"),
+    "0.8": (2.25, "Ra 0.8 µm (32 µin) fine — extra semi-finishing pass, reduced feed"),
+    "0.2": (4.50, "Ra 0.2 µm (8 µin) super-fine — multiple passes plus polishing or honing"),
+    "0.1": (7.50, "Ra 0.1 µm mirror — lapping or polishing, largely manual"),
+}
+DEFAULT_FINISH = "3.2"
+
+# Specs at or beyond these levels cannot be reached by milling/turning alone. The multiplier
+# still scales the cutting time, but a separate grinding/lapping operation is real work this
+# service does not model, so the quote is flagged as an under-estimate rather than trusted.
+_NEEDS_SECONDARY_TOL = {"0.025", "0.0125"}
+_NEEDS_SECONDARY_FIN = {"0.2", "0.1"}
+
+
+class TurningOpIn(BaseModel):
+    """One lathe operation, priced by the classic shop formula  T = L / (f × N).
+
+    Turning is NOT auto-detected from the STEP file. Deciding that a face is a turned diameter
+    rather than a milled boss needs the process plan, not the geometry — a cylindrical face can
+    legitimately be produced either way, and guessing wrong silently moves the whole job onto
+    the wrong machine rate. So the estimator asks for turned operations explicitly and computes
+    each one exactly; nothing is invented from the bounding box.
+    """
+    operation: str = "turning"     # turning | facing | drilling | threading | knurling | boring
+    length_mm: float = 0           # length of cut along the feed direction
+    diameter_mm: float = 0         # work diameter at the cut (decides rpm from cutting speed)
+    feed_mm_rev: float = 0.2       # f — feed per revolution
+    passes: int = 1                # number of cuts to reach full depth
+    vc_m_min: float = 0            # cutting speed; 0 = fall back to the material's vc_mill
+
+
+class CostingIn(BaseModel):
+    """Everything needed to turn minutes into money. All rates in the ERP's own currency."""
+    material_price_per_kg: float = 0     # raw stock rate; 0 = material cost is not included
+    tool_cost: float = 0                 # cost of one cutting tool
+    tool_life_parts: int = 0             # parts produced per tool; 0 = tooling cost not included
+    overhead_pct: float = 0              # α, applied to conversion cost only — see _costing()
+    scrap_pct: float = 0                 # extra stock bought per part to cover rejects/offcuts
+
+
 class QuoteIn(BaseModel):
     step_base64: str
     stock_margin_mm: float = 3
@@ -70,6 +137,14 @@ class QuoteIn(BaseModel):
     tool: ToolIn = ToolIn()
     setup_minutes_per_fixturing: float = 25
     hourly_rate: float = 0
+    # Batch size. Setup happens ONCE per batch, so it is amortised across qty — quoting 100
+    # parts must not charge 100 full setups. Defaults to 1 (a one-off), which reproduces the
+    # old behaviour exactly for a single part.
+    qty: int = 1
+    tolerance_mm: str = DEFAULT_TOLERANCE
+    surface_finish_ra: str = DEFAULT_FINISH
+    turning_ops: List[TurningOpIn] = []
+    costing: CostingIn = CostingIn()
 
 
 def _read_step_shape(path: str):
@@ -240,6 +315,105 @@ def _analyze(step_bytes: bytes) -> dict:
     return {"geometry": geometry, "holes": holes, "axis_analysis": axis_analysis}
 
 
+def _turning_time(ops: List[TurningOpIn], mat: MaterialIn) -> tuple:
+    """Lathe time by the standard shop formula, one row per operation.
+
+        N = (1000 × Vc) / (π × D)        spindle speed, rev/min
+        T = L / (f × N) × passes         cut time, minutes
+
+    Threading uses pitch in place of feed per revolution (the tool must advance exactly one
+    pitch per turn), which is the same formula with f = pitch — so the caller passes the pitch
+    as feed_mm_rev and it falls out correctly with no special case.
+    """
+    rows = []
+    total = 0.0
+    for op in ops:
+        d = max(op.diameter_mm, 0.1)
+        vc = op.vc_m_min if op.vc_m_min > 0 else mat.vc_mill
+        rpm = (1000.0 * vc) / (math.pi * d)
+        feed_mm_min = max(op.feed_mm_rev, 0.001) * rpm
+        passes = max(op.passes, 1)
+        t = (max(op.length_mm, 0) / feed_mm_min) * passes if feed_mm_min > 0 else 0.0
+        total += t
+        rows.append({
+            "operation": op.operation,
+            "length_mm": op.length_mm,
+            "diameter_mm": op.diameter_mm,
+            "rpm": round(rpm, 1),
+            "feed_mm_min": round(feed_mm_min, 1),
+            "passes": passes,
+            "minutes": round(t, 3),
+        })
+    return round(total, 3), rows
+
+
+def _costing(cutting_time_min: float, setup_time_min: float, stock_volume_cm3: float,
+             inp: QuoteIn) -> dict:
+    """Split the quote into material + machine + tooling + overhead, per part.
+
+    Two things this deliberately gets right, because both are easy to get wrong and both move
+    the number a lot:
+
+    1. SETUP IS AMORTISED over the batch. Setup is paid once per batch, so each part carries
+       setup_time / qty. Charging every part a full setup is how a 100-off quote ends up with
+       83 hours of setup in it instead of 50 minutes.
+    2. OVERHEAD APPLIES TO CONVERSION COST ONLY — the machine cost — not to material and not
+       to bought-out tooling. Marking up material with factory overhead inflates the quote on
+       exactly the jobs where the customer is most likely to check the metal price.
+
+    Labour is not a separate term here: Denplex's machine hourly rate is blended (machine plus
+    operator), so a separate labour line would double-count the operator.
+    """
+    c = inp.costing
+    qty = max(inp.qty, 1)
+
+    setup_per_part_min = setup_time_min / qty
+    machine_minutes = cutting_time_min + setup_per_part_min
+    machine_cost = (machine_minutes / 60.0) * max(inp.hourly_rate, 0)
+
+    # Material is costed on the STOCK, not the finished part: the shop buys and pays for the
+    # billet including everything turned into swarf.
+    stock_kg = (stock_volume_cm3 * inp.material.density) / 1000.0
+    stock_kg_with_scrap = stock_kg * (1.0 + max(c.scrap_pct, 0) / 100.0)
+    material_cost = stock_kg_with_scrap * max(c.material_price_per_kg, 0)
+
+    # Tool cost spread over the parts one tool survives.
+    tooling_cost = (c.tool_cost / c.tool_life_parts) if c.tool_life_parts > 0 else 0.0
+
+    overhead_cost = machine_cost * (max(c.overhead_pct, 0) / 100.0)
+    total = material_cost + machine_cost + tooling_cost + overhead_cost
+
+    return {
+        "qty": qty,
+        "per_part": {
+            "material": round(material_cost, 2),
+            "machine": round(machine_cost, 2),
+            "tooling": round(tooling_cost, 2),
+            "overhead": round(overhead_cost, 2),
+            "total": round(total, 2),
+        },
+        "batch_total": round(total * qty, 2),
+        "stock_kg_per_part": round(stock_kg_with_scrap, 3),
+        "setup_minutes_per_part": round(setup_per_part_min, 2),
+        "machine_minutes_per_part": round(machine_minutes, 2),
+        "notes": [
+            f"Setup ({setup_time_min:.0f} min) is charged ONCE for the batch and divided across "
+            f"{qty} part(s) = {setup_per_part_min:.2f} min/part.",
+            "Machine rate is treated as blended (machine + operator), so there is no separate "
+            "labour line — adding one would double-count the operator.",
+            ("Overhead is 0%, so no factory overhead is recovered in this quote. Set an overhead "
+             "% in Settings once you know whether your machine rate already includes it."
+             if c.overhead_pct <= 0 else
+             f"Overhead {c.overhead_pct:.1f}% applied to machine cost only (not material, not tooling)."),
+            ("Material not costed (no material price set)." if c.material_price_per_kg <= 0 else
+             f"Material = {stock_kg_with_scrap:.3f} kg of stock @ {c.material_price_per_kg:.2f}/kg "
+             f"(billet volume incl. swarf" + (f", +{c.scrap_pct:.0f}% scrap allowance)." if c.scrap_pct > 0 else ").")),
+            ("Tooling not costed (no tool cost / tool life set)." if tooling_cost <= 0 else
+             f"Tooling = {c.tool_cost:.2f} per tool / {c.tool_life_parts} parts per tool."),
+        ],
+    }
+
+
 def _time_breakdown(geom: dict, holes: List[dict], inp: QuoteIn) -> dict:
     bbox = geom["bbox_mm"]
     part_volume_cm3 = geom["volume_cm3"]
@@ -291,10 +465,37 @@ def _time_breakdown(geom: dict, holes: List[dict], inp: QuoteIn) -> dict:
     setup_count = 1 if inp.machine.axes >= 4 else 2
     setup_time_min = setup_count * inp.setup_minutes_per_fixturing
 
-    cutting_time_min = facing_time_min + roughing_time_min + total_drill_time_min + profile_time_min
+    turning_time_min, turning_breakdown = _turning_time(inp.turning_ops, mat)
+
+    base_cutting_min = (facing_time_min + roughing_time_min + total_drill_time_min
+                        + profile_time_min + turning_time_min)
+
+    # Tolerance and finish stretch the CUTTING time only — setup is unaffected by how tight the
+    # drawing is. Unknown keys fall back to the baseline rather than raising: a quote should not
+    # fail because someone typed a tolerance the table doesn't list.
+    tol_key = str(inp.tolerance_mm) if str(inp.tolerance_mm) in TOLERANCE_FACTORS else DEFAULT_TOLERANCE
+    fin_key = str(inp.surface_finish_ra) if str(inp.surface_finish_ra) in FINISH_FACTORS else DEFAULT_FINISH
+    tol_factor, tol_label = TOLERANCE_FACTORS[tol_key]
+    fin_factor, fin_label = FINISH_FACTORS[fin_key]
+
+    # The two are NOT multiplied together. A part needing Ra 0.8 µm and ±0.05 mm gets its
+    # finishing passes once, not twice over — multiplying would give 2.25 × 2.25 = 5.06× for a
+    # part that a shop would quote at roughly 2.25×. Taking the larger of the two lets the
+    # binding requirement drive the cost, which is how the work actually runs.
+    spec_factor = max(tol_factor, fin_factor)
+    cutting_time_min = base_cutting_min * spec_factor
     total_time_min = setup_time_min + cutting_time_min
 
     warnings = []
+    if str(inp.tolerance_mm) not in TOLERANCE_FACTORS and inp.tolerance_mm:
+        warnings.append(f"Unknown tolerance '{inp.tolerance_mm}' — quoted at the {tol_key} mm baseline instead.")
+    if str(inp.surface_finish_ra) not in FINISH_FACTORS and inp.surface_finish_ra:
+        warnings.append(f"Unknown finish Ra '{inp.surface_finish_ra}' — quoted at the {fin_key} µm baseline instead.")
+    if tol_key in _NEEDS_SECONDARY_TOL or fin_key in _NEEDS_SECONDARY_FIN:
+        warnings.append(
+            "This tolerance/finish cannot be held by milling or turning alone — it needs grinding, "
+            "honing or lapping. That secondary operation is NOT modelled here, so treat this quote "
+            "as an UNDER-estimate and add the secondary process cost by hand.")
     m = inp.machine
     if m.travel_x_mm and stock_x > m.travel_x_mm:
         warnings.append(f"Stock X ({stock_x:.1f}mm) exceeds machine travel_x_mm ({m.travel_x_mm}mm).")
@@ -303,7 +504,12 @@ def _time_breakdown(geom: dict, holes: List[dict], inp: QuoteIn) -> dict:
     if m.travel_z_mm and stock_z > m.travel_z_mm:
         warnings.append(f"Stock Z ({stock_z:.1f}mm) exceeds machine travel_z_mm ({m.travel_z_mm}mm).")
 
-    cost = (total_time_min / 60.0) * max(inp.hourly_rate, 0)
+    costing = _costing(cutting_time_min, setup_time_min, stock_volume_cm3, inp)
+
+    # `cost` is kept as the per-part total so existing callers and stored quotes keep working;
+    # `cost_breakdown` is the new detail. Removing this key would silently change what every
+    # saved quote and the Machining Quote page display.
+    cost = costing["per_part"]["total"]
 
     return {
         "stock_mm": {"x": round(stock_x, 2), "y": round(stock_y, 2), "z": round(stock_z, 2)},
@@ -315,10 +521,25 @@ def _time_breakdown(geom: dict, holes: List[dict], inp: QuoteIn) -> dict:
             "roughing": round(roughing_time_min, 2),
             "drilling": round(total_drill_time_min, 2),
             "profile_finish": round(profile_time_min, 2),
+            "turning": round(turning_time_min, 2),
+            "spec_uplift": round(cutting_time_min - base_cutting_min, 2),
             "total": round(total_time_min, 2),
         },
+        "spec_factors": {
+            "tolerance_mm": tol_key,
+            "tolerance_factor": tol_factor,
+            "tolerance_label": tol_label,
+            "surface_finish_ra": fin_key,
+            "finish_factor": fin_factor,
+            "finish_label": fin_label,
+            "applied_factor": spec_factor,
+            "applied_to": "cutting time only (not setup, not material)",
+            "rule": "the larger of the two factors is used, not their product",
+        },
         "drill_breakdown": drill_breakdown,
+        "turning_breakdown": turning_breakdown,
         "cost": round(cost, 2),
+        "cost_breakdown": costing,
         "warnings": warnings,
         "assumptions": [
             f"Stock = part bounding box + {margin}mm margin per side (rectangular billet).",
