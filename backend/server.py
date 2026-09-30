@@ -749,6 +749,9 @@ class Quotation(BaseModel):
     date: str = Field(default_factory=now_iso)
     valid_until: Optional[str] = ""
     lines: List[QuoteLine] = []
+    extra_charges: List[ExtraCharge] = []
+    charges_total: float = 0
+    charges_gst: float = 0            # GST on freight/P&F; already folded into the tax total
     subtotal: float = 0
     gst_total: float = 0
     total: float = 0
@@ -757,9 +760,24 @@ class Quotation(BaseModel):
     created_at: str = Field(default_factory=now_iso)
 
 class ExtraCharge(BaseModel):
-    """Document-level additional charge (Freight / Packaging / Adjustment). Lump sum, non-taxable."""
+    """Document-level additional charge — Freight, Packing & Forwarding, Insurance, Adjustment.
+
+    Either a flat amount or a percentage of the line subtotal, and optionally taxable.
+
+    `pct` and `gst_rate` both default to 0, which reproduces the original behaviour exactly: a
+    lump sum added after tax. Every charge already stored has neither field, so no existing
+    document's total can move.
+
+    On GST: freight or P&F billed along with a taxable supply is part of the value of that
+    supply (a composite supply) and carries the SAME rate as the principal goods — it is not a
+    separate exempt line. So gst_rate is normally set to the highest line rate on the document.
+    It stays an explicit field rather than being inferred here, because zero-rated and exempt
+    supplies exist and silently taxing them would be worse than asking.
+    """
     name: str
-    amount: float = 0
+    amount: float = 0      # flat amount; also where a pct-derived amount is stored back
+    pct: float = 0         # if > 0, amount is computed as this % of the line subtotal
+    gst_rate: float = 0    # 0 = non-taxable (legacy behaviour)
 
 class POLine(BaseModel):
     description: str
@@ -787,6 +805,9 @@ class PurchaseOrder(BaseModel):
     terms_text: Optional[str] = ""
     round_off: float = 0
     lines: List[POLine] = []
+    extra_charges: List[ExtraCharge] = []
+    charges_total: float = 0
+    charges_gst: float = 0            # GST on freight/P&F; already folded into the tax total
     subtotal: float = 0
     gst_total: float = 0
     total: float = 0
@@ -816,6 +837,9 @@ class SaleOrder(BaseModel):
     terms_text: Optional[str] = ""
     round_off: float = 0
     lines: List[POLine] = []
+    extra_charges: List[ExtraCharge] = []
+    charges_total: float = 0
+    charges_gst: float = 0            # GST on freight/P&F; already folded into the tax total
     subtotal: float = 0
     cgst: float = 0
     sgst: float = 0
@@ -848,6 +872,7 @@ class VendorBill(BaseModel):
     tcs_rate: float = 0
     extra_charges: List[ExtraCharge] = []
     charges_total: float = 0
+    charges_gst: float = 0            # GST on freight/P&F; already folded into cgst/sgst/igst
     lines: List[POLine] = []
     subtotal: float = 0
     cgst: float = 0
@@ -950,6 +975,7 @@ class Invoice(BaseModel):
     tcs_rate: float = 0
     extra_charges: List[ExtraCharge] = []
     charges_total: float = 0
+    charges_gst: float = 0            # GST on freight/P&F; already folded into cgst/sgst/igst
     lines: List[InvoiceLine] = []
     subtotal: float = 0
     cgst: float = 0
@@ -983,6 +1009,9 @@ class ProformaInvoice(BaseModel):
     purchaser_phone: Optional[str] = ""
     payment_mode: Optional[str] = ""
     lines: List[InvoiceLine] = []
+    extra_charges: List[ExtraCharge] = []
+    charges_total: float = 0
+    charges_gst: float = 0            # GST on freight/P&F; already folded into the tax total
     subtotal: float = 0
     cgst: float = 0
     sgst: float = 0
@@ -3605,7 +3634,33 @@ async def seed_operations_from_part(wid: str, user=Depends(get_current_user)):
 
 
 # ---------------- Helper: totals ----------------
-def compute_totals(lines: List[Dict[str, Any]], round_off: float = 0) -> Dict[str, float]:
+def _resolve_charges(extra_charges: Optional[List[Dict[str, Any]]], subtotal: float) -> tuple:
+    """Resolve freight / P&F charges against a line subtotal.
+
+    Shared by both totals functions so a charge behaves identically on a quotation, an order,
+    a bill and an invoice — the figure must not change as a document is converted downstream.
+
+    Each charge is either a flat `amount` or `pct` of the pre-tax subtotal, and may carry its own
+    `gst_rate`. A percentage resolves to an amount which is written back onto the charge, so
+    everything reading `amount` keeps working without knowing percentages exist.
+
+    Returns (charges_total, charges_gst). Both are 0 for a charge carrying neither field, which
+    is every charge stored before this existed — so no historical total can move.
+    """
+    charges_total = 0.0
+    charges_gst = 0.0
+    for c in (extra_charges or []):
+        pct = float(c.get("pct", 0) or 0)
+        amt = round(subtotal * pct / 100.0, 2) if pct else round(float(c.get("amount", 0) or 0), 2)
+        if pct:
+            c["amount"] = amt
+        charges_total += amt
+        charges_gst += amt * float(c.get("gst_rate", 0) or 0) / 100.0
+    return round(charges_total, 2), round(charges_gst, 2)
+
+
+def compute_totals(lines: List[Dict[str, Any]], round_off: float = 0,
+                   extra_charges: Optional[List[Dict[str, Any]]] = None) -> Dict[str, float]:
     subtotal = 0.0; gst_total = 0.0
     for l in lines:
         amt = float(l.get("qty", 0)) * float(l.get("rate", 0))
@@ -3615,8 +3670,13 @@ def compute_totals(lines: List[Dict[str, Any]], round_off: float = 0) -> Dict[st
             amt = 0.0
         gst = amt * float(l.get("gst_rate", 0)) / 100.0
         subtotal += amt; gst_total += gst
+    # Charge GST joins gst_total rather than standing apart, for the same reason as on an
+    # invoice: it is tax on this document and the PDF's tax line has to agree with the total.
+    charges_total, charges_gst = _resolve_charges(extra_charges, subtotal)
+    gst_total += charges_gst
     return {"subtotal": round(subtotal, 2), "gst_total": round(gst_total, 2),
-            "total": round(subtotal + gst_total + float(round_off or 0), 2)}
+            "charges_total": charges_total, "charges_gst": charges_gst,
+            "total": round(subtotal + gst_total + charges_total + float(round_off or 0), 2)}
 
 # ---------------- Quotations ----------------
 class QuoteEstimateIn(BaseModel):
@@ -3920,7 +3980,7 @@ async def quotation_docx(body: QuoteDocIn, user=Depends(get_current_user)):
 async def create_quote(q: Quotation, user=Depends(get_current_user)):
     doc = q.model_dump()
     doc["code"] = await gen_code("QT", "quote")
-    t = compute_totals([l for l in doc["lines"]])
+    t = compute_totals([l for l in doc["lines"]], 0, doc.get("extra_charges"))
     doc.update(t)
     await db.quotations.insert_one(doc)
     return serialize(doc)
@@ -3932,7 +3992,7 @@ async def list_quotes(user=Depends(get_current_user)):
 @api.put("/quotations/{qid}")
 async def update_quote(qid: str, q: Quotation, user=Depends(get_current_user)):
     data = q.model_dump(); data.pop("id", None); data.pop("created_at", None)
-    t = compute_totals(data["lines"]); data.update(t)
+    t = compute_totals(data["lines"], 0, data.get("extra_charges")); data.update(t)
     await db.quotations.update_one({"id": qid}, {"$set": data})
     return {"ok": True}
 
@@ -3948,7 +4008,7 @@ async def del_quote(qid: str, user=Depends(get_current_user)):
 async def create_po(p: PurchaseOrder, user=Depends(get_current_user)):
     doc = p.model_dump()
     doc["code"] = (p.code or "").strip() or await gen_code("PO", "po")
-    t = compute_totals(doc["lines"], doc.get("round_off", 0)); doc.update(t)
+    t = compute_totals(doc["lines"], doc.get("round_off", 0), doc.get("extra_charges")); doc.update(t)
     await db.purchase_orders.insert_one(doc)
     return serialize(doc)
 
@@ -3966,7 +4026,7 @@ async def get_po(pid: str, user=Depends(get_current_user)):
 @api.put("/purchase-orders/{pid}")
 async def update_po(pid: str, p: PurchaseOrder, user=Depends(get_current_user)):
     data = p.model_dump(); data.pop("id", None); data.pop("created_at", None)
-    t = compute_totals(data["lines"]); data.update(t)
+    t = compute_totals(data["lines"], 0, data.get("extra_charges")); data.update(t)
     await db.purchase_orders.update_one({"id": pid}, {"$set": data})
     return {"ok": True}
 
@@ -4105,9 +4165,30 @@ def compute_invoice_totals(lines: List[Dict[str, Any]], interstate: bool, round_
             amt = 0.0
         g = amt * float(l.get("gst_rate", 0)) / 100.0
         subtotal += amt; gst += g
-    charges_total = sum(float(c.get("amount", 0) or 0) for c in (extra_charges or []))
+    # Additional charges (freight, P&F, insurance). A charge is either a flat amount or a
+    # percentage of the line subtotal, and may itself carry GST.
+    #
+    # Percentages are taken on the LINE SUBTOTAL — after per-line discounts, before tax. That is
+    # what "2% P&F" means on an Indian invoice, and charging a percentage of a tax-inclusive
+    # figure would tax the tax.
+    #
+    # The resolved amount is written back onto the charge dict so everything downstream that
+    # reads `amount` — the PDF totals block, exports, the e-invoice payload — keeps working
+    # without knowing percentages exist.
+    charges_total, charges_gst = _resolve_charges(extra_charges, subtotal)
+
+    # Charge GST is folded into the SAME cgst/sgst/igst buckets as the line tax rather than
+    # being reported separately. It is output tax on this invoice: keeping it outside the split
+    # would understate GSTR-1 and make the PDF's tax summary disagree with the total.
+    gst += charges_gst
+
     total = subtotal + gst + charges_total + float(round_off or 0) - float(tds or 0) + float(tcs or 0)
-    extra = {"charges_total": round(charges_total, 2), "tds": round(float(tds or 0), 2), "tcs": round(float(tcs or 0), 2)}
+    extra = {
+        "charges_total": round(charges_total, 2),
+        "charges_gst": round(charges_gst, 2),
+        "tds": round(float(tds or 0), 2),
+        "tcs": round(float(tcs or 0), 2),
+    }
     if interstate:
         return {"subtotal": round(subtotal, 2), "cgst": 0.0, "sgst": 0.0, "igst": round(gst, 2), "total": round(total, 2), **extra}
     return {"subtotal": round(subtotal, 2), "cgst": round(gst/2, 2), "sgst": round(gst/2, 2), "igst": 0.0, "total": round(total, 2), **extra}
@@ -8088,7 +8169,20 @@ def _build_doc_pdf(title: str, code: str, party_label: str, party_name: str, dat
         if _charges:
             for _c in _charges:
                 if float(_c.get("amount", 0) or 0):
-                    sd.append([str(_c.get("name") or "Charges"), f"₹ {float(_c.get('amount', 0) or 0):,.2f}"])
+                    # Show how the figure was arrived at — "P & F (2%)" rather than a bare number
+                    # the customer has to take on trust — and flag that it carries GST, since the
+                    # tax line above already includes it and would otherwise look wrong.
+                    _nm = str(_c.get("name") or "Charges")
+                    _cp = float(_c.get("pct", 0) or 0)
+                    _cg = float(_c.get("gst_rate", 0) or 0)
+                    _bits = []
+                    if _cp:
+                        _bits.append(f"{_cp:g}%")
+                    if _cg:
+                        _bits.append(f"+{_cg:g}% GST")
+                    if _bits:
+                        _nm = f"{_nm} ({', '.join(_bits)})"
+                    sd.append([_nm, f"₹ {float(_c.get('amount', 0) or 0):,.2f}"])
         elif _ct:
             sd.append(["Additional Charges", f"₹ {_ct:,.2f}"])
         _tds = float(totals.get("tds") or 0)
@@ -8348,7 +8442,8 @@ async def quote_pdf(qid: str, user=Depends(get_current_user)):
         c = await db.customers.find_one({"id": q["customer_id"]}, {"_id": 0}) or {}
         party_extra = {"address": c.get("address",""), "phone": c.get("phone",""), "gstin": c.get("gstin",""), "state": c.get("state","")}
     pdf = _build_doc_pdf("Quotation", q.get("code", ""), "To", q.get("customer_name", ""), str(q.get("date", ""))[:10],
-                         q.get("lines", []), {"subtotal": q.get("subtotal", 0), "gst_total": q.get("gst_total", 0), "total": q.get("total", 0)},
+                         q.get("lines", []), {"subtotal": q.get("subtotal", 0), "gst_total": q.get("gst_total", 0), "total": q.get("total", 0),
+                          "charges_total": q.get("charges_total", 0), "extra_charges": q.get("extra_charges", []), },
                          company=company, notes=q.get("notes", ""), tpl=tpl, party_extra=party_extra,
                          copy_label="")
     return Response(content=pdf, media_type="application/pdf",
@@ -8365,7 +8460,8 @@ async def po_pdf(pid: str, user=Depends(get_current_user)):
         c = await db.suppliers.find_one({"id": p["supplier_id"]}, {"_id": 0}) or {}
         party_extra = {"address": c.get("address",""), "phone": c.get("phone",""), "gstin": c.get("gstin",""), "state": c.get("state","")}
     pdf = _build_doc_pdf("Purchase Order", p.get("code", ""), "Supplier", p.get("supplier_name", ""), str(p.get("date", ""))[:10],
-                         p.get("lines", []), {"subtotal": p.get("subtotal", 0), "gst_total": p.get("gst_total", 0), "total": p.get("total", 0)},
+                         p.get("lines", []), {"subtotal": p.get("subtotal", 0), "gst_total": p.get("gst_total", 0), "total": p.get("total", 0),
+                          "charges_total": p.get("charges_total", 0), "extra_charges": p.get("extra_charges", []), },
                          company=company, notes=p.get("notes", ""), tpl=tpl, party_extra=party_extra,
                          copy_label="")
     return Response(content=pdf, media_type="application/pdf",
@@ -8384,7 +8480,8 @@ async def _generic_doc_pdf(coll, did: str, title: str, party_label: str, party_f
     party_id_key = f"{party_field}_id"
     party_name_key = f"{party_field}_name"
     party_extra = _party_extra_from(await party_coll.find_one({"id": d.get(party_id_key)}, {"_id": 0}) if d.get(party_id_key) else {})
-    totals = {"subtotal": d.get("subtotal", 0), "gst_total": d.get("gst_total", 0), "total": d.get("total", 0)}
+    totals = {"subtotal": d.get("subtotal", 0), "gst_total": d.get("gst_total", 0), "total": d.get("total", 0),
+              "charges_total": d.get("charges_total", 0), "extra_charges": d.get("extra_charges", []), }
     pdf = _build_doc_pdf(title, d.get("code",""), party_label, d.get(party_name_key,""), str(d.get("date",""))[:10],
                          d.get("lines", []), totals,
                          gst_breakup={"cgst": d.get("cgst",0), "sgst": d.get("sgst",0), "igst": d.get("igst",0)},
@@ -8407,7 +8504,8 @@ def _doc_totals_with_gst(lines, interstate, round_off=0, tds=0, extra_charges=No
 async def create_sale_order(so: SaleOrder, user=Depends(get_current_user)):
     doc = so.model_dump()
     doc["code"] = (so.code or "").strip() or await gen_code("SO", "sale_order")
-    doc.update(_doc_totals_with_gst(doc["lines"], doc.get("is_interstate", False), doc.get("round_off", 0)))
+    doc.update(_doc_totals_with_gst(doc["lines"], doc.get("is_interstate", False), doc.get("round_off", 0),
+                                    doc.get("tds", 0), doc.get("extra_charges"), doc.get("tcs", 0)))
     await db.sale_orders.insert_one(doc)
     return serialize(doc)
 
@@ -12528,7 +12626,8 @@ async def party_statement(pid: str, period: str = "this_year", user=Depends(get_
 async def create_proforma(p: ProformaInvoice, user=Depends(get_current_user)):
     doc = p.model_dump()
     doc["code"] = doc.get("code") or await gen_code("PFI", "proforma")
-    doc.update(compute_invoice_totals(doc["lines"], doc.get("is_interstate", False)))
+    doc.update(compute_invoice_totals(doc["lines"], doc.get("is_interstate", False), doc.get("round_off", 0),
+                                      doc.get("tds", 0), doc.get("extra_charges"), doc.get("tcs", 0)))
     await db.proforma_invoices.insert_one(doc)
     return serialize(doc)
 
@@ -12539,7 +12638,8 @@ async def list_proforma(user=Depends(get_current_user)):
 @api.put("/proforma-invoices/{pid}")
 async def update_proforma(pid: str, p: ProformaInvoice, user=Depends(get_current_user)):
     data = p.model_dump(); data.pop("id", None); data.pop("created_at", None)
-    data.update(compute_invoice_totals(data["lines"], data.get("is_interstate", False)))
+    data.update(compute_invoice_totals(data["lines"], data.get("is_interstate", False), data.get("round_off", 0),
+                                       data.get("tds", 0), data.get("extra_charges"), data.get("tcs", 0)))
     await db.proforma_invoices.update_one({"id": pid}, {"$set": data})
     return {"ok": True}
 
@@ -12584,7 +12684,9 @@ async def proforma_pdf(pid: str, user=Depends(get_current_user)):
         "is_interstate": bool(pf.get("is_interstate")),
     }
     pdf = _build_doc_pdf("Proforma Invoice", pf.get("code", ""), "To", pf.get("customer_name", ""), str(pf.get("date", ""))[:10],
-                         pf.get("lines", []), {"total": pf.get("total", 0)},
+                         pf.get("lines", []),
+                         {"subtotal": pf.get("subtotal", 0), "total": pf.get("total", 0),
+                          "charges_total": pf.get("charges_total", 0), "extra_charges": pf.get("extra_charges", []), },
                          gst_breakup={"cgst": pf.get("cgst", 0), "sgst": pf.get("sgst", 0), "igst": pf.get("igst", 0)},
                          company=company, notes=pf.get("notes", ""), tpl=tpl,
                          party_extra=party_extra, doc_meta=doc_meta,
