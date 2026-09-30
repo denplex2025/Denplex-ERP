@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import api from "@/lib/api";
 import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
-import DocumentForm, { PartyPicker, LineGrid, TotalsBlock, Fld, IdRow } from "@/components/erp/DocumentForm";
+import DocumentForm, { PartyPicker, LineGrid, TotalsBlock, ChargesEditor, Fld, IdRow } from "@/components/erp/DocumentForm";
 import { isInterstate, stateName } from "@/lib/gstState";
 
 const DEFAULT_TC = "1) Goods must conform to the agreed specification and drawing.\n2) Delivery to be completed on or before the delivery date.\n3) Material test certificates / inspection reports to accompany the supply where applicable.";
@@ -25,6 +25,8 @@ export default function PurchaseOrderCreate() {
     terms_text: DEFAULT_TC, round_off: 0, notes: "",
   });
   const [lines, setLines] = useState([blankLine()]);
+  // Freight / P&F. Kept out of `f` because it's a list, not a scalar field.
+  const [charges, setCharges] = useState([]);
   const set = (k, v) => setF(p => ({ ...p, [k]: v }));
 
   useEffect(() => {
@@ -87,12 +89,45 @@ export default function PurchaseOrderCreate() {
     amt -= Number(l.discount_amount || 0);
     return amt < 0 ? 0 : amt;
   };
+  // Mirrors the backend's _resolve_charges exactly: a percentage is taken on the PRE-TAX
+  // subtotal, and charge GST joins the document's tax rather than sitting outside it. If these
+  // two ever disagree the form shows one total and the saved document holds another.
   const totals = useMemo(() => {
     let subtotal = 0, gst = 0;
     for (const l of lines) { const a = lineAmount(l); subtotal += a; gst += a * Number(l.gst_rate || 0) / 100; }
-    const grand = subtotal + gst + Number(f.round_off || 0);
-    return { subtotal, gst, cgst: f.is_interstate ? 0 : gst / 2, sgst: f.is_interstate ? 0 : gst / 2, igst: f.is_interstate ? gst : 0, grand };
-  }, [lines, f.round_off, f.is_interstate]);
+
+    let chargesTotal = 0, chargesGst = 0;
+    for (const c of charges) {
+      const pct = Number(c.pct || 0);
+      const amt = pct ? (subtotal * pct) / 100 : Number(c.amount || 0);
+      chargesTotal += amt;
+      chargesGst += (amt * Number(c.gst_rate || 0)) / 100;
+    }
+    gst += chargesGst;
+
+    const grand = subtotal + gst + chargesTotal + Number(f.round_off || 0);
+    return {
+      subtotal, gst, chargesTotal, chargesGst,
+      cgst: f.is_interstate ? 0 : gst / 2, sgst: f.is_interstate ? 0 : gst / 2,
+      igst: f.is_interstate ? gst : 0, grand,
+    };
+  }, [lines, charges, f.round_off, f.is_interstate]);
+
+  // Freight billed alongside taxable goods is a composite supply — it should normally carry the
+  // same GST rate as the goods, not its own. The default stays 18% (the standalone freight SAC
+  // rate, and what nearly all Denplex work is anyway); this only points out the mismatch when it
+  // actually occurs, so a 5% or 12% job doesn't quietly go out with over-taxed freight.
+  const chargeRateHint = useMemo(() => {
+    const lineRates = [...new Set(lines.map(l => Number(l.gst_rate || 0)).filter(r => r > 0))];
+    if (!lineRates.length) return "";
+    const odd = charges.filter(c =>
+      (Number(c.amount || 0) || Number(c.pct || 0)) &&
+      Number(c.gst_rate || 0) > 0 &&
+      !lineRates.includes(Number(c.gst_rate)));
+    if (!odd.length) return "";
+    return `Charge GST (${[...new Set(odd.map(c => Number(c.gst_rate)))].join("%, ")}%) differs from the item rate `
+      + `(${lineRates.join("%, ")}%). Freight billed with goods usually carries the same rate as the goods.`;
+  }, [lines, charges]);
 
   const save = async () => {
     if (saving) return;                       // Ctrl+S can fire faster than the request returns
@@ -102,6 +137,16 @@ export default function PurchaseOrderCreate() {
     try {
       const payload = {
         ...f, round_off: Number(f.round_off || 0), status: "sent",
+        // Drop blank rows, and send numbers rather than the form's strings. A charge with
+        // neither an amount nor a percentage is a half-filled row, not a zero charge.
+        extra_charges: charges
+          .filter(c => Number(c.amount || 0) || Number(c.pct || 0))
+          .map(c => ({
+            name: (c.name || "Charges").trim(),
+            amount: Number(c.amount || 0),
+            pct: Number(c.pct || 0),
+            gst_rate: Number(c.gst_rate || 0),
+          })),
         lines: lines.filter(l => (l.description || "").trim()).map(l => ({
           description: l.description, item_code: l.item_code, hsn: l.hsn,
           qty: Number(l.qty || 0), unit: l.unit, rate: Number(l.rate || 0),
@@ -204,17 +249,26 @@ export default function PurchaseOrderCreate() {
         }
 
         totals={
-          <TotalsBlock
-            grand={totals.grand}
-            rows={[
-              { label: "Subtotal", value: totals.subtotal },
-              f.is_interstate
-                ? { label: "IGST", value: totals.igst }
-                : { label: "CGST", value: totals.cgst },
-              f.is_interstate ? null : { label: "SGST", value: totals.sgst },
-              { label: "Round Off", value: f.round_off, editable: true, onChange: v => set("round_off", v), testid: "po-round-off" },
-            ]}
-          />
+          <div className="space-y-2">
+            <TotalsBlock
+              grand={totals.grand}
+              rows={[
+                { label: "Subtotal", value: totals.subtotal },
+                // Charges sit directly under the subtotal, before tax — which is the order they
+                // are applied in, and the order they print in on the PDF.
+                totals.chargesTotal ? { label: "Freight / P&F", value: totals.chargesTotal } : null,
+                f.is_interstate
+                  ? { label: "IGST", value: totals.igst }
+                  : { label: "CGST", value: totals.cgst },
+                f.is_interstate ? null : { label: "SGST", value: totals.sgst },
+                { label: "Round Off", value: f.round_off, editable: true, onChange: v => set("round_off", v), testid: "po-round-off" },
+              ]}
+            />
+            <ChargesEditor charges={charges} onChange={setCharges} subtotal={totals.subtotal} />
+            {chargeRateHint && (
+              <p className="text-[11px] text-amber-700" data-testid="po-charge-rate-hint">{chargeRateHint}</p>
+            )}
+          </div>
         }
       >
         <LineGrid
