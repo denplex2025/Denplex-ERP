@@ -289,6 +289,88 @@ export function TotalsBlock({ rows, grand, grandLabel = "Total" }) {
   );
 }
 
+/**
+ * Freight / Packing & Forwarding / Insurance — document-level charges that sit under the
+ * subtotal and may carry their own GST.
+ *
+ * Each row is either a flat amount or a percentage of the subtotal. Entering a percentage
+ * blanks the amount and vice versa, because a row that holds both is ambiguous on screen even
+ * though the backend resolves it (percentage wins) — better that the form never shows a figure
+ * that isn't the one being used.
+ *
+ * Deliberately collapsed until "Add charge" is pressed: most documents have no freight, and an
+ * always-visible empty charges table is noise on every single one.
+ */
+export function ChargesEditor({ charges, onChange, subtotal = 0, defaultGstRate = 18 }) {
+  const rows = charges || [];
+  const set = (i, k, v) =>
+    onChange(rows.map((c, idx) => {
+      if (idx !== i) return c;
+      const next = { ...c, [k]: v };
+      // Keep the two mutually exclusive so what's typed is always what's charged.
+      if (k === "pct" && v !== "") next.amount = "";
+      if (k === "amount" && v !== "") next.pct = "";
+      return next;
+    }));
+  const add = () => onChange([...rows, { name: "Freight", amount: "", pct: "", gst_rate: defaultGstRate }]);
+  const del = (i) => onChange(rows.filter((_, idx) => idx !== i));
+
+  // What each row will actually add, shown live so the number isn't a surprise on the PDF.
+  const resolved = (c) => {
+    const pct = Number(c.pct || 0);
+    return pct ? (Number(subtotal || 0) * pct) / 100 : Number(c.amount || 0);
+  };
+
+  if (!rows.length) {
+    return (
+      <button type="button" onClick={add} data-testid="doc-add-charge"
+        className="text-xs font-medium text-red-700 hover:underline">
+        + Add freight / P&amp;F charge
+      </button>
+    );
+  }
+
+  return (
+    <div className="border border-slate-200 rounded-md p-2 space-y-2" data-testid="doc-charges">
+      {rows.map((c, i) => (
+        <div key={i} className="flex items-end gap-1.5">
+          <div className="flex-1 min-w-0">
+            <label className="text-[10px] uppercase tracking-wider text-slate-400">Charge</label>
+            <Input value={c.name || ""} onChange={e => set(i, "name", e.target.value)}
+              placeholder="Freight" className="h-7 text-sm" />
+          </div>
+          <div className="w-16">
+            <label className="text-[10px] uppercase tracking-wider text-slate-400">%</label>
+            <Input type="number" step="any" value={c.pct ?? ""} onChange={e => set(i, "pct", e.target.value)}
+              className="h-7 text-sm text-right tabular-nums" />
+          </div>
+          <div className="w-24">
+            <label className="text-[10px] uppercase tracking-wider text-slate-400">Amount</label>
+            <Input type="number" step="any" value={c.amount ?? ""} onChange={e => set(i, "amount", e.target.value)}
+              className="h-7 text-sm text-right tabular-nums"
+              placeholder={Number(c.pct || 0) ? resolved(c).toFixed(2) : ""} />
+          </div>
+          <div className="w-16">
+            <label className="text-[10px] uppercase tracking-wider text-slate-400">GST %</label>
+            <Input type="number" step="any" value={c.gst_rate ?? ""} onChange={e => set(i, "gst_rate", e.target.value)}
+              className="h-7 text-sm text-right tabular-nums" />
+          </div>
+          <button type="button" onClick={() => del(i)} title="Remove charge"
+            className="h-7 px-1.5 text-slate-400 hover:text-red-600 text-lg leading-none">×</button>
+        </div>
+      ))}
+      <div className="flex items-center justify-between">
+        <button type="button" onClick={add} className="text-xs font-medium text-red-700 hover:underline">
+          + Add another
+        </button>
+        <span className="text-[11px] text-slate-500">
+          GST on charges is added to the document&apos;s tax
+        </span>
+      </div>
+    </div>
+  );
+}
+
 /* ------------------------------------------------------------------------ the shell ------- */
 
 export default function DocumentForm({
