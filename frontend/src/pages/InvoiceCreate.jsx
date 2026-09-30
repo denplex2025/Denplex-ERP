@@ -7,6 +7,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Plus, Trash2, Save, ArrowLeft } from "lucide-react";
 import { toast } from "sonner";
+import { ChargesEditor } from "@/components/erp/DocumentForm";
 
 const inr = (n) => "₹" + Number(n || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const TERMS = [["", "Custom"], ["0", "Due on receipt"], ["15", "Net 15"], ["30", "Net 30"], ["45", "Net 45"], ["60", "Net 60"]];
@@ -84,9 +85,6 @@ export default function InvoiceCreate() {
   const addLine = () => setLines(ls => [...ls, blankLine()]);
   const delLine = (i) => setLines(ls => ls.length > 1 ? ls.filter((_, idx) => idx !== i) : ls);
 
-  const addCharge = () => setF(p => ({ ...p, extra_charges: [...(p.extra_charges || []), { name: "", amount: 0 }] }));
-  const setCharge = (i, k, v) => setF(p => ({ ...p, extra_charges: p.extra_charges.map((c, idx) => idx === i ? { ...c, [k]: v } : c) }));
-  const delCharge = (i) => setF(p => ({ ...p, extra_charges: p.extra_charges.filter((_, idx) => idx !== i) }));
   const pickTds = (sec) => {
     const s = tdsSections.find(x => `${x.section}|${x.name}` === sec);
     const rate = s ? Number(s.rate) : 0;
@@ -105,9 +103,18 @@ export default function InvoiceCreate() {
   const totals = useMemo(() => {
     let subtotal = 0, gst = 0;
     for (const l of lines) { const a = lineAmount(l); subtotal += a; if (taxable) gst += a * Number(l.gst_rate || 0) / 100; }
-    const chargesTotal = (f.extra_charges || []).reduce((a, c) => a + Number(c.amount || 0), 0);
+    // Mirrors the backend's _resolve_charges: a percentage is taken on the pre-tax subtotal,
+    // and charge GST joins the document's tax rather than sitting outside it.
+    let chargesTotal = 0, chargesGst = 0;
+    for (const c of (f.extra_charges || [])) {
+      const pct = Number(c.pct || 0);
+      const amt = pct ? (subtotal * pct) / 100 : Number(c.amount || 0);
+      chargesTotal += amt;
+      if (taxable) chargesGst += (amt * Number(c.gst_rate || 0)) / 100;
+    }
+    gst += chargesGst;
     const grand = subtotal + gst + chargesTotal + Number(f.round_off || 0) - Number(f.tds || 0) + Number(f.tcs || 0);
-    return { subtotal, gst, chargesTotal, cgst: f.is_interstate ? 0 : gst / 2, sgst: f.is_interstate ? 0 : gst / 2, igst: f.is_interstate ? gst : 0, grand };
+    return { subtotal, gst, chargesTotal, chargesGst, cgst: f.is_interstate ? 0 : gst / 2, sgst: f.is_interstate ? 0 : gst / 2, igst: f.is_interstate ? gst : 0, grand };
   }, [lines, f.round_off, f.tds, f.tcs, f.extra_charges, f.is_interstate, taxable]);
 
   const save = async (goEway) => {
@@ -119,7 +126,17 @@ export default function InvoiceCreate() {
         ...f,
         round_off: Number(f.round_off || 0), tds: Number(f.tds || 0), tds_rate: Number(f.tds_rate || 0), tds_section: f.tds_section || "",
         tcs: Number(f.tcs || 0), tcs_rate: Number(f.tcs_rate || 0),
-        extra_charges: (f.extra_charges || []).filter(c => (c.name || "").trim() || Number(c.amount || 0)).map(c => ({ name: c.name || "Charge", amount: Number(c.amount || 0) })),
+        // pct and gst_rate MUST be carried through. Mapping to {name, amount} alone silently
+        // turned a "2% P&F + 18% GST" charge into a flat untaxed one on every save — including
+        // a save where nobody touched the charge at all — and quietly lowered the total.
+        extra_charges: (f.extra_charges || [])
+          .filter(c => (c.name || "").trim() || Number(c.amount || 0) || Number(c.pct || 0))
+          .map(c => ({
+            name: c.name || "Charge",
+            amount: Number(c.amount || 0),
+            pct: Number(c.pct || 0),
+            gst_rate: Number(c.gst_rate || 0),
+          })),
         eway_distance_km: Number(f.eway_distance_km || 0),
         status: isEdit ? (f.status || "sent") : "sent",
         lines: lines.filter(l => (l.description || "").trim()).map(l => ({
@@ -251,14 +268,14 @@ export default function InvoiceCreate() {
           {!taxable ? null : f.is_interstate
             ? <div className="flex justify-between"><span className="text-slate-500">IGST</span><span className="font-mono-tech">{inr(totals.igst)}</span></div>
             : <><div className="flex justify-between"><span className="text-slate-500">CGST</span><span className="font-mono-tech">{inr(totals.cgst)}</span></div><div className="flex justify-between"><span className="text-slate-500">SGST</span><span className="font-mono-tech">{inr(totals.sgst)}</span></div></>}
-          {(f.extra_charges || []).map((c, i) => (
-            <div key={i} className="flex items-center gap-2">
-              <Input value={c.name} onChange={e => setCharge(i, "name", e.target.value)} placeholder="Freight / Packing…" className="h-8 flex-1" />
-              <Input type="number" value={c.amount} onChange={e => setCharge(i, "amount", e.target.value)} className="h-8 w-24 text-right" />
-              <button onClick={() => delCharge(i)} className="text-slate-300 hover:text-red-600"><Trash2 className="h-3.5 w-3.5" /></button>
-            </div>
-          ))}
-          <button onClick={addCharge} className="text-xs text-red-600 hover:underline">+ Add charge (freight / packing)</button>
+          {totals.chargesTotal ? (
+            <div className="flex justify-between"><span className="text-slate-500">Freight / P&amp;F</span><span className="font-mono-tech">{inr(totals.chargesTotal)}</span></div>
+          ) : null}
+          <ChargesEditor
+            charges={f.extra_charges || []}
+            onChange={v => set("extra_charges", v)}
+            subtotal={totals.subtotal}
+          />
           <div className="flex justify-between items-center"><span className="text-slate-500">Round Off</span><Input type="number" value={f.round_off} onChange={e => set("round_off", e.target.value)} className="h-8 w-24 text-right" /></div>
           <div className="flex items-center gap-2"><span className="text-slate-500 whitespace-nowrap">TDS</span>
             <select value={f.tds_section} onChange={e => pickTds(e.target.value)} className="h-8 text-xs border border-slate-200 rounded-sm px-1 bg-white flex-1 min-w-0">
