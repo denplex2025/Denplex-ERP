@@ -34,15 +34,80 @@ export default function MachiningQuote() {
   const [toolLife, setToolLife] = useState("");
   const [overheadPct, setOverheadPct] = useState("");
   const [showCosting, setShowCosting] = useState(false);
+  // Adding a machine we don't own — a supplier's lathe, VMC, grinder — without leaving the quote.
+  const [presets, setPresets] = useState([]);
+  const [presetNote, setPresetNote] = useState("");
+  const [suppliers, setSuppliers] = useState([]);
+  const [addOpen, setAddOpen] = useState(false);
+  const [nm, setNm] = useState({ preset: "", name: "", supplier_id: "", supplier_name: "", hourly_rate: "", ownership: "supplier" });
+  const [addBusy, setAddBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
   const stepRef = useRef(null);
 
-  useEffect(() => {
+  const loadMachines = () =>
     api.get("/machines").then((r) => setMachines(Array.isArray(r.data) ? r.data : [])).catch(() => {});
+
+  useEffect(() => {
+    loadMachines();
     api.get("/machining/materials").then((r) => setMaterials(r.data?.materials || [])).catch(() => {});
+    api.get("/machines/presets").then((r) => {
+      setPresets(r.data?.presets || []);
+      setPresetNote(r.data?.note || "");
+    }).catch(() => {});
+    api.get("/suppliers").then((r) => setSuppliers(Array.isArray(r.data) ? r.data : [])).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Picking a preset fills the rate and the machine's capability fields, so a supplier machine
+  // can be added in two fields instead of fifteen. Everything stays editable afterwards.
+  const applyPreset = (key) => {
+    const p = presets.find((x) => x.key === key);
+    setNm((s) => ({
+      ...s,
+      preset: key,
+      name: s.name || (p ? p.label.split(" —")[0] : ""),
+      hourly_rate: p ? String(p.hourly_rate) : s.hourly_rate,
+    }));
+  };
+
+  const addMachine = async () => {
+    if (addBusy) return;
+    if (!nm.name.trim()) { toast.error("Give the machine a name"); return; }
+    const p = presets.find((x) => x.key === nm.preset);
+    if (!p) { toast.error("Pick a machine type"); return; }
+    setAddBusy(true);
+    try {
+      // Preset supplies the capability fields; the form overrides name, rate and supplier.
+      const { key, label, confidence, ...caps } = p;
+      const payload = {
+        ...caps,
+        name: nm.name.trim(),
+        ownership: nm.ownership,
+        supplier_id: nm.ownership === "supplier" ? nm.supplier_id : "",
+        supplier_name: nm.ownership === "supplier" ? nm.supplier_name : "",
+        // A subcontract rate is all-in (their machine, operator, overhead, margin), so the
+        // backend will refuse to add our overhead % on top of it.
+        rate_is_all_inclusive: nm.ownership === "supplier",
+        hourly_rate: Number(nm.hourly_rate || p.hourly_rate || 0),
+        notes: nm.ownership === "supplier"
+          ? `Subcontracted. Rate is a starting estimate (${confidence}) — replace with the supplier's quoted rate.`
+          : "",
+      };
+      const r = await api.post("/machines", payload);
+      await loadMachines();
+      const newId = r.data?.id || r.data?._id;
+      if (newId) setMachineId(newId);
+      setHourlyRate(String(payload.hourly_rate));
+      setAddOpen(false);
+      setNm({ preset: "", name: "", supplier_id: "", supplier_name: "", hourly_rate: "", ownership: "supplier" });
+      toast.success(`${payload.name} added`);
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Could not add the machine");
+    }
+    setAddBusy(false);
+  };
 
   const selectedMachine = machines.find((m) => (m._id || m.id) === machineId);
   useEffect(() => {
@@ -107,10 +172,8 @@ export default function MachiningQuote() {
               <Input value={partName} onChange={(e) => setPartName(e.target.value)} placeholder="e.g. L-Header bracket" />
             </Fld>
             <Fld label="Machine">
-              <select value={machineId} onChange={(e) => setMachineId(e.target.value)}
-                className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm bg-white h-10">
-                <option value="">— Select machine —</option>
-                {machines.map((m) => {
+              {(() => {
+                const opt = (m) => {
                   const axesLabel = m.axes
                     ? (m.simultaneous_axes && m.simultaneous_axes < m.axes
                         ? `(${m.simultaneous_axes}+${m.axes - m.simultaneous_axes})`
@@ -119,14 +182,113 @@ export default function MachiningQuote() {
                   return (
                     <option key={m._id || m.id} value={m._id || m.id}>
                       {m.name} {axesLabel} {m.code ? `· ${m.code}` : ""}
+                      {m.ownership === "supplier" && m.supplier_name ? ` — ${m.supplier_name}` : ""}
                     </option>
                   );
-                })}
-              </select>
-              {machines.length === 0 && (
-                <p className="text-xs text-amber-600 mt-1">No machines set up yet — add one under Production → Machines first.</p>
+                };
+                // Split the list so it's obvious at a glance whether the job runs in-house or
+                // goes out — they cost differently and one of them you can't schedule.
+                const mine = machines.filter((m) => m.ownership !== "supplier");
+                const theirs = machines.filter((m) => m.ownership === "supplier");
+                return (
+                  <select value={machineId} onChange={(e) => setMachineId(e.target.value)}
+                    className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm bg-white h-10">
+                    <option value="">— Select machine —</option>
+                    {mine.length > 0 && <optgroup label="Our machines">{mine.map(opt)}</optgroup>}
+                    {theirs.length > 0 && <optgroup label="Supplier / subcontract">{theirs.map(opt)}</optgroup>}
+                  </select>
+                );
+              })()}
+              <div className="flex items-center justify-between mt-1">
+                {machines.length === 0
+                  ? <p className="text-xs text-amber-600">No machines yet — add one here or under Production → Machines.</p>
+                  : <span />}
+                <button type="button" onClick={() => setAddOpen((v) => !v)}
+                  className="text-xs font-medium text-red-700 hover:underline" data-testid="mq-add-machine">
+                  {addOpen ? "− Cancel" : "+ Add a machine"}
+                </button>
+              </div>
+              {selectedMachine?.ownership === "supplier" && (
+                <p className="text-[11px] text-slate-500 mt-1">
+                  Subcontracted{selectedMachine.supplier_name ? ` to ${selectedMachine.supplier_name}` : ""} —
+                  the rate is their all-in job-work price, so no overhead % is added on top.
+                </p>
               )}
             </Fld>
+
+            {addOpen && (
+              <div className="rounded-md border border-slate-200 bg-slate-50 p-3 space-y-3" data-testid="mq-add-machine-form">
+                <div className="flex gap-3">
+                  <label className="flex items-center gap-1.5 text-xs">
+                    <input type="radio" checked={nm.ownership === "supplier"}
+                      onChange={() => setNm((s) => ({ ...s, ownership: "supplier" }))} />
+                    Supplier&apos;s machine
+                  </label>
+                  <label className="flex items-center gap-1.5 text-xs">
+                    <input type="radio" checked={nm.ownership === "in_house"}
+                      onChange={() => setNm((s) => ({ ...s, ownership: "in_house" }))} />
+                    Ours
+                  </label>
+                </div>
+
+                <Fld label="Machine type">
+                  <select value={nm.preset} onChange={(e) => applyPreset(e.target.value)}
+                    className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm bg-white h-9">
+                    <option value="">— Select type —</option>
+                    {presets.map((p) => (
+                      <option key={p.key} value={p.key}>{p.label} · ₹{p.hourly_rate}/hr</option>
+                    ))}
+                  </select>
+                </Fld>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <Fld label="Name">
+                    <Input value={nm.name} onChange={(e) => setNm((s) => ({ ...s, name: e.target.value }))}
+                      placeholder="e.g. Shah Engg CNC Lathe" className="h-9" />
+                  </Fld>
+                  <Fld label="Rate (₹/hr)">
+                    <Input type="number" min="0" value={nm.hourly_rate}
+                      onChange={(e) => setNm((s) => ({ ...s, hourly_rate: e.target.value }))}
+                      placeholder="from type" className="h-9 text-right tabular-nums" />
+                  </Fld>
+                </div>
+
+                {nm.ownership === "supplier" && (
+                  <Fld label="Supplier (optional)">
+                    <select
+                      value={nm.supplier_id}
+                      onChange={(e) => {
+                        const s = suppliers.find((x) => (x._id || x.id) === e.target.value);
+                        setNm((v) => ({ ...v, supplier_id: e.target.value, supplier_name: s?.name || "" }));
+                      }}
+                      className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm bg-white h-9">
+                      <option value="">— Not linked —</option>
+                      {suppliers.map((s) => (
+                        <option key={s._id || s.id} value={s._id || s.id}>{s.name}</option>
+                      ))}
+                    </select>
+                  </Fld>
+                )}
+
+                {nm.preset && (() => {
+                  const p = presets.find((x) => x.key === nm.preset);
+                  if (!p) return null;
+                  const weak = /weak|estimate/i.test(p.confidence);
+                  return (
+                    <p className={`text-[11px] ${weak ? "text-amber-700" : "text-slate-500"}`}>
+                      ₹{p.hourly_rate}/hr is a starting point ({p.confidence}). Replace it with your
+                      supplier&apos;s quoted rate once you have one.
+                    </p>
+                  );
+                })()}
+
+                <Button onClick={addMachine} disabled={addBusy}
+                  className="bg-red-600 hover:bg-red-700 text-white w-full h-9">
+                  {addBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : "Add machine"}
+                </Button>
+                {presetNote && <p className="text-[10px] text-slate-400 leading-snug">{presetNote}</p>}
+              </div>
+            )}
             <Fld label="Material">
               <select value={material} onChange={(e) => setMaterial(e.target.value)}
                 className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm bg-white h-10">
