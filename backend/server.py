@@ -740,25 +740,6 @@ class QuoteLine(BaseModel):
     rate: float
     gst_rate: float = 18.0
 
-class Quotation(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    id: str = Field(default_factory=new_id)
-    code: Optional[str] = None
-    customer_id: str
-    customer_name: str
-    date: str = Field(default_factory=now_iso)
-    valid_until: Optional[str] = ""
-    lines: List[QuoteLine] = []
-    extra_charges: List[ExtraCharge] = []
-    charges_total: float = 0
-    charges_gst: float = 0            # GST on freight/P&F; already folded into the tax total
-    subtotal: float = 0
-    gst_total: float = 0
-    total: float = 0
-    status: Literal["draft", "sent", "accepted", "rejected"] = "draft"
-    notes: Optional[str] = ""
-    created_at: str = Field(default_factory=now_iso)
-
 class ExtraCharge(BaseModel):
     """Document-level additional charge — Freight, Packing & Forwarding, Insurance, Adjustment.
 
@@ -778,6 +759,25 @@ class ExtraCharge(BaseModel):
     amount: float = 0      # flat amount; also where a pct-derived amount is stored back
     pct: float = 0         # if > 0, amount is computed as this % of the line subtotal
     gst_rate: float = 0    # 0 = non-taxable (legacy behaviour)
+
+class Quotation(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    code: Optional[str] = None
+    customer_id: str
+    customer_name: str
+    date: str = Field(default_factory=now_iso)
+    valid_until: Optional[str] = ""
+    lines: List[QuoteLine] = []
+    extra_charges: List[ExtraCharge] = []
+    charges_total: float = 0
+    charges_gst: float = 0            # GST on freight/P&F; already folded into the tax total
+    subtotal: float = 0
+    gst_total: float = 0
+    total: float = 0
+    status: Literal["draft", "sent", "accepted", "rejected"] = "draft"
+    notes: Optional[str] = ""
+    created_at: str = Field(default_factory=now_iso)
 
 class POLine(BaseModel):
     description: str
