@@ -3404,7 +3404,110 @@ class Machine(BaseModel):
     rotary_angle_max_deg: float = 0         # e.g. 110
     spindle_max_rpm: float = 0
     rapid_feed_mm_min: float = 10000        # rapid traverse rate, used for non-cutting move time in cycle estimate
+    # ---- Ownership: our own machine, or a supplier's that we subcontract to ----
+    # Defaults to in_house so every machine already on file keeps its current meaning.
+    ownership: Literal["in_house", "supplier"] = "in_house"
+    supplier_id: Optional[str] = ""
+    supplier_name: Optional[str] = ""
+    # A subcontract job-work rate is ALL-IN: the supplier's quote already covers their machine,
+    # operator, power, factory overhead and margin. Our costing adds overhead on top of the
+    # machine cost, so for a supplier machine that would double-count — the quote endpoint
+    # forces overhead to 0 when this is true. An in-house rate is normally machine-only.
+    rate_is_all_inclusive: bool = False
     created_at: str = Field(default_factory=now_iso)
+
+
+# ---------------------------------------------------------------------------
+# Machine type presets — starting points for "add a machine I don't own yet"
+# ---------------------------------------------------------------------------
+# WHERE THESE NUMBERS COME FROM, AND HOW MUCH TO TRUST THEM:
+#
+# The CNC figures are anchored on advertised Indian job-work listings (IndiaMART / TradeIndia,
+# checked Oct 2026): VMC job work ₹250-600/hr depending on material and part size, CNC turning
+# ₹300-450/hr. Those are ASKING prices on a lead-generation site — real quotes move with batch
+# size, material, tolerance, city and how much the supplier wants the work, and they tend to sit
+# at the low end of what a job actually costs once setup and rejections are counted.
+#
+# The conventional-machine figures (manual lathe, milling, drilling, grinding) are NOT from
+# published data — there is no reliable public source for them. They are ordinary market
+# expectation for a small Gujarat shop and should be treated as the weakest numbers here.
+#
+# So: these are seeds to get a quote moving, not prices. Every one is editable, and the moment
+# Neel has two or three real supplier quotes for a machine type, those should replace the seed.
+# The UI says as much rather than presenting these as authoritative.
+MACHINE_TYPE_PRESETS = [
+    # key, label, suggested ₹/hr, axes, simultaneous, sensible envelope defaults
+    {"key": "vmc_small",      "label": "VMC / CNC Milling — small (up to 600×400)",
+     "machine_type": "VMC", "hourly_rate": 450, "axes": 3, "simultaneous_axes": 3,
+     "travel_x_mm": 600, "travel_y_mm": 400, "travel_z_mm": 450, "spindle_max_rpm": 8000,
+     "confidence": "listing-anchored"},
+    {"key": "vmc_large",      "label": "VMC / CNC Milling — large (1000×500+)",
+     "machine_type": "VMC", "hourly_rate": 650, "axes": 3, "simultaneous_axes": 3,
+     "travel_x_mm": 1300, "travel_y_mm": 700, "travel_z_mm": 600, "spindle_max_rpm": 8000,
+     "confidence": "listing-anchored"},
+    {"key": "vmc_4axis",      "label": "VMC with 4th axis (rotary table)",
+     "machine_type": "VMC", "hourly_rate": 800, "axes": 4, "simultaneous_axes": 4,
+     "travel_x_mm": 800, "travel_y_mm": 500, "travel_z_mm": 500, "spindle_max_rpm": 10000,
+     "confidence": "estimate"},
+    {"key": "vmc_5axis",      "label": "5-axis machining centre",
+     "machine_type": "VMC", "hourly_rate": 1800, "axes": 5, "simultaneous_axes": 5,
+     "travel_x_mm": 600, "travel_y_mm": 500, "travel_z_mm": 450, "spindle_max_rpm": 12000,
+     "confidence": "estimate — few in the region, rate varies widely"},
+    {"key": "cnc_turning",    "label": "CNC Turning centre / CNC lathe",
+     "machine_type": "CNC Turning", "hourly_rate": 400, "axes": 2, "simultaneous_axes": 2,
+     "turning_dia_mm": 250, "turning_length_mm": 500, "spindle_max_rpm": 3500,
+     "confidence": "listing-anchored"},
+    {"key": "cnc_turnmill",   "label": "CNC Turn-mill (driven tools / Y-axis)",
+     "machine_type": "CNC Turning", "hourly_rate": 750, "axes": 4, "simultaneous_axes": 3,
+     "turning_dia_mm": 200, "turning_length_mm": 450, "spindle_max_rpm": 4000,
+     "confidence": "estimate"},
+    {"key": "lathe_manual",   "label": "Conventional / manual lathe",
+     "machine_type": "Lathe", "hourly_rate": 220, "axes": 2, "simultaneous_axes": 2,
+     "turning_dia_mm": 300, "turning_length_mm": 1000, "spindle_max_rpm": 1500,
+     "confidence": "weak — no public source"},
+    {"key": "milling_manual", "label": "Conventional milling machine",
+     "machine_type": "Milling", "hourly_rate": 250, "axes": 3, "simultaneous_axes": 1,
+     "travel_x_mm": 700, "travel_y_mm": 300, "travel_z_mm": 350, "spindle_max_rpm": 1800,
+     "confidence": "weak — no public source"},
+    {"key": "drilling",       "label": "Radial / pillar drilling machine",
+     "machine_type": "Drilling", "hourly_rate": 180, "axes": 1, "simultaneous_axes": 1,
+     "spindle_max_rpm": 2000,
+     "confidence": "weak — no public source"},
+    {"key": "surface_grind",  "label": "Surface grinder",
+     "machine_type": "Surface Grinder", "hourly_rate": 350, "axes": 3, "simultaneous_axes": 1,
+     "travel_x_mm": 600, "travel_y_mm": 300, "travel_z_mm": 300,
+     "confidence": "weak — no public source"},
+    {"key": "cylindrical_grind", "label": "Cylindrical grinder",
+     "machine_type": "Cylindrical Grinder", "hourly_rate": 450, "axes": 2, "simultaneous_axes": 1,
+     "turning_dia_mm": 200, "turning_length_mm": 600,
+     "confidence": "weak — no public source"},
+    {"key": "edm_wirecut",    "label": "Wire-cut EDM",
+     "machine_type": "Wire EDM", "hourly_rate": 600, "axes": 4, "simultaneous_axes": 4,
+     "travel_x_mm": 400, "travel_y_mm": 300, "travel_z_mm": 250,
+     "confidence": "estimate"},
+    {"key": "edm_sinker",     "label": "Sinker / die-sinking EDM",
+     "machine_type": "EDM", "hourly_rate": 700, "axes": 3, "simultaneous_axes": 1,
+     "travel_x_mm": 400, "travel_y_mm": 300, "travel_z_mm": 300,
+     "confidence": "estimate"},
+    {"key": "bandsaw",        "label": "Bandsaw / cutting",
+     "machine_type": "Bandsaw", "hourly_rate": 150, "axes": 1, "simultaneous_axes": 1,
+     "confidence": "weak — no public source"},
+]
+
+
+@api.get("/machines/presets")
+async def machine_type_presets(user=Depends(get_current_user)):
+    """Starting-point machine profiles for adding a supplier's machine.
+
+    Returned with their confidence label so the UI can show how much to trust each rate
+    rather than presenting all of them as equally solid."""
+    return {
+        "presets": MACHINE_TYPE_PRESETS,
+        "note": ("Suggested rates are starting points for an Indian SME shop, not quotations. "
+                 "CNC figures are anchored on advertised job-work listings (Oct 2026); "
+                 "conventional-machine figures have no reliable public source. Replace each one "
+                 "with your own supplier's quoted rate as soon as you have it."),
+    }
 
 @api.post("/machines")
 async def create_machine(m: Machine, user=Depends(get_current_user)):
@@ -11346,6 +11449,21 @@ async def machining_quote(inp: MachiningQuoteIn, user=Depends(get_current_user))
 
     hourly_rate = inp.hourly_rate if inp.hourly_rate is not None else machine.get("hourly_rate", 0)
 
+    # A subcontracted machine's rate is the supplier's quoted job-work price — their machine,
+    # operator, power, factory overhead and margin are all already inside it. Adding our own
+    # overhead % on top would charge overhead twice on work we don't even run. Forced to 0 here
+    # rather than trusted to the caller, and reported so the quote says why.
+    overhead_pct = inp.overhead_pct
+    overhead_note = ""
+    if machine.get("ownership") == "supplier" or machine.get("rate_is_all_inclusive"):
+        if overhead_pct:
+            overhead_note = (
+                f"Overhead ignored ({overhead_pct:g}% requested): "
+                f"'{machine.get('name','this machine')}' is subcontracted to "
+                f"{machine.get('supplier_name') or 'a supplier'}, and their rate already includes "
+                f"their overhead and margin.")
+        overhead_pct = 0
+
     payload = {
         "step_base64": inp.step_base64,
         "stock_margin_mm": inp.stock_margin_mm,
@@ -11374,7 +11492,7 @@ async def machining_quote(inp: MachiningQuoteIn, user=Depends(get_current_user))
             "material_price_per_kg": inp.material_price_per_kg,
             "tool_cost": inp.tool_cost,
             "tool_life_parts": inp.tool_life_parts,
-            "overhead_pct": inp.overhead_pct,
+            "overhead_pct": overhead_pct,          # forced to 0 for a subcontracted machine
             "scrap_pct": inp.scrap_pct,
         },
     }
@@ -11398,11 +11516,17 @@ async def machining_quote(inp: MachiningQuoteIn, user=Depends(get_current_user))
     )
     if note:
         result.setdefault("warnings", []).append(note)
+    if overhead_note:
+        result.setdefault("warnings", []).append(overhead_note)
+    result["machine_ownership"] = machine.get("ownership", "in_house")
+    result["machine_supplier_name"] = machine.get("supplier_name", "")
 
     # Save a lightweight history record (not a full job/quote link yet — just enough to review past estimates).
     record = {
         "id": new_id(), "part_name": inp.part_name or "", "machine_id": inp.machine_id,
         "machine_name": machine.get("name", ""), "material": inp.material, "hourly_rate": hourly_rate,
+        "machine_ownership": machine.get("ownership", "in_house"),
+        "machine_supplier_name": machine.get("supplier_name", ""),
         "geometry": result.get("geometry", {}), "time_breakdown_min": result.get("time_breakdown_min", {}),
         "cost": result.get("cost", 0), "warnings": result.get("warnings", []),
         "axis_analysis": axis_analysis,
