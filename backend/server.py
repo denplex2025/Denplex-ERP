@@ -5093,7 +5093,17 @@ async def _ai_parse_po_from_text(text: str) -> Optional[dict]:
 #    which is the decision point WhatsApp itself gives us — there is no hook to ask before a
 #    message is sent, so the marker has to be part of the message. Several spellings are accepted
 #    because a marker that only works one way is a marker you will eventually type wrong.
-PO_KEYWORD_RE = re.compile(r"^\s*[#*]?\s*(p\.?\s?o\.?)\s*[:\-–—]?\s+", re.IGNORECASE)
+# After the PO token, accept EITHER a separator (": " / ":" / "-" / "—") OR whitespace.
+#
+# The previous pattern ended in a bare `\s+`, which demanded a space after the marker even when
+# a colon was already there. A real order typed as "PO:For santej 600L" therefore failed to
+# match: the AI still read it correctly (4 lines, high confidence) but it was filed as a
+# suggestion needing a click instead of being drafted automatically — the feature looking broken
+# for the most natural way to type the marker.
+#
+# "po" must still be followed by a separator or a space, so ordinary words that merely begin
+# with those letters — post, police, potli, pouch — cannot trigger it.
+PO_KEYWORD_RE = re.compile(r"^\s*[#*]?\s*p\.?\s?o\.?\s*(?:[:\-–—]\s*|\s+)", re.IGNORECASE)
 
 # 2. The cheap local filter, for messages with no marker. A purchase order needs a number and
 #    some notion of how much — "ok", "thanks", "call me at 5" can never be one. This runs before
