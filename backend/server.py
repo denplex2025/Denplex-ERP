@@ -923,6 +923,67 @@ class InvoiceLine(BaseModel):
     discount_amount: float = 0.0
     gst_rate: float = 18.0
 
+class JobWorkOutLine(BaseModel):
+    """One part sent out for an operation, and how much of it has come back.
+
+    Quantities are tracked three ways because a job worker rarely returns exactly what was sent:
+    some comes back good, some scrapped, some still sitting with them. Outstanding is derived
+    (sent - returned - rejected) rather than stored, so it cannot drift out of step."""
+    description: str
+    item_code: Optional[str] = ""
+    hsn: Optional[str] = ""
+    process: Optional[str] = ""          # grinding, zinc plating, heat treatment, wire-cut...
+    qty_sent: float
+    unit: Optional[str] = "Nos"
+    rate: float = 0                      # agreed job-work charge per unit; 0 = rate not settled yet
+    material_value: float = 0            # declared value of OUR material, per unit — see class note
+    qty_returned: float = 0
+    qty_rejected: float = 0
+    remarks: Optional[str] = ""
+
+
+class JobWorkOut(BaseModel):
+    """Job Work Out challan — our material physically leaving the shop for an outside operation.
+
+    This is NOT a purchase. Under GST (Rule 55 / ITC-04) material sent for job work travels on a
+    delivery challan, not an invoice: no tax is charged on the material because it stays ours
+    throughout. `material_value` on each line is a DECLARED value for transit and reconciliation
+    only — it must never be posted as a sale or a purchase. The job worker invoices us separately
+    for their labour, and that bill is an ordinary Vendor Bill.
+
+    The job worker is a SUPPLIER here (Neel's decision, 2026-10-12): Jyoti, Venus and the rest are
+    people Denplex pays, and keeping them in one party list avoids a second place to maintain the
+    same vendor. Note the existing Job Work Out PDF route originally resolved the party from
+    customers — that is fixed alongside this model.
+
+    The point of the document is the outstanding figure: what is sitting at whose place right now.
+    """
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    code: Optional[str] = None
+    date: str = Field(default_factory=now_iso)
+    supplier_id: Optional[str] = ""
+    supplier_name: Optional[str] = ""
+    process: Optional[str] = ""              # document-level operation when every line shares one
+    expected_return_date: Optional[str] = ""
+    lines: List[JobWorkOutLine] = []
+    status: Literal["draft", "sent", "partially_returned", "returned", "closed", "cancelled"] = "draft"
+    # Set on anything the WhatsApp capture drafted, so an AI-parsed challan is visibly different
+    # from one a person typed — same convention as the WhatsApp purchase orders.
+    needs_review: bool = False
+    source: Optional[str] = ""               # "whatsapp" | "" (manual)
+    ai_confidence: Optional[str] = ""
+    reference: Optional[str] = ""            # their DC no., our work order, etc.
+    notes: Optional[str] = ""
+    terms_text: Optional[str] = ""
+    # Computed on write by _job_work_totals — stored so lists and dashboards don't recompute.
+    labour_total: float = 0
+    material_value_total: float = 0
+    qty_sent_total: float = 0
+    qty_outstanding_total: float = 0
+    created_at: str = Field(default_factory=now_iso)
+
+
 class Invoice(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: str = Field(default_factory=new_id)
@@ -8730,13 +8791,128 @@ async def list_delivery_challans(user=Depends(get_current_user)):
 async def delivery_challan_pdf(did: str, user=Depends(get_current_user)):
     return await _generic_doc_pdf(db.delivery_challans, did, "Delivery Challan", "Ship To", "customer", db.customers, "delivery_challan")
 
+def _job_work_totals(doc: Dict[str, Any]) -> Dict[str, Any]:
+    """Roll up a job-work challan and derive its status from the quantities.
+
+    Status is DERIVED, never trusted from the client: a challan that says "returned" while two
+    pieces are still outstanding would quietly hide stock sitting at a job worker, which is the
+    one thing this document exists to prevent. The only status the caller controls is the
+    cancelled/draft distinction."""
+    labour = 0.0; matval = 0.0; sent = 0.0; outstanding = 0.0
+    for l in (doc.get("lines") or []):
+        q = float(l.get("qty_sent", 0) or 0)
+        ret = float(l.get("qty_returned", 0) or 0)
+        rej = float(l.get("qty_rejected", 0) or 0)
+        # Clamp: more returned than sent is a data-entry slip, not negative outstanding stock.
+        out = q - ret - rej
+        if out < 0:
+            out = 0.0
+        labour += q * float(l.get("rate", 0) or 0)
+        matval += q * float(l.get("material_value", 0) or 0)
+        sent += q
+        outstanding += out
+
+    status = doc.get("status") or "draft"
+    if status not in ("cancelled", "draft"):
+        if sent <= 0:
+            status = "sent"
+        elif outstanding <= 0:
+            status = "returned"
+        elif outstanding < sent:
+            status = "partially_returned"
+        else:
+            status = "sent"
+
+    return {"labour_total": round(labour, 2), "material_value_total": round(matval, 2),
+            "qty_sent_total": round(sent, 3), "qty_outstanding_total": round(outstanding, 3),
+            "status": status}
+
+
+@api.post("/job-work-out")
+async def create_job_work_out(j: JobWorkOut, user=Depends(get_current_user)):
+    doc = j.model_dump()
+    doc["code"] = (j.code or "").strip() or await gen_code("JW", "job_work_out")
+    # Resolve the job worker from SUPPLIERS so the name on the challan matches the party record
+    # even when only an id was posted (the WhatsApp path sends an id it matched by name).
+    if doc.get("supplier_id"):
+        sup = await db.suppliers.find_one({"id": doc["supplier_id"]}, {"_id": 0, "name": 1})
+        if sup:
+            doc["supplier_name"] = sup.get("name") or doc.get("supplier_name") or ""
+    doc.update(_job_work_totals(doc))
+    await db.job_work_out.insert_one(doc)
+    return serialize(doc)
+
 @api.get("/job-work-out")
 async def list_job_work_out(user=Depends(get_current_user)):
     return await list_collection(db.job_work_out, sort_key="date")
 
+@api.get("/job-work-out/outstanding")
+async def job_work_outstanding(user=Depends(get_current_user)):
+    """What is sitting at each job worker right now — the reason this document exists.
+
+    Declared BEFORE /job-work-out/{did} so the literal path wins over the id placeholder;
+    reversed, "outstanding" would be read as a document id and 404."""
+    rows: Dict[str, Dict[str, Any]] = {}
+    async for d in db.job_work_out.find({"status": {"$nin": ["cancelled", "returned", "closed"]}}, {"_id": 0}):
+        t = _job_work_totals(d)
+        if t["qty_outstanding_total"] <= 0:
+            continue
+        key = d.get("supplier_id") or d.get("supplier_name") or "(unknown)"
+        r = rows.setdefault(key, {"supplier_id": d.get("supplier_id", ""),
+                                  "supplier_name": d.get("supplier_name", "") or "(unnamed)",
+                                  "challans": 0, "qty_outstanding": 0.0,
+                                  "material_value": 0.0, "oldest_date": None, "items": []})
+        r["challans"] += 1
+        r["qty_outstanding"] += t["qty_outstanding_total"]
+        r["material_value"] += t["material_value_total"]
+        dt = str(d.get("date") or "")[:10]
+        if dt and (r["oldest_date"] is None or dt < r["oldest_date"]):
+            r["oldest_date"] = dt
+        for l in (d.get("lines") or []):
+            out = float(l.get("qty_sent", 0) or 0) - float(l.get("qty_returned", 0) or 0) - float(l.get("qty_rejected", 0) or 0)
+            if out > 0:
+                r["items"].append({"code": d.get("code", ""), "date": dt,
+                                   "description": l.get("description", ""),
+                                   "process": l.get("process") or d.get("process", ""),
+                                   "qty_outstanding": round(out, 3), "unit": l.get("unit", "Nos")})
+    out = sorted(rows.values(), key=lambda r: -r["qty_outstanding"])
+    for r in out:
+        r["qty_outstanding"] = round(r["qty_outstanding"], 3)
+        r["material_value"] = round(r["material_value"], 2)
+    return {"by_supplier": out,
+            "total_qty_outstanding": round(sum(r["qty_outstanding"] for r in out), 3),
+            "total_material_value": round(sum(r["material_value"] for r in out), 2)}
+
+@api.get("/job-work-out/{did}")
+async def get_job_work_out(did: str, user=Depends(get_current_user)):
+    doc = await db.job_work_out.find_one({"id": did}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Job Work Out challan not found")
+    return serialize(doc)
+
+@api.put("/job-work-out/{did}")
+async def update_job_work_out(did: str, j: JobWorkOut, user=Depends(get_current_user)):
+    data = j.model_dump(); data.pop("id", None); data.pop("created_at", None)
+    if data.get("supplier_id"):
+        sup = await db.suppliers.find_one({"id": data["supplier_id"]}, {"_id": 0, "name": 1})
+        if sup:
+            data["supplier_name"] = sup.get("name") or data.get("supplier_name") or ""
+    data.update(_job_work_totals(data))
+    r = await db.job_work_out.update_one({"id": did}, {"$set": data})
+    if not r.matched_count:
+        raise HTTPException(404, "Job Work Out challan not found")
+    return {"ok": True, **{k: data[k] for k in ("status", "qty_outstanding_total", "labour_total")}}
+
+@api.delete("/job-work-out/{did}")
+async def delete_job_work_out(did: str, user=Depends(require_roles("admin", "manager", "accountant"))):
+    await db.job_work_out.delete_one({"id": did})
+    return {"ok": True}
+
 @api.get("/job-work-out/{did}/pdf")
 async def job_work_out_pdf(did: str, user=Depends(get_current_user)):
-    return await _generic_doc_pdf(db.job_work_out, did, "Job Work Out Challan", "Job Worker", "customer", db.customers, "job_work_out")
+    # Job worker is a SUPPLIER, not a customer — this route previously looked the party up in
+    # db.customers, so the challan would have printed with a blank address for every job worker.
+    return await _generic_doc_pdf(db.job_work_out, did, "Job Work Out Challan", "Job Worker", "supplier", db.suppliers, "job_work_out")
 
 @api.get("/credit-notes")
 async def list_credit_notes(user=Depends(get_current_user)):
