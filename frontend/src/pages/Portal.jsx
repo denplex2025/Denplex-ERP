@@ -75,9 +75,6 @@ export default function Portal() {
               <div className="grid grid-cols-2 md:grid-cols-4 gap-6 mt-6 text-sm">
                 <Info label="Product" v={data.work_order.product} />
                 <Info label="Quantity" v={data.work_order.qty} />
-                <Info label="Customer" v={data.work_order.customer_name || "—"} />
-                <Info label="Priority" v={data.work_order.priority} />
-                <Info label="PO Reference" v={data.work_order.po_ref || "—"} />
                 <Info label="Start" v={fmt(data.work_order.start_date)} />
                 <Info label="Due" v={fmt(data.work_order.due_date)} />
                 <Info label="Progress" v={`${data.work_order.progress || 0}%`} />
@@ -96,11 +93,10 @@ export default function Portal() {
                 <div className="px-6 py-8 text-sm text-slate-500">No job cards yet.</div>
               ) : (
                 <div className="divide-y divide-slate-100">
-                  {data.job_cards.map(j => (
-                    <div key={j.id} className="px-6 py-3 grid grid-cols-2 md:grid-cols-5 gap-3 text-sm">
+                  {data.job_cards.map((j, i) => (
+                    <div key={j.code || i} className="px-6 py-3 grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
                       <div className="font-mono-tech text-xs text-slate-500">{j.code}</div>
                       <div>{j.operation}</div>
-                      <div className="text-slate-500">{j.machine || "—"}</div>
                       <div className="font-mono-tech text-xs">{j.qty_done}/{j.qty_planned}</div>
                       <div><Badge variant="outline" className="rounded-sm text-xs uppercase">{j.status}</Badge></div>
                     </div>
@@ -118,12 +114,11 @@ export default function Portal() {
                 <div className="px-6 py-8 text-sm text-slate-500">No QC reports yet.</div>
               ) : (
                 <div className="divide-y divide-slate-100">
-                  {data.qc_reports.map(q => (
-                    <div key={q.id} className="px-6 py-3 grid grid-cols-2 md:grid-cols-5 gap-3 text-sm">
+                  {data.qc_reports.map((q, i) => (
+                    <div key={q.code || i} className="px-6 py-3 grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
                       <div className="font-mono-tech text-xs text-slate-500">{q.code}</div>
                       <div>{q.parameter}</div>
-                      <div className="text-slate-500">{q.spec}</div>
-                      <div>{q.measured}</div>
+                      <div className="text-slate-500">{q.inspection_date || ""}</div>
                       <div>
                         <Badge className={`rounded-sm text-xs uppercase ${q.result==='pass'?'bg-emerald-50 text-emerald-700 border-emerald-200':q.result==='fail'?'bg-red-50 text-red-700 border-red-200':'bg-amber-50 text-amber-700 border-amber-200'}`}>{q.result}</Badge>
                       </div>
