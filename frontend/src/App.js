@@ -82,6 +82,7 @@ import Assistant from "./pages/Assistant";
 import PurchaseRequisitions from "./pages/PurchaseRequisitions";
 import SourcingTendering from "./pages/SourcingTendering";
 import GoodsReceipt from "./pages/GoodsReceipt";
+import JobWorkOut from "./pages/JobWorkOut";
 import SpendAnalytics from "./pages/SpendAnalytics";
 import MobileLayout from "./pages/mobile/MobileLayout";
 import MobileHome from "./pages/mobile/MobileHome";
@@ -120,6 +121,7 @@ function App() {
               <Route path="procurement/requisitions" element={<PurchaseRequisitions />} />
               <Route path="procurement/sourcing" element={<SourcingTendering />} />
               <Route path="procurement/goods-receipt" element={<GoodsReceipt />} />
+              <Route path="job-work-out" element={<JobWorkOut />} />
               <Route path="procurement/spend-analytics" element={<SpendAnalytics />} />
               <Route path="invoices" element={<Invoices />} />
               <Route path="invoices/new" element={<InvoiceCreate />} />
