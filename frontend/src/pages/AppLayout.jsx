@@ -129,7 +129,7 @@ const NAV_GROUPS = [
       { to: "/app/machines", label: "Machines", icon: Cog, testid: "nav-machines" },
       { to: "/app/planning", label: "Planning & Schedule", icon: CalendarRange, testid: "nav-planning" },
       { to: "/app/job-cards", label: "Job Cards", icon: FileText, testid: "nav-job-cards" },
-      { to: "/app/docs/job-work-out", label: "Job Work Out", icon: Wrench, testid: "nav-job-work-out" },
+      { to: "/app/job-work-out", label: "Job Work Out", icon: Wrench, testid: "nav-job-work-out" },
       { to: "/app/inventory", label: "Inventory", icon: Boxes, testid: "nav-inventory" },
       { to: "/app/bulk-items", label: "Bulk Item Update", icon: SlidersHorizontal, testid: "nav-bulk-items" },
     ],
