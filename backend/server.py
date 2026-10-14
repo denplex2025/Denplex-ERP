@@ -368,6 +368,72 @@ async def require_can_edit(request: Request, user=Depends(get_current_user)) -> 
         raise HTTPException(403, "Trial accounts have view + create access only. Editing and deleting are disabled during the 1-month trial.")
     return user
 
+# ---------------------------------------------------------------------------
+# Rate limiting
+# ---------------------------------------------------------------------------
+# Mongo-backed rather than in-process, deliberately: Railway restarts on every deploy and an
+# in-memory counter would reset with it, handing an attacker a clean slate each time. A capped
+# document per key with a TTL index is enough here — this is brute-force protection for a
+# single-tenant ERP, not a distributed quota system.
+#
+# Fails OPEN. If Mongo is unreachable the limiter cannot be the thing that stops people logging
+# in to their own ERP; the risk of a lockout from an infrastructure blip is worse than the risk
+# of an unthrottled window during one.
+RATE_LIMITS = {
+    "login":           (8,  300),    # 8 attempts / 5 min — a person who forgot their password
+    "forgot_password": (5,  900),    # 5 / 15 min — each one sends a real email
+    "reset_password":  (10, 900),
+    "otp_request":     (5,  900),    # each sends a real WhatsApp message
+    "otp_verify":      (10, 900),
+    "portal_track":    (30, 300),    # public, unauthenticated — stops code enumeration
+}
+
+
+def _client_ip(request: Request) -> str:
+    """Railway terminates TLS upstream, so request.client.host is the proxy. Take the first hop
+    of X-Forwarded-For, which is the caller as the edge saw it."""
+    xff = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    return xff or (request.client.host if request.client else "unknown")
+
+
+async def enforce_rate_limit(bucket: str, ident: str) -> None:
+    """Raise 429 when `ident` has exceeded the bucket's allowance. Call before doing the work."""
+    limit, window = RATE_LIMITS.get(bucket, (20, 300))
+    key = f"{bucket}:{ident}"
+    now = datetime.now(timezone.utc)
+    try:
+        doc = await db.rate_limits.find_one_and_update(
+            {"_id": key},
+            {"$inc": {"n": 1}, "$setOnInsert": {"start": now, "expires_at": now + timedelta(seconds=window)}},
+            upsert=True, return_document=True,
+        )
+    except Exception as e:
+        logging.warning("rate limit check failed for %s, allowing: %s", key, e)
+        return                                  # fail open — see note above
+
+    start = doc.get("start")
+    if start and start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    # Window elapsed: reset rather than wait for the TTL sweep, which only runs once a minute.
+    if start and (now - start).total_seconds() > window:
+        await db.rate_limits.update_one(
+            {"_id": key},
+            {"$set": {"n": 1, "start": now, "expires_at": now + timedelta(seconds=window)}})
+        return
+    if doc.get("n", 0) > limit:
+        retry = window - int((now - start).total_seconds()) if start else window
+        raise HTTPException(429, f"Too many attempts. Try again in {max(retry, 1)} seconds.")
+
+
+async def clear_rate_limit(bucket: str, ident: str) -> None:
+    """Drop the counter after a SUCCESSFUL attempt, so a legitimate user who mistyped twice and
+    then got in isn't still carrying strikes against them."""
+    try:
+        await db.rate_limits.delete_one({"_id": f"{bucket}:{ident}"})
+    except Exception:
+        pass
+
+
 def require_roles(*allowed: str):
     async def checker(user: Dict[str, Any] = Depends(get_current_user)):
         if user["role"] not in allowed and user["role"] != "admin":
@@ -1948,7 +2014,11 @@ async def register(payload: RegisterIn, request: Request, current=Depends(get_cu
 
 @api.post("/auth/login")
 async def login(payload: LoginIn, request: Request):
-    user = await db.users.find_one({"email": payload.email.lower()})
+    _ip = _client_ip(request)
+    _em = payload.email.lower()
+    await enforce_rate_limit("login", _ip)
+    await enforce_rate_limit("login", _em)
+    user = await db.users.find_one({"email": _em})
     if not user or not verify_password(payload.password, user["password"]):
         await write_audit(payload.email.lower(), "login_failed", "auth", "", {"reason": "invalid_credentials"}, request=request)
         raise HTTPException(401, "Invalid credentials")
@@ -1971,6 +2041,10 @@ async def login(payload: LoginIn, request: Request):
             await write_audit(user.get("name") or payload.email.lower(), "login_failed", "auth", user["id"], {"reason": "invalid_totp"}, request=request)
             raise HTTPException(401, "Invalid TOTP code")
     token = create_token(user["id"], user["role"])
+    # Successful login clears the strikes, so someone who mistyped twice then got in is not
+    # still carrying a near-lockout for the rest of the window.
+    await clear_rate_limit("login", _ip)
+    await clear_rate_limit("login", _em)
     await write_audit(user.get("name") or payload.email.lower(), "login_success", "auth", user["id"], {"role": user["role"]}, request=request)
     return {
         "token": token,
@@ -2037,6 +2111,8 @@ _PASSWORD_RESET_TTL_MIN = 30
 
 @api.post("/auth/forgot-password")
 async def forgot_password(payload: ForgotPasswordIn, request: Request):
+    await enforce_rate_limit("forgot_password", _client_ip(request))
+    await enforce_rate_limit("forgot_password", payload.email.lower())
     """Always returns the same generic message regardless of whether the email is registered,
     so this endpoint can't be used to enumerate valid accounts."""
     generic = {"ok": True, "message": "If that email is registered, we've sent a password reset link. It expires in 30 minutes."}
@@ -2076,6 +2152,7 @@ async def forgot_password(payload: ForgotPasswordIn, request: Request):
 
 @api.post("/auth/reset-password")
 async def reset_password(payload: ResetPasswordIn, request: Request):
+    await enforce_rate_limit("reset_password", _client_ip(request))
     if len(payload.new_password) < 8:
         raise HTTPException(400, "New password must be at least 8 characters")
     token_hash = hashlib.sha256(payload.token.encode()).hexdigest()
@@ -2099,6 +2176,7 @@ _OTP_MAX_VERIFY_ATTEMPTS = 5
 
 @api.post("/auth/otp/request")
 async def otp_request(payload: OtpRequestIn, request: Request):
+    await enforce_rate_limit("otp_request", _client_ip(request))
     """Sends a 6-digit OTP over WhatsApp (via the Twilio integration already configured in
     Settings) to the mobile number on file for that account. Always returns the same generic
     message so this can't be used to enumerate which numbers are registered."""
@@ -2169,6 +2247,7 @@ async def otp_request(payload: OtpRequestIn, request: Request):
 
 @api.post("/auth/otp/verify")
 async def otp_verify(payload: OtpVerifyIn, request: Request):
+    await enforce_rate_limit("otp_verify", _client_ip(request))
     if len(payload.new_password) < 8:
         raise HTTPException(400, "New password must be at least 8 characters")
     try:
@@ -2908,7 +2987,9 @@ async def cheque_register(user=Depends(get_current_user)):
     return out
 
 @api.put("/cheques/{coll}/{pid}/status")
-async def update_cheque_status(coll: str, pid: str, body: dict, user=Depends(get_current_user)):
+async def update_cheque_status(coll: str, pid: str, body: dict,
+                               user=Depends(require_roles("admin", "accountant"))):
+    # Marking a cheque cleared/bounced moves money in the books — accounts or admin only.
     if coll not in ("payments_in", "payments_out"):
         raise HTTPException(400, "Bad collection")
     status = (body or {}).get("cheque_status")
@@ -2967,7 +3048,10 @@ async def get_masters(user=Depends(get_current_user)):
     }
 
 @api.put("/masters/{section}")
-async def put_masters(section: str, body: dict, user=Depends(get_current_user)):
+async def put_masters(section: str, body: dict,
+                      user=Depends(require_roles("admin"))):
+    # Masters holds the bank details printed on every invoice. Admin only: a compromised
+    # or disgruntled staff login must not be able to redirect customer payments.
     if section not in MASTER_KEYS:
         raise HTTPException(400, "Unknown masters section")
     await _put_setting(MASTER_KEYS[section], (body or {}).get("value"))
@@ -5928,17 +6012,33 @@ async def get_revisions(did: str, user=Depends(get_current_user)):
 
 # ---------------- Customer Portal (public) ----------------
 @api.get("/portal/track")
-async def portal_track(ref: str = Query(..., min_length=2)):
+async def portal_track(request: Request, ref: str = Query(..., min_length=2)):
+    """Public order tracking. No login, so treat everything here as published to the internet.
+
+    Two things matter: the work order is found by a code a customer could guess, and whatever is
+    returned is readable by anyone who guesses it. The work_order was already field-limited, but
+    job_cards and qc_reports were returned as WHOLE documents — operator names, machine numbers,
+    internal notes, every measured QC value. Those are now whitelisted down to what a customer
+    legitimately needs to see: is my job moving, and did it pass.
+
+    The real fix is a random per-work-order token instead of a guessable code; that changes the
+    links customers already hold, so it is a separate decision. Rate limiting plus a much smaller
+    payload closes most of the exposure in the meantime."""
+    await enforce_rate_limit("portal_track", _client_ip(request))
     ref_u = ref.strip()
     wo = await db.work_orders.find_one({"$or": [{"code": ref_u}, {"po_ref": ref_u}]}, {"_id": 0})
     if not wo:
         raise HTTPException(404, "Reference not found")
     jcs = await db.job_cards.find({"work_order_id": wo["id"]}, {"_id": 0}).to_list(200)
     qcs = await db.qc_reports.find({"work_order_id": wo["id"]}, {"_id": 0, "photos": 0}).to_list(200)
+    # Progress, not internals: no operator, no machine, no notes.
+    JC_PUBLIC = ["code", "operation", "qty_planned", "qty_done", "status", "started_at", "finished_at"]
+    # Pass/fail and when, not the measurements or who inspected.
+    QC_PUBLIC = ["code", "inspection_date", "parameter", "result"]
     return {
         "work_order": {k: wo.get(k) for k in ["code", "product", "qty", "status", "priority", "progress", "start_date", "due_date", "customer_name", "po_ref", "created_at"]},
-        "job_cards": jcs,
-        "qc_reports": qcs,
+        "job_cards": [{k: j.get(k) for k in JC_PUBLIC} for j in jcs],
+        "qc_reports": [{k: q.get(k) for k in QC_PUBLIC} for q in qcs],
     }
 
 # ---------------- Health ----------------
@@ -14272,6 +14372,13 @@ _INDEX_PLAN = {
 @app.on_event("startup")
 async def _ensure_indexes():
     created = failed = 0
+    # Rate-limit counters expire themselves. Without this TTL the collection grows one document
+    # per IP per bucket forever, and a stale counter would keep blocking a caller whose window
+    # has long since passed.
+    try:
+        await db.rate_limits.create_index("expires_at", expireAfterSeconds=0)
+    except Exception as e:
+        logging.warning("rate_limits TTL index failed: %s", e)
     for coll, specs in _INDEX_PLAN.items():
         for spec in specs:
             try:
