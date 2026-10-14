@@ -385,44 +385,92 @@ RATE_LIMITS = {
     "reset_password":  (10, 900),
     "otp_request":     (5,  900),    # each sends a real WhatsApp message
     "otp_verify":      (10, 900),
+    "login_email":     (15, 900),    # FAILED logins per account — looser than the IP bucket
+                                     # so locking someone out on purpose costs more effort
     "portal_track":    (30, 300),    # public, unauthenticated — stops code enumeration
 }
 
 
+TRUSTED_PROXY_HOPS = int(os.environ.get("TRUSTED_PROXY_HOPS", "1"))
+
+
 def _client_ip(request: Request) -> str:
-    """Railway terminates TLS upstream, so request.client.host is the proxy. Take the first hop
-    of X-Forwarded-For, which is the caller as the edge saw it."""
-    xff = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
-    return xff or (request.client.host if request.client else "unknown")
+    """The caller's IP, taken from the RIGHT of X-Forwarded-For.
+
+    The earlier version read the LEFTMOST entry, which is attacker-controlled and made the
+    IP-based limits useless: send `X-Forwarded-For: 1.2.3.4` and every request lands in a fresh
+    bucket. Each proxy APPENDS the address it received the connection from, so the trustworthy
+    entries are at the right-hand end — the leftmost is whatever the client chose to claim.
+
+    TRUSTED_PROXY_HOPS is how many proxies sit in front of this app (Railway's edge = 1). With
+    one hop the last entry is the real client. If a CDN is ever put in front, raise it to 2, or
+    the limiter will bucket every caller together under the CDN's address — over-restrictive
+    rather than bypassable, which is the safer way to be wrong.
+
+    To confirm what Railway actually sends, log `request.headers.get("x-forwarded-for")` on any
+    route and compare it against your own public IP.
+    """
+    parts = [p.strip() for p in (request.headers.get("x-forwarded-for") or "").split(",") if p.strip()]
+    if parts:
+        idx = max(len(parts) - TRUSTED_PROXY_HOPS, 0)
+        return parts[idx]
+    return request.client.host if request.client else "unknown"
 
 
-async def enforce_rate_limit(bucket: str, ident: str) -> None:
-    """Raise 429 when `ident` has exceeded the bucket's allowance. Call before doing the work."""
+async def enforce_rate_limit(bucket: str, ident: str, increment: bool = True) -> None:
+    """Raise 429 when `ident` has exceeded the bucket's allowance. Call before doing the work.
+
+    `increment=False` checks the counter without adding to it, so a caller can decide afterwards
+    whether the attempt deserves a strike — used by login, which counts only failed attempts
+    against an email address.
+    """
     limit, window = RATE_LIMITS.get(bucket, (20, 300))
     key = f"{bucket}:{ident}"
     now = datetime.now(timezone.utc)
     try:
-        doc = await db.rate_limits.find_one_and_update(
-            {"_id": key},
-            {"$inc": {"n": 1}, "$setOnInsert": {"start": now, "expires_at": now + timedelta(seconds=window)}},
-            upsert=True, return_document=True,
-        )
-    except Exception as e:
-        logging.warning("rate limit check failed for %s, allowing: %s", key, e)
-        return                                  # fail open — see note above
+        if increment:
+            doc = await db.rate_limits.find_one_and_update(
+                {"_id": key},
+                {"$inc": {"n": 1}, "$setOnInsert": {"start": now, "expires_at": now + timedelta(seconds=window)}},
+                upsert=True, return_document=True,
+            )
+        else:
+            doc = await db.rate_limits.find_one({"_id": key}) or {}
 
-    start = doc.get("start")
-    if start and start.tzinfo is None:
-        start = start.replace(tzinfo=timezone.utc)
-    # Window elapsed: reset rather than wait for the TTL sweep, which only runs once a minute.
-    if start and (now - start).total_seconds() > window:
-        await db.rate_limits.update_one(
-            {"_id": key},
-            {"$set": {"n": 1, "start": now, "expires_at": now + timedelta(seconds=window)}})
+        start = doc.get("start")
+        if start and start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        # Window elapsed: reset rather than wait for the TTL sweep, which only runs once a minute.
+        if start and (now - start).total_seconds() > window:
+            if increment:
+                await db.rate_limits.update_one(
+                    {"_id": key},
+                    {"$set": {"n": 1, "start": now, "expires_at": now + timedelta(seconds=window)}})
+            return
+    except Exception as e:
+        # The WHOLE body is guarded, not just the first call: a Mongo error on the window-reset
+        # write would otherwise surface as a 500 and lock people out — the opposite of the
+        # fail-open behaviour this is supposed to have.
+        logging.warning("rate limit check failed for %s, allowing: %s", key, e)
         return
+
     if doc.get("n", 0) > limit:
         retry = window - int((now - start).total_seconds()) if start else window
         raise HTTPException(429, f"Too many attempts. Try again in {max(retry, 1)} seconds.")
+
+
+async def bump_rate_limit(bucket: str, ident: str) -> None:
+    """Add one strike without checking. For counting failures after the fact."""
+    limit, window = RATE_LIMITS.get(bucket, (20, 300))
+    now = datetime.now(timezone.utc)
+    try:
+        await db.rate_limits.update_one(
+            {"_id": f"{bucket}:{ident}"},
+            {"$inc": {"n": 1},
+             "$setOnInsert": {"start": now, "expires_at": now + timedelta(seconds=window)}},
+            upsert=True)
+    except Exception as e:
+        logging.warning("rate limit bump failed for %s:%s: %s", bucket, ident, e)
 
 
 async def clear_rate_limit(bucket: str, ident: str) -> None:
@@ -2016,10 +2064,16 @@ async def register(payload: RegisterIn, request: Request, current=Depends(get_cu
 async def login(payload: LoginIn, request: Request):
     _ip = _client_ip(request)
     _em = payload.email.lower()
+    # IP counts every attempt. Email counts only FAILURES, checked without incrementing:
+    # otherwise a user who signs in normally all day burns their own allowance, and the
+    # account-lockout nuisance gets cheaper for an attacker. It does not remove that
+    # nuisance — someone who knows the address can still spend failures to lock it — so
+    # the email window is deliberately looser than the IP one.
     await enforce_rate_limit("login", _ip)
-    await enforce_rate_limit("login", _em)
+    await enforce_rate_limit("login_email", _em, increment=False)
     user = await db.users.find_one({"email": _em})
     if not user or not verify_password(payload.password, user["password"]):
+        await bump_rate_limit("login_email", _em)
         await write_audit(payload.email.lower(), "login_failed", "auth", "", {"reason": "invalid_credentials"}, request=request)
         raise HTTPException(401, "Invalid credentials")
     # Trial expiry check at login
@@ -2038,13 +2092,14 @@ async def login(payload: LoginIn, request: Request):
         if not payload.totp_code:
             raise HTTPException(401, "TOTP code required", headers={"X-2FA-Required": "1"})
         if not pyotp.TOTP(user.get("totp_secret", "")).verify(payload.totp_code, valid_window=1):
+            await bump_rate_limit("login_email", _em)
             await write_audit(user.get("name") or payload.email.lower(), "login_failed", "auth", user["id"], {"reason": "invalid_totp"}, request=request)
             raise HTTPException(401, "Invalid TOTP code")
     token = create_token(user["id"], user["role"])
     # Successful login clears the strikes, so someone who mistyped twice then got in is not
     # still carrying a near-lockout for the rest of the window.
     await clear_rate_limit("login", _ip)
-    await clear_rate_limit("login", _em)
+    await clear_rate_limit("login_email", _em)
     await write_audit(user.get("name") or payload.email.lower(), "login_success", "auth", user["id"], {"role": user["role"]}, request=request)
     return {
         "token": token,
@@ -2111,10 +2166,10 @@ _PASSWORD_RESET_TTL_MIN = 30
 
 @api.post("/auth/forgot-password")
 async def forgot_password(payload: ForgotPasswordIn, request: Request):
-    await enforce_rate_limit("forgot_password", _client_ip(request))
-    await enforce_rate_limit("forgot_password", payload.email.lower())
     """Always returns the same generic message regardless of whether the email is registered,
     so this endpoint can't be used to enumerate valid accounts."""
+    await enforce_rate_limit("forgot_password", _client_ip(request))
+    await enforce_rate_limit("forgot_password", payload.email.lower())
     generic = {"ok": True, "message": "If that email is registered, we've sent a password reset link. It expires in 30 minutes."}
     user = await db.users.find_one({"email": payload.email.lower()})
     if not user:
@@ -2176,11 +2231,14 @@ _OTP_MAX_VERIFY_ATTEMPTS = 5
 
 @api.post("/auth/otp/request")
 async def otp_request(payload: OtpRequestIn, request: Request):
-    await enforce_rate_limit("otp_request", _client_ip(request))
     """Sends a 6-digit OTP over WhatsApp (via the Twilio integration already configured in
     Settings) to the mobile number on file for that account. Always returns the same generic
     message so this can't be used to enumerate which numbers are registered."""
     generic = {"ok": True, "message": "If that mobile number is registered, we've sent an OTP on WhatsApp. It expires in 10 minutes."}
+    await enforce_rate_limit("otp_request", _client_ip(request))
+    # Per-number too: every one of these sends a real WhatsApp message to a real person,
+    # so an IP-only limit still lets a spread-out caller harass one number.
+    await enforce_rate_limit("otp_request", (payload.phone or "").strip())
     try:
         phone = _normalize_phone(payload.phone)
     except ValueError:
@@ -6036,7 +6094,9 @@ async def portal_track(request: Request, ref: str = Query(..., min_length=2)):
     # Pass/fail and when, not the measurements or who inspected.
     QC_PUBLIC = ["code", "inspection_date", "parameter", "result"]
     return {
-        "work_order": {k: wo.get(k) for k in ["code", "product", "qty", "status", "priority", "progress", "start_date", "due_date", "customer_name", "po_ref", "created_at"]},
+        # customer_name, po_ref and priority removed: this endpoint needs no login, so
+        # anyone who guesses a code would learn who the customer is and their PO number.
+        "work_order": {k: wo.get(k) for k in ["code", "product", "qty", "status", "progress", "start_date", "due_date", "created_at"]},
         "job_cards": [{k: j.get(k) for k in JC_PUBLIC} for j in jcs],
         "qc_reports": [{k: q.get(k) for k in QC_PUBLIC} for q in qcs],
     }
