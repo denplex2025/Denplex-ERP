@@ -1594,7 +1594,7 @@ async def get_qc_inspection(qid: str, claims: dict = Depends(get_current_user)):
     return fixup(doc)
 
 @api.put("/qc-inspections/{qid}")
-async def update_qc_inspection(qid: str, req: QCInspection, claims: dict = Depends(get_current_user)):
+async def update_qc_inspection(qid: str, req: QCInspection, claims: dict = Depends(require_roles("admin", "manager", "qc"))):
     """Update a dimensional QC inspection."""
     req.updated_at = now_iso()
     data = req.model_dump(by_alias=False)
@@ -1604,7 +1604,7 @@ async def update_qc_inspection(qid: str, req: QCInspection, claims: dict = Depen
     return {"ok": True, "overall_result": data.get("overall_result")}
 
 @api.delete("/qc-inspections/{qid}")
-async def delete_qc_inspection(qid: str, claims: dict = Depends(get_current_user)):
+async def delete_qc_inspection(qid: str, claims: dict = Depends(require_roles("admin", "manager", "qc"))):
     """Delete a dimensional QC inspection."""
     await db.qc_inspections.delete_one({"_id": ObjectId(qid)})
     return {"ok": True}
@@ -2421,7 +2421,7 @@ async def list_customers(user=Depends(get_current_user)):
     return await list_collection(db.customers)
 
 @api.put("/customers/{cid}")
-async def update_customer(cid: str, c: Customer, user=Depends(get_current_user)):
+async def update_customer(cid: str, c: Customer, user=Depends(require_roles("admin", "manager", "sales", "accountant"))):
     data = c.model_dump(); data.pop("id", None); data.pop("created_at", None)
     await db.customers.update_one({"id": cid}, {"$set": data})
     return {"ok": True}
@@ -2491,13 +2491,13 @@ async def list_leads(user=Depends(get_current_user)):
     return await list_collection(db.leads)
 
 @api.put("/leads/{lid}")
-async def update_lead(lid: str, l: Lead, user=Depends(get_current_user)):
+async def update_lead(lid: str, l: Lead, user=Depends(require_roles("admin", "manager", "sales"))):
     data = l.model_dump(); data.pop("id", None); data.pop("created_at", None)
     await db.leads.update_one({"id": lid}, {"$set": data})
     return {"ok": True}
 
 @api.delete("/leads/{lid}")
-async def del_lead(lid: str, user=Depends(get_current_user)):
+async def del_lead(lid: str, user=Depends(require_roles("admin", "manager", "sales"))):
     await db.leads.delete_one({"id": lid})
     return {"ok": True}
 
@@ -2513,13 +2513,13 @@ async def list_suppliers(user=Depends(get_current_user)):
     return await list_collection(db.suppliers)
 
 @api.put("/suppliers/{sid}")
-async def update_supplier(sid: str, s: Supplier, user=Depends(get_current_user)):
+async def update_supplier(sid: str, s: Supplier, user=Depends(require_roles("admin", "manager", "accountant"))):
     data = s.model_dump(); data.pop("id", None); data.pop("created_at", None)
     await db.suppliers.update_one({"id": sid}, {"$set": data})
     return {"ok": True}
 
 @api.delete("/suppliers/{sid}")
-async def del_supplier(sid: str, user=Depends(get_current_user)):
+async def del_supplier(sid: str, user=Depends(require_roles("admin", "manager", "accountant"))):
     doc = await db.suppliers.find_one({"id": sid}, {"_id": 0})
     await _recycle("suppliers", "Supplier", doc, user)
     await db.suppliers.delete_one({"id": sid})
@@ -2539,7 +2539,7 @@ async def list_items(user=Depends(get_current_user)):
     return await list_collection(db.items, sort_key="name")
 
 @api.put("/inventory/items/{iid}")
-async def update_item(iid: str, it: InventoryItem, user=Depends(get_current_user)):
+async def update_item(iid: str, it: InventoryItem, user=Depends(require_roles("admin", "manager", "production", "accountant"))):
     data = it.model_dump(); data.pop("id", None); data.pop("created_at", None)
     await db.items.update_one({"id": iid}, {"$set": data})
     return {"ok": True}
@@ -2649,7 +2649,7 @@ async def create_part_library(p: PartLibraryItem, user=Depends(get_current_user)
     return serialize(doc)
 
 @api.put("/part-library/{pid}")
-async def update_part_library(pid: str, p: PartLibraryItem, user=Depends(get_current_user)):
+async def update_part_library(pid: str, p: PartLibraryItem, user=Depends(require_roles("admin", "manager", "production", "design"))):
     data = p.model_dump(); data.pop("id", None); data.pop("created_at", None); data.pop("seeded", None)
     await db.part_library.update_one({"id": pid}, {"$set": data})
     return {"ok": True}
@@ -2993,7 +2993,7 @@ async def create_account(a: FinAccount, user=Depends(get_current_user)):
     return serialize(doc)
 
 @api.put("/accounts/{aid}")
-async def update_account(aid: str, a: FinAccount, user=Depends(get_current_user)):
+async def update_account(aid: str, a: FinAccount, user=Depends(require_roles("admin", "accountant", "ca"))):
     data = a.model_dump(); data.pop("id", None); data.pop("created_at", None)
     if data.get("is_default"):
         await db.fin_accounts.update_many({}, {"$set": {"is_default": False}})
@@ -3477,13 +3477,13 @@ async def list_bom(user=Depends(get_current_user)):
     return await list_collection(db.boms)
 
 @api.put("/bom/{bid}")
-async def update_bom(bid: str, b: BOM, user=Depends(get_current_user)):
+async def update_bom(bid: str, b: BOM, user=Depends(require_roles("admin", "manager", "production", "design"))):
     data = b.model_dump(); data.pop("id", None); data.pop("created_at", None)
     await db.boms.update_one({"id": bid}, {"$set": data})
     return {"ok": True}
 
 @api.delete("/bom/{bid}")
-async def del_bom(bid: str, user=Depends(get_current_user)):
+async def del_bom(bid: str, user=Depends(require_roles("admin", "manager", "production", "design"))):
     await db.boms.delete_one({"id": bid})
     return {"ok": True}
 
@@ -3535,7 +3535,7 @@ async def _wo_status_hook(wid, prev, data, user):
         except Exception: pass
 
 @api.put("/work-orders/{wid}")
-async def update_wo(wid: str, w: WorkOrder, user=Depends(get_current_user)):
+async def update_wo(wid: str, w: WorkOrder, user=Depends(require_roles("admin", "manager", "production"))):
     prev = await db.work_orders.find_one({"id": wid}, {"_id": 0})
     data = w.model_dump(); data.pop("id", None); data.pop("created_at", None)
     await db.work_orders.update_one({"id": wid}, {"$set": data})
@@ -3565,13 +3565,13 @@ async def list_jc(user=Depends(get_current_user)):
     return await list_collection(db.job_cards)
 
 @api.put("/job-cards/{jid}")
-async def update_jc(jid: str, j: JobCard, user=Depends(get_current_user)):
+async def update_jc(jid: str, j: JobCard, user=Depends(require_roles("admin", "manager", "production"))):
     data = j.model_dump(); data.pop("id", None); data.pop("created_at", None)
     await db.job_cards.update_one({"id": jid}, {"$set": data})
     return {"ok": True}
 
 @api.delete("/job-cards/{jid}")
-async def del_jc(jid: str, user=Depends(get_current_user)):
+async def del_jc(jid: str, user=Depends(require_roles("admin", "manager", "production"))):
     await db.job_cards.delete_one({"id": jid})
     return {"ok": True}
 
@@ -3725,7 +3725,7 @@ async def list_machines(user=Depends(get_current_user)):
     return await list_collection(db.machines)
 
 @api.put("/machines/{mid}")
-async def update_machine(mid: str, m: Machine, user=Depends(get_current_user)):
+async def update_machine(mid: str, m: Machine, user=Depends(require_roles("admin", "manager", "production"))):
     data = m.model_dump(); data.pop("id", None); data.pop("created_at", None)
     await db.machines.update_one({"id": mid}, {"$set": data})
     return {"ok": True}
@@ -3815,7 +3815,7 @@ async def add_wo_operation(wid: str, op: WOOperation, user=Depends(get_current_u
     return serialize(doc)
 
 @api.put("/work-orders/{wid}/operations/{op_id}")
-async def update_wo_operation(wid: str, op_id: str, op: WOOperation, user=Depends(get_current_user)):
+async def update_wo_operation(wid: str, op_id: str, op: WOOperation, user=Depends(require_roles("admin", "manager", "production"))):
     data = op.model_dump(); data.pop("id", None); data.pop("created_at", None)
     data.pop("work_order_id", None); data.pop("work_order_code", None)
     if data.get("started_at") and data.get("finished_at"):
@@ -3824,7 +3824,7 @@ async def update_wo_operation(wid: str, op_id: str, op: WOOperation, user=Depend
     return {"ok": True}
 
 @api.delete("/work-orders/{wid}/operations/{op_id}")
-async def del_wo_operation(wid: str, op_id: str, user=Depends(get_current_user)):
+async def del_wo_operation(wid: str, op_id: str, user=Depends(require_roles("admin", "manager", "production"))):
     await db.wo_operations.delete_one({"id": op_id, "work_order_id": wid})
     return {"ok": True}
 
@@ -4296,14 +4296,14 @@ async def list_quotes(user=Depends(get_current_user)):
     return await list_collection(db.quotations)
 
 @api.put("/quotations/{qid}")
-async def update_quote(qid: str, q: Quotation, user=Depends(get_current_user)):
+async def update_quote(qid: str, q: Quotation, user=Depends(require_roles("admin", "manager", "sales"))):
     data = q.model_dump(); data.pop("id", None); data.pop("created_at", None)
     t = compute_totals(data["lines"], 0, data.get("extra_charges")); data.update(t)
     await db.quotations.update_one({"id": qid}, {"$set": data})
     return {"ok": True}
 
 @api.delete("/quotations/{qid}")
-async def del_quote(qid: str, user=Depends(get_current_user)):
+async def del_quote(qid: str, user=Depends(require_roles("admin", "manager", "sales"))):
     doc = await db.quotations.find_one({"id": qid}, {"_id": 0})
     await _recycle("quotations", "Quotation", doc, user)
     await db.quotations.delete_one({"id": qid})
@@ -4330,7 +4330,7 @@ async def get_po(pid: str, user=Depends(get_current_user)):
     return serialize(doc)
 
 @api.put("/purchase-orders/{pid}")
-async def update_po(pid: str, p: PurchaseOrder, user=Depends(get_current_user)):
+async def update_po(pid: str, p: PurchaseOrder, user=Depends(require_roles("admin", "manager", "accountant"))):
     data = p.model_dump(); data.pop("id", None); data.pop("created_at", None)
     t = compute_totals(data["lines"], 0, data.get("extra_charges")); data.update(t)
     await db.purchase_orders.update_one({"id": pid}, {"$set": data})
@@ -5781,7 +5781,7 @@ async def receive_webhook(source: str, token: str, request: Request, background_
     return {"ok": True, "received": True, "result": ev["result"]}
 
 @api.put("/invoices/{iid}")
-async def update_invoice(iid: str, inv: Invoice, user=Depends(get_current_user)):
+async def update_invoice(iid: str, inv: Invoice, user=Depends(require_roles("admin", "accountant"))):
     existing = await db.invoices.find_one({"id": iid}, {"_id": 0})
     if existing and _eway_edit_locked(existing):
         raise HTTPException(423, "Invoice locked: its e-way bill validity period has ended, so it can no longer be edited.")
@@ -5791,8 +5791,13 @@ async def update_invoice(iid: str, inv: Invoice, user=Depends(get_current_user))
     return {"ok": True}
 
 @api.delete("/invoices/{iid}")
-async def del_invoice(iid: str, user=Depends(require_roles("admin", "manager", "accountant", "ca"))):
+async def del_invoice(iid: str, user=Depends(require_roles("admin", "accountant"))):
     doc = await db.invoices.find_one({"id": iid}, {"_id": 0})
+    # The edit lock applied to PUT but not here, so a locked invoice could still be deleted
+    # outright — a bigger hole than editing it. Once the e-way validity has passed the
+    # document is with the GST portal; it should be reversed by a credit note, not removed.
+    if doc and _eway_edit_locked(doc):
+        raise HTTPException(423, "Invoice locked: its e-way bill validity period has ended. Issue a credit note instead of deleting it.")
     await _recycle("invoices", "Invoice", doc, user)
     await db.invoices.delete_one({"id": iid})
     return {"ok": True}
@@ -5865,7 +5870,7 @@ async def download_doc_rev(did: str, rev_no: int, user=Depends(get_current_user)
         headers={"Content-Disposition": f'attachment; filename="{doc.get("name","document")}-rev{rev_no}"'})
 
 @api.delete("/documents/{did}")
-async def del_doc(did: str, user=Depends(get_current_user)):
+async def del_doc(did: str, user=Depends(require_roles("admin", "manager"))):
     await db.documents.delete_one({"id": did})
     return {"ok": True}
 
@@ -6019,13 +6024,13 @@ async def list_camp(user=Depends(get_current_user)):
     return await list_collection(db.campaigns)
 
 @api.put("/campaigns/{cid}")
-async def upd_camp(cid: str, c: Campaign, user=Depends(get_current_user)):
+async def upd_camp(cid: str, c: Campaign, user=Depends(require_roles("admin", "manager", "sales"))):
     data = c.model_dump(); data.pop("id", None); data.pop("created_at", None)
     await db.campaigns.update_one({"id": cid}, {"$set": data})
     return {"ok": True}
 
 @api.delete("/campaigns/{cid}")
-async def del_camp(cid: str, user=Depends(get_current_user)):
+async def del_camp(cid: str, user=Depends(require_roles("admin", "manager", "sales"))):
     await db.campaigns.delete_one({"id": cid})
     return {"ok": True}
 
@@ -6618,7 +6623,7 @@ class CostingRatesIn(BaseModel):
     default_labour_rate: float = 120
 
 @api.put("/costing/rates")
-async def set_costing_rates(body: CostingRatesIn, user=Depends(get_current_user)):
+async def set_costing_rates(body: CostingRatesIn, user=Depends(require_roles("admin", "manager"))):
     await db.settings.replace_one({"_id": "costing"},
         {"_id": "costing", "default_machine_rate": body.default_machine_rate,
          "default_labour_rate": body.default_labour_rate}, upsert=True)
@@ -6868,7 +6873,7 @@ class AutoBackupIn(BaseModel):
     interval_hours: int = 24
 
 @api.put("/google/auto-backup")
-async def google_auto_backup(body: AutoBackupIn, user=Depends(get_current_user)):
+async def google_auto_backup(body: AutoBackupIn, user=Depends(require_roles("admin"))):
     await db.settings.update_one({"_id": "google_drive"},
         {"$set": {"auto_backup": bool(body.enabled),
                   "auto_backup_interval_hours": max(1, int(body.interval_hours or 24))}}, upsert=True)
@@ -7007,7 +7012,7 @@ async def list_ncrs(user=Depends(get_current_user)):
     return await list_collection(db.ncrs)
 
 @api.put("/ncrs/{nid}")
-async def update_ncr(nid: str, n: NCR, user=Depends(get_current_user)):
+async def update_ncr(nid: str, n: NCR, user=Depends(require_roles("admin", "manager", "qc"))):
     data = n.model_dump(); data.pop("id", None); data.pop("created_at", None)
     if data.get("status") == "closed" and not data.get("closed_date"):
         data["closed_date"] = now_iso(); data["closed_by"] = user.get("name", "")
@@ -7036,7 +7041,7 @@ async def list_capas(user=Depends(get_current_user)):
     return await list_collection(db.capas)
 
 @api.put("/capas/{cid}")
-async def update_capa(cid: str, c: CAPA, user=Depends(get_current_user)):
+async def update_capa(cid: str, c: CAPA, user=Depends(require_roles("admin", "manager", "qc"))):
     data = c.model_dump(); data.pop("id", None); data.pop("created_at", None)
     if data.get("status") in ("verified", "closed") and not data.get("verified_date"):
         data["verified_date"] = now_iso(); data["verified_by"] = user.get("name", "")
@@ -7103,7 +7108,7 @@ async def create_instrument(i: Instrument, user=Depends(get_current_user)):
 async def list_instruments(user=Depends(get_current_user)):
     return await list_collection(db.instruments, sort_key="due_date")
 @api.put("/instruments/{iid}")
-async def update_instrument(iid: str, i: Instrument, user=Depends(get_current_user)):
+async def update_instrument(iid: str, i: Instrument, user=Depends(require_roles("admin", "manager", "qc"))):
     data = i.model_dump(); data.pop("id", None); data.pop("created_at", None)
     await db.instruments.update_one({"id": iid}, {"$set": data}); return {"ok": True}
 @api.delete("/instruments/{iid}")
@@ -7118,7 +7123,7 @@ async def create_apsup(a: ApprovedSupplier, user=Depends(get_current_user)):
 async def list_apsup(user=Depends(get_current_user)):
     return await list_collection(db.approved_suppliers, sort_key="name")
 @api.put("/approved-suppliers/{sid}")
-async def update_apsup(sid: str, a: ApprovedSupplier, user=Depends(get_current_user)):
+async def update_apsup(sid: str, a: ApprovedSupplier, user=Depends(require_roles("admin", "manager", "qc"))):
     data = a.model_dump(); data.pop("id", None); data.pop("created_at", None)
     await db.approved_suppliers.update_one({"id": sid}, {"$set": data}); return {"ok": True}
 @api.delete("/approved-suppliers/{sid}")
@@ -7140,7 +7145,7 @@ async def create_supeval(e: SupplierEvaluation, user=Depends(get_current_user)):
 async def list_supeval(user=Depends(get_current_user)):
     return await list_collection(db.supplier_evaluations)
 @api.put("/supplier-evaluations/{eid}")
-async def update_supeval(eid: str, e: SupplierEvaluation, user=Depends(get_current_user)):
+async def update_supeval(eid: str, e: SupplierEvaluation, user=Depends(require_roles("admin", "manager", "qc"))):
     data = e.model_dump(); data.pop("id", None); data.pop("created_at", None)
     scores = [data["quality_score"], data["delivery_score"], data["cost_score"], data["responsiveness_score"], data["system_score"]]
     data["total_pct"] = round(sum(float(x or 0) for x in scores) / (5 * 10) * 100, 1) if any(scores) else 0
@@ -7514,7 +7519,7 @@ async def get_iso_document(did: str, user=Depends(get_current_user)):
 _ISO_APPROVERS = ("admin", "manager")
 
 @api.put("/iso-documents/{did}")
-async def update_iso_document(did: str, payload: Dict[str, Any], user=Depends(get_current_user)):
+async def update_iso_document(did: str, payload: Dict[str, Any], user=Depends(require_roles("admin", "manager", "qc"))):
     """Metadata edits apply immediately. Content (html_content) edits by admin/manager apply immediately
     and bump the revision; content edits by other roles are queued as pending_approval."""
     d = await db.iso_documents.find_one({"id": did})
@@ -7559,7 +7564,7 @@ async def reject_iso_document(did: str, user=Depends(require_roles("admin", "man
     return {"ok": True}
 
 @api.delete("/iso-documents/{did}")
-async def delete_iso_document(did: str, user=Depends(get_current_user)):
+async def delete_iso_document(did: str, user=Depends(require_roles("admin", "manager", "qc"))):
     doc = await db.iso_documents.find_one({"id": did}, {"_id": 0})
     await _recycle("iso_documents", "ISO Document", doc, user)
     await db.iso_documents.delete_one({"id": did})
@@ -7724,14 +7729,14 @@ async def bulk_register_entries(tid: str, body: RegisterEntryBulkIn, user=Depend
     return {"imported": len(docs)}
 
 @api.put("/registers/{tid}/entries/{eid}")
-async def update_register_entry(tid: str, eid: str, payload: Dict[str, Any], user=Depends(get_current_user)):
+async def update_register_entry(tid: str, eid: str, payload: Dict[str, Any], user=Depends(require_roles("admin", "manager", "production", "qc"))):
     upd = {k: payload[k] for k in ("date", "data") if k in payload}
     upd["updated_at"] = now_iso()
     await db.register_entries.update_one({"id": eid, "template_id": tid}, {"$set": upd})
     return await db.register_entries.find_one({"id": eid}, {"_id": 0})
 
 @api.delete("/registers/{tid}/entries/{eid}")
-async def delete_register_entry(tid: str, eid: str, user=Depends(get_current_user)):
+async def delete_register_entry(tid: str, eid: str, user=Depends(require_roles("admin", "manager", "production", "qc"))):
     await db.register_entries.delete_one({"id": eid, "template_id": tid})
     return {"ok": True}
 
@@ -9051,7 +9056,7 @@ async def get_job_work_out(did: str, user=Depends(get_current_user)):
     return serialize(doc)
 
 @api.put("/job-work-out/{did}")
-async def update_job_work_out(did: str, j: JobWorkOut, user=Depends(get_current_user)):
+async def update_job_work_out(did: str, j: JobWorkOut, user=Depends(require_roles("admin", "manager", "production", "accountant"))):
     data = j.model_dump(); data.pop("id", None); data.pop("created_at", None)
     if data.get("supplier_id"):
         sup = await db.suppliers.find_one({"id": data["supplier_id"]}, {"_id": 0, "name": 1})
@@ -9476,7 +9481,7 @@ async def list_email_accounts(user=Depends(get_current_user)):
     return [_account_public(r) for r in rows]
 
 @api.delete("/email/accounts/{acct_id}")
-async def delete_email_account(acct_id: str, user=Depends(get_current_user)):
+async def delete_email_account(acct_id: str, user=Depends(require_roles("admin"))):
     a = await db.email_accounts.find_one({"id": acct_id, "user_id": user["id"]})
     if not a:
         raise HTTPException(404, "Not found")
@@ -12147,7 +12152,7 @@ async def list_payments_in(user=Depends(get_current_user)):
     return await list_collection(db.payments_in)
 
 @api.put("/payments-in/{pid}")
-async def update_payment_in(pid: str, p: PaymentIn, user=Depends(get_current_user)):
+async def update_payment_in(pid: str, p: PaymentIn, user=Depends(require_roles("admin", "accountant"))):
     data = p.model_dump(); data.pop("id", None); data.pop("created_at", None)
     _recalc_payment_status(data)
     await db.payments_in.update_one({"id": pid}, {"$set": data})
@@ -12155,7 +12160,7 @@ async def update_payment_in(pid: str, p: PaymentIn, user=Depends(get_current_use
     return {"ok": True}
 
 @api.delete("/payments-in/{pid}")
-async def del_payment_in(pid: str, user=Depends(require_roles("admin", "accountant", "ca"))):
+async def del_payment_in(pid: str, user=Depends(require_roles("admin", "accountant"))):
     await db.payments_in.delete_one({"id": pid})
     return {"ok": True}
 
@@ -12213,7 +12218,7 @@ async def list_payments_out(user=Depends(get_current_user)):
     return await list_collection(db.payments_out)
 
 @api.put("/payments-out/{pid}")
-async def update_payment_out(pid: str, p: PaymentOut, user=Depends(get_current_user)):
+async def update_payment_out(pid: str, p: PaymentOut, user=Depends(require_roles("admin", "accountant"))):
     data = p.model_dump(); data.pop("id", None); data.pop("created_at", None)
     _recalc_payment_status(data)
     await db.payments_out.update_one({"id": pid}, {"$set": data})
@@ -12221,7 +12226,7 @@ async def update_payment_out(pid: str, p: PaymentOut, user=Depends(get_current_u
     return {"ok": True}
 
 @api.delete("/payments-out/{pid}")
-async def del_payment_out(pid: str, user=Depends(require_roles("admin", "accountant", "ca"))):
+async def del_payment_out(pid: str, user=Depends(require_roles("admin", "accountant"))):
     await db.payments_out.delete_one({"id": pid})
     return {"ok": True}
 
@@ -12280,7 +12285,7 @@ async def list_expenses_v2(category_id: Optional[str] = None, user=Depends(get_c
     return await list_collection(db.expenses, q)
 
 @api.put("/expenses/{eid}")
-async def update_expense(eid: str, e: Expense, user=Depends(get_current_user)):
+async def update_expense(eid: str, e: Expense, user=Depends(require_roles("admin", "accountant", "ca"))):
     data = e.model_dump(); data.pop("id", None); data.pop("created_at", None)
     if data.get("paid_amount", 0) >= data.get("amount", 0) - 0.01:
         data["status"] = "Paid"
@@ -13106,7 +13111,7 @@ async def list_proforma(user=Depends(get_current_user)):
     return await list_collection(db.proforma_invoices)
 
 @api.put("/proforma-invoices/{pid}")
-async def update_proforma(pid: str, p: ProformaInvoice, user=Depends(get_current_user)):
+async def update_proforma(pid: str, p: ProformaInvoice, user=Depends(require_roles("admin", "accountant"))):
     data = p.model_dump(); data.pop("id", None); data.pop("created_at", None)
     data.update(compute_invoice_totals(data["lines"], data.get("is_interstate", False), data.get("round_off", 0),
                                        data.get("tds", 0), data.get("extra_charges"), data.get("tcs", 0)))
@@ -13743,7 +13748,7 @@ async def get_part(pid: str, user=Depends(get_current_user)):
     return p
 
 @api.put("/parts/{pid}")
-async def update_part(pid: str, p: PartMaster, user=Depends(get_current_user)):
+async def update_part(pid: str, p: PartMaster, user=Depends(require_roles("admin", "manager", "production", "design"))):
     data = p.model_dump(); data.pop("id", None); data.pop("created_at", None)
     data["drawing_pdf_b64"] = await _drive_offload(data.get("drawing_pdf_b64"), data.get("drawing_filename") or f"{data.get('part_number','part')}.pdf", "application/pdf", "Drawings")
     data["step_file_b64"] = await _drive_offload(data.get("step_file_b64"), data.get("step_filename") or f"{data.get('part_number','part')}.step", "application/octet-stream", "STEP Files")
@@ -13914,7 +13919,7 @@ async def create_material_state(s: MaterialState, user=Depends(get_current_user)
     return serialize(doc)
 
 @api.put("/material-states/{sid}")
-async def update_material_state(sid: str, s: MaterialState, user=Depends(get_current_user)):
+async def update_material_state(sid: str, s: MaterialState, user=Depends(require_roles("admin", "manager", "production"))):
     existing = await db.material_states.find_one({"id": sid})
     if not existing:
         raise HTTPException(404, "State not found")
@@ -13925,7 +13930,7 @@ async def update_material_state(sid: str, s: MaterialState, user=Depends(get_cur
     return serialize(updated)
 
 @api.delete("/material-states/{sid}")
-async def delete_material_state(sid: str, user=Depends(get_current_user)):
+async def delete_material_state(sid: str, user=Depends(require_roles("admin", "manager", "production"))):
     existing = await db.material_states.find_one({"id": sid})
     if not existing:
         raise HTTPException(404, "State not found")
