@@ -458,6 +458,36 @@ def _enforce_module_access(request: Optional[Request], user: Dict[str, Any]) -> 
         )
 
 
+# Modules an explicit ON may grant, overriding the caller's role. Users & Permissions documents
+# the three states as "Default = follows their role's normal access · On = force allow · Off =
+# force block", so an ON has to actually grant something or the label is a lie.
+#
+# "administration" is deliberately NOT grantable. That module covers /users, /admin (reset-data,
+# seed), /audit-logs, /recycle-bin, /webhooks and /integrations — switching it on for a
+# non-admin would hand out user creation and password resets, i.e. make the toggle a quiet route
+# to full admin. Administration stays role-only; to give someone that, change their role.
+GRANTABLE_MODULES = {
+    "sales", "accounts", "production", "procurement", "quality", "marketing", "hr",
+}
+
+
+def _module_force_allowed(request: Optional[Request], user: Dict[str, Any]) -> bool:
+    """True if this user has an explicit ON for the module this path belongs to.
+
+    Only an explicit True grants. A missing key is "no override" and an explicit False is a
+    block, both of which leave the role checks in charge.
+    """
+    if request is None:
+        return False
+    overrides = user.get("module_access") or {}
+    if not overrides:
+        return False
+    mod = _module_for_path(request.url.path)
+    if mod is None or mod not in GRANTABLE_MODULES:
+        return False
+    return overrides.get(mod) is True
+
+
 async def get_current_user(
     request: Request,
     creds: Optional[HTTPAuthorizationCredentials] = Depends(security),
@@ -606,10 +636,19 @@ async def clear_rate_limit(bucket: str, ident: str) -> None:
 
 
 def require_roles(*allowed: str):
-    async def checker(user: Dict[str, Any] = Depends(get_current_user)):
-        if user["role"] not in allowed and user["role"] != "admin":
-            raise HTTPException(403, "Insufficient permissions")
-        return user
+    async def checker(request: Request, user: Dict[str, Any] = Depends(get_current_user)):
+        if user["role"] == "admin" or user["role"] in allowed:
+            return user
+        # An admin can hand a single module to someone whose role would not normally get it,
+        # via the ON state in Users & Permissions. An OFF has already been refused inside
+        # get_current_user, so reaching here means the toggle is either absent or ON.
+        #
+        # A module toggle never unlocks a route that was admin-only to begin with. Without this,
+        # switching HR on would also hand over DELETE /employees/{eid}, which is deliberately
+        # stricter than the rest of its module. An ON grants the module, not admin powers.
+        if tuple(allowed) != ("admin",) and _module_force_allowed(request, user):
+            return user
+        raise HTTPException(403, "Insufficient permissions")
     return checker
 
 async def next_seq(name: str) -> int:
