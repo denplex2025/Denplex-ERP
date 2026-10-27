@@ -388,7 +388,6 @@ MODULE_PATHS = [
     ("/api/planning", "production"),
     ("/api/job-cards", "production"),
     ("/api/job-work-out", "production"),
-    ("/api/inventory", "production"),
     ("/api/material-states", "production"),
     # procurement
     ("/api/purchase-orders", "procurement"),
@@ -407,7 +406,6 @@ MODULE_PATHS = [
     ("/api/capas", "quality"),
     ("/api/instruments", "quality"),
     ("/api/iso-documents", "quality"),
-    ("/api/documents", "quality"),
     # marketing
     ("/api/campaigns", "marketing"),
     # hr
@@ -426,6 +424,43 @@ MODULE_PATHS = [
 _MODULE_PATHS_SORTED = sorted(MODULE_PATHS, key=lambda kv: len(kv[0]), reverse=True)
 
 
+# Who may touch a module when the user has NO explicit toggle for it (the DEFAULT state).
+#
+# Until this existed, DEFAULT meant "fall through to the route's own role check" — and 98 of the
+# module-mapped GET routes have no role check at all, so in practice any signed-in user could
+# read another module's data by typing the URL: P&L, balance sheet, every payment and expense,
+# vendor bills, purchase orders. The sidebar hid those menus but the API never enforced it.
+#
+# This is NOT the sidebar's role list copied over. The sidebar lists who the menu is FOR, which
+# is narrower than who needs the data: an accountant can create an invoice (POST /invoices) while
+# Sales is listed as manager+sales only, so copying the menu table literally would let someone
+# write a document they cannot read. Each entry below is the union of the menu's roles and every
+# role allowed to write anywhere in that module — if you are trusted to write it, you are trusted
+# to read it. That construction also guarantees this check can never refuse a write that
+# require_roles permits.
+#
+# Additions beyond that union, both deliberate:
+#   - qc reads production: an inspection is raised against a work order, so QC.jsx and
+#     RoutingPanel fetch /work-orders and /machines. Without it the QC screens render empty.
+#   - trial and employee keep the modules they can write in, so neither loses a screen it had.
+#
+# Shared data is NOT mapped to a module at all and so never reaches this check — /parts,
+# /suppliers, /parties, /settings, /registers, /masters, /dashboard, /search, /email, /google,
+# and (added when this landed) /inventory and /documents. Stock levels are picked from the sales
+# invoice screen and the purchase bill screen; /documents is the generic attachment store behind
+# AttachmentsPopover on Payment-In and Payment-Out. Gating either one breaks working pages.
+MODULE_DEFAULT_ROLES = {
+    "sales":          {"manager", "sales", "accountant", "ca", "trial"},
+    "accounts":       {"manager", "accountant", "ca", "trial"},
+    "production":     {"manager", "production", "design", "accountant", "qc", "trial", "employee"},
+    "procurement":    {"manager", "accountant", "ca", "production", "trial"},
+    "quality":        {"manager", "qc", "production", "trial", "employee"},
+    "marketing":      {"manager", "sales", "trial"},
+    "hr":             {"manager", "trial"},
+    "administration": set(),   # admin only; its own routes carry the exceptions
+}
+
+
 def _module_for_path(path: str) -> Optional[str]:
     p = (path or "").split("?")[0].rstrip("/")
     for prefix, mod in _MODULE_PATHS_SORTED:
@@ -434,27 +469,72 @@ def _module_for_path(path: str) -> Optional[str]:
     return None
 
 
-def _enforce_module_access(request: Optional[Request], user: Dict[str, Any]) -> None:
-    """403 if this user's module_access map switches off the module this path belongs to.
+def _route_has_role_gate(request: Optional[Request]) -> bool:
+    """True if the matched route carries its own require_roles dependency.
 
-    Deliberately matches AppLayout.jsx exactly: a module is permitted unless its key is PRESENT
-    in module_access and set to something other than True. A key that is absent means "no
-    override" and falls through to the role checks the routes already carry, so a user with no
-    toggles set behaves exactly as before this function existed.
+    FastAPI resolves the route before solving dependencies, so request.scope["route"] is already
+    populated by the time get_current_user runs. require_roles tags its checker with
+    _required_roles, which is what we look for while walking the dependency tree.
+
+    Returns False if anything is missing or unexpected, which makes the module default MORE
+    restrictive rather than less — the safe direction for a permission check.
+    """
+    try:
+        route = request.scope.get("route") if request is not None else None
+        dependant = getattr(route, "dependant", None)
+        if dependant is None:
+            return False
+        stack = [dependant]
+        while stack:
+            d = stack.pop()
+            if getattr(getattr(d, "call", None), "_required_roles", None):
+                return True
+            stack.extend(getattr(d, "dependencies", ()) or ())
+    except Exception:
+        return False
+    return False
+
+
+def _enforce_module_access(request: Optional[Request], user: Dict[str, Any]) -> None:
+    """403 unless this user may reach the module this path belongs to.
+
+    The three states Users & Permissions offers, enforced here:
+      OFF     (key present, not True)  -> refused outright
+      ON      (key present, True)      -> permitted; require_roles then force-allows too
+      DEFAULT (key absent)             -> permitted only if the role is in MODULE_DEFAULT_ROLES
+
+    DEFAULT used to mean "defer to the route's own role check", which was no check at all on the
+    98 module GET routes that are login-only — so a salesperson could read the P&L by typing the
+    URL even though the menu hid it. DEFAULT now means what the sidebar always implied.
+
+    Paths that belong to no module (shared masters) never reach either branch.
     """
     if request is None or user.get("role") == "admin":
-        return
-    overrides = user.get("module_access") or {}
-    if not overrides:
         return
     mod = _module_for_path(request.url.path)
     if mod is None:
         return
-    if mod in overrides and overrides[mod] is not True:
+    overrides = user.get("module_access") or {}
+    if mod in overrides:
+        if overrides[mod] is not True:
+            raise HTTPException(
+                403,
+                f"Your account does not have access to the {mod} module. "
+                "Ask an admin to enable it in Users & Permissions.",
+            )
+        return
+    # A route carrying its own require_roles is already gated, and that list is the authority on
+    # who may call it — the module table must never contradict it. Manager restoring from the
+    # recycle bin and sales syncing IndiaMART are both administration routes whose own role list
+    # permits them; refusing those here would break working features. So the module default only
+    # covers the gap: routes with no role check of their own.
+    if _route_has_role_gate(request):
+        return
+    if user.get("role") not in MODULE_DEFAULT_ROLES.get(mod, set()):
         raise HTTPException(
             403,
-            f"Your account does not have access to the {mod} module. "
-            "Ask an admin to enable it in Users & Permissions.",
+            f"Your role does not have access to the {mod} module. "
+            "An admin can switch it on for you in Users & Permissions.",
         )
 
 
@@ -649,6 +729,8 @@ def require_roles(*allowed: str):
         if tuple(allowed) != ("admin",) and _module_force_allowed(request, user):
             return user
         raise HTTPException(403, "Insufficient permissions")
+    # Tag so _route_has_role_gate can tell a role-gated route from a login-only one.
+    checker._required_roles = allowed
     return checker
 
 async def next_seq(name: str) -> int:
