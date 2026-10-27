@@ -339,7 +339,129 @@ def _normalize_phone(raw: str) -> str:
     except phonenumbers.NumberParseException as ex:
         raise ValueError(f"Phone parse error: {ex}")
 
-async def get_current_user(creds: Optional[HTTPAuthorizationCredentials] = Depends(security)) -> Dict[str, Any]:
+# ---------------------------------------------------------------------------
+# Per-user module access
+# ---------------------------------------------------------------------------
+# An admin can toggle individual modules on/off per user in Users & Permissions. Until now that
+# map only hid nav groups in the browser (AppLayout.jsx / MobileMenu.jsx), so anyone who knew a
+# URL could still call the API directly and get the data the toggle was meant to withhold. The
+# table below maps an API path back to the module whose toggle governs it, using the same eight
+# keys the sidebar uses.
+#
+# Only paths belonging to EXACTLY ONE module are listed. Shared masters are deliberately absent:
+# /parts is read by a salesperson building a quotation, /suppliers by a production user raising a
+# job-work-out challan, /parties and /settings by every page that renders a document, /registers
+# by whoever keeps that log book. Mapping those would turn "no production access" into "cannot
+# quote", which is not what the toggle means. Same for /email and /google — they configure the
+# mail integration but also send documents out of Sales and Procurement.
+#
+# Matching is longest-prefix-first, so /reports/pnl resolves to accounts while /reports/grir
+# resolves to procurement.
+MODULE_PATHS = [
+    # sales
+    ("/api/leads", "sales"),
+    ("/api/quotations", "sales"),
+    ("/api/proforma-invoices", "sales"),
+    ("/api/sale-orders", "sales"),
+    ("/api/delivery-challans", "sales"),
+    ("/api/invoices", "sales"),
+    ("/api/credit-notes", "sales"),
+    ("/api/sale-returns", "sales"),
+    ("/api/payments-in", "sales"),
+    # accounts
+    ("/api/accounting", "accounts"),
+    ("/api/accounts", "accounts"),
+    ("/api/costing", "accounts"),
+    ("/api/cheques", "accounts"),
+    ("/api/reports/pnl", "accounts"),
+    ("/api/reports/balance-sheet", "accounts"),
+    ("/api/reports/gst", "accounts"),
+    ("/api/reports/overdue", "accounts"),
+    # production
+    ("/api/part-library", "production"),
+    ("/api/fixture", "production"),
+    ("/api/cad", "production"),
+    ("/api/machining", "production"),
+    ("/api/bom", "production"),
+    ("/api/work-orders", "production"),
+    ("/api/machines", "production"),
+    ("/api/planning", "production"),
+    ("/api/job-cards", "production"),
+    ("/api/job-work-out", "production"),
+    ("/api/inventory", "production"),
+    ("/api/material-states", "production"),
+    # procurement
+    ("/api/purchase-orders", "procurement"),
+    ("/api/goods-receipts", "procurement"),
+    ("/api/vendor-bills", "procurement"),
+    ("/api/payments-out", "procurement"),
+    ("/api/purchase-returns", "procurement"),
+    ("/api/expenses", "procurement"),
+    ("/api/expense-categories", "procurement"),
+    ("/api/reports/grir", "procurement"),
+    ("/api/reports/purchase-spend", "procurement"),
+    # quality
+    ("/api/qc-inspections", "quality"),
+    ("/api/qc-reports", "quality"),
+    ("/api/ncrs", "quality"),
+    ("/api/capas", "quality"),
+    ("/api/instruments", "quality"),
+    ("/api/iso-documents", "quality"),
+    ("/api/documents", "quality"),
+    # marketing
+    ("/api/campaigns", "marketing"),
+    # hr
+    ("/api/employees", "hr"),
+    ("/api/attendance", "hr"),
+    # administration
+    ("/api/users", "administration"),
+    ("/api/admin", "administration"),
+    ("/api/audit-logs", "administration"),
+    ("/api/recycle-bin", "administration"),
+    ("/api/webhooks", "administration"),
+    ("/api/integrations", "administration"),
+]
+
+# Longest first so a more specific prefix always wins over its parent.
+_MODULE_PATHS_SORTED = sorted(MODULE_PATHS, key=lambda kv: len(kv[0]), reverse=True)
+
+
+def _module_for_path(path: str) -> Optional[str]:
+    p = (path or "").split("?")[0].rstrip("/")
+    for prefix, mod in _MODULE_PATHS_SORTED:
+        if p == prefix or p.startswith(prefix + "/"):
+            return mod
+    return None
+
+
+def _enforce_module_access(request: Optional[Request], user: Dict[str, Any]) -> None:
+    """403 if this user's module_access map switches off the module this path belongs to.
+
+    Deliberately matches AppLayout.jsx exactly: a module is permitted unless its key is PRESENT
+    in module_access and set to something other than True. A key that is absent means "no
+    override" and falls through to the role checks the routes already carry, so a user with no
+    toggles set behaves exactly as before this function existed.
+    """
+    if request is None or user.get("role") == "admin":
+        return
+    overrides = user.get("module_access") or {}
+    if not overrides:
+        return
+    mod = _module_for_path(request.url.path)
+    if mod is None:
+        return
+    if mod in overrides and overrides[mod] is not True:
+        raise HTTPException(
+            403,
+            f"Your account does not have access to the {mod} module. "
+            "Ask an admin to enable it in Users & Permissions.",
+        )
+
+
+async def get_current_user(
+    request: Request,
+    creds: Optional[HTTPAuthorizationCredentials] = Depends(security),
+) -> Dict[str, Any]:
     if not creds:
         raise HTTPException(401, "Not authenticated")
     try:
@@ -360,6 +482,7 @@ async def get_current_user(creds: Optional[HTTPAuthorizationCredentials] = Depen
             raise
         except Exception:
             pass
+    _enforce_module_access(request, user)
     return user
 
 async def require_can_edit(request: Request, user=Depends(get_current_user)) -> Dict[str, Any]:
@@ -1568,7 +1691,7 @@ async def get_next_qc_inspection_code() -> str:
 
 # --- Endpoints ---
 @api.post("/qc-inspections")
-async def create_qc_inspection(req: QCInspection, claims: dict = Depends(get_current_user)):
+async def create_qc_inspection(req: QCInspection, claims: dict = Depends(require_roles("admin", "manager", "qc", "trial", "employee"))):
     """Create a new dimensional QC inspection."""
     req.created_by = claims.get("sub", "unknown")
     req.code = await get_next_qc_inspection_code()
@@ -1610,7 +1733,7 @@ async def delete_qc_inspection(qid: str, claims: dict = Depends(require_roles("a
     return {"ok": True}
 
 @api.post("/qc-inspections/{qid}/drawing")
-async def upload_qc_drawing(qid: str, file: UploadFile = File(...), claims: dict = Depends(get_current_user)):
+async def upload_qc_drawing(qid: str, file: UploadFile = File(...), claims: dict = Depends(require_roles("admin", "manager", "qc", "trial", "employee"))):
     """Upload a drawing PDF to a QC inspection. Stores as base64."""
     content = await file.read()
     b64 = base64.b64encode(content).decode("utf-8")
@@ -1621,7 +1744,7 @@ async def upload_qc_drawing(qid: str, file: UploadFile = File(...), claims: dict
     return {"ok": True, "size": len(content)}
 
 @api.post("/qc-inspections/{qid}/validate")
-async def validate_qc_inspection_endpoint(qid: str, claims: dict = Depends(get_current_user)):
+async def validate_qc_inspection_endpoint(qid: str, claims: dict = Depends(require_roles("admin", "manager", "qc", "trial", "employee"))):
     """Q.QC.3 - recompute per-sample pass/fail + overall result for a saved inspection."""
     doc = await db.qc_inspections.find_one({"_id": ObjectId(qid)})
     if not doc:
@@ -1636,7 +1759,7 @@ async def validate_qc_inspection_endpoint(qid: str, claims: dict = Depends(get_c
     return fixup(doc)
 
 @api.post("/qc-inspections/extract-dimensions")
-async def extract_qc_dimensions(file: UploadFile = File(...), claims: dict = Depends(get_current_user)):
+async def extract_qc_dimensions(file: UploadFile = File(...), claims: dict = Depends(require_roles("admin", "manager", "qc", "trial", "employee"))):
     """Q.QC.2 - read an engineering drawing (PDF or image) with Claude vision and return a list
     of inspectable dimensions to pre-fill a new inspection."""
     if not ANTHROPIC_API_KEY:
@@ -2033,7 +2156,7 @@ class DocRevIn(BaseModel):
 
 # ---------------- Auth ----------------
 @api.post("/auth/register")
-async def register(payload: RegisterIn, request: Request, current=Depends(get_current_user)):
+async def register(payload: RegisterIn, request: Request, current=Depends(require_roles("admin"))):
     if current["role"] != "admin":
         raise HTTPException(403, "Only admin can register users")
     if await db.users.find_one({"email": payload.email.lower()}):
@@ -2410,7 +2533,7 @@ async def list_collection(coll, query: Dict = None, sort_key: str = "created_at"
 
 # ---------------- Customers ----------------
 @api.post("/customers")
-async def create_customer(c: Customer, user=Depends(get_current_user)):
+async def create_customer(c: Customer, user=Depends(require_roles("admin", "manager", "sales", "accountant", "trial"))):
     doc = c.model_dump()
     doc["code"] = await gen_code("CUST", "customer")
     await db.customers.insert_one(doc)
@@ -2481,7 +2604,7 @@ async def del_customer(cid: str, user=Depends(require_roles("admin", "manager"))
 
 # ---------------- Leads ----------------
 @api.post("/leads")
-async def create_lead(l: Lead, user=Depends(get_current_user)):
+async def create_lead(l: Lead, user=Depends(require_roles("admin", "manager", "sales", "trial"))):
     doc = l.model_dump()
     await db.leads.insert_one(doc)
     return serialize(doc)
@@ -2503,7 +2626,7 @@ async def del_lead(lid: str, user=Depends(require_roles("admin", "manager", "sal
 
 # ---------------- Suppliers ----------------
 @api.post("/suppliers")
-async def create_supplier(s: Supplier, user=Depends(get_current_user)):
+async def create_supplier(s: Supplier, user=Depends(require_roles("admin", "manager", "accountant", "trial"))):
     doc = s.model_dump()
     await db.suppliers.insert_one(doc)
     return serialize(doc)
@@ -2527,7 +2650,7 @@ async def del_supplier(sid: str, user=Depends(require_roles("admin", "manager", 
 
 # ---------------- Inventory ----------------
 @api.post("/inventory/items")
-async def create_item(it: InventoryItem, user=Depends(get_current_user)):
+async def create_item(it: InventoryItem, user=Depends(require_roles("admin", "manager", "trial"))):
     if await db.items.find_one({"sku": it.sku}):
         raise HTTPException(400, "SKU already exists")
     doc = it.model_dump()
@@ -2642,7 +2765,7 @@ async def part_library_categories(user=Depends(get_current_user)):
     return PART_LIB_CATEGORIES
 
 @api.post("/part-library")
-async def create_part_library(p: PartLibraryItem, user=Depends(get_current_user)):
+async def create_part_library(p: PartLibraryItem, user=Depends(require_roles("admin", "manager", "production", "design", "trial"))):
     p.seeded = False
     doc = p.model_dump()
     await db.part_library.insert_one(doc)
@@ -2663,7 +2786,7 @@ async def del_part_library(pid: str, user=Depends(require_roles("admin", "manage
     return {"ok": True}
 
 @api.post("/part-library/{pid}/to-inventory")
-async def part_library_to_inventory(pid: str, body: Optional[dict] = None, user=Depends(get_current_user)):
+async def part_library_to_inventory(pid: str, body: Optional[dict] = None, user=Depends(require_roles("admin", "manager", "production", "design", "trial"))):
     """Create an inventory item from a library part. Optional body: {sku, qty_on_hand, location}."""
     p = await db.part_library.find_one({"id": pid}, {"_id": 0})
     if not p:
@@ -2985,7 +3108,7 @@ async def list_accounts(user=Depends(get_current_user)):
     return accts
 
 @api.post("/accounts")
-async def create_account(a: FinAccount, user=Depends(get_current_user)):
+async def create_account(a: FinAccount, user=Depends(require_roles("admin", "accountant", "ca", "trial"))):
     doc = a.model_dump()
     if doc.get("is_default"):
         await db.fin_accounts.update_many({}, {"$set": {"is_default": False}})
@@ -3168,7 +3291,7 @@ async def seed_masters(user=Depends(require_roles("admin", "manager"))):
     return {"ok": True, "doc_terms": len(doc_terms), "payment_terms": len(payment_terms), "prefixes": len(prefixes)}
 
 @api.post("/inventory/movements")
-async def create_movement(m: StockMovement, user=Depends(get_current_user)):
+async def create_movement(m: StockMovement, user=Depends(require_roles("admin", "manager", "trial", "employee"))):
     item = await db.items.find_one({"id": m.item_id}, {"_id": 0})
     if not item:
         raise HTTPException(404, "Item not found")
@@ -3253,7 +3376,7 @@ async def set_inventory_locations(body: dict, user=Depends(require_roles("admin"
     return {"locations": locs}
 
 @api.post("/inventory/transfer")
-async def transfer_stock(t: StockTransfer, user=Depends(get_current_user)):
+async def transfer_stock(t: StockTransfer, user=Depends(require_roles("admin", "manager", "trial", "employee"))):
     """Move qty of an item from one location to another. Grand total qty_on_hand
     is unchanged; only the per-location split shifts. Records a 'transfer' movement."""
     item = await db.items.find_one({"id": t.item_id}, {"_id": 0})
@@ -3302,7 +3425,7 @@ async def get_adjustment_reasons(user=Depends(get_current_user)):
     return {"reasons": STOCK_ADJ_REASONS}
 
 @api.post("/inventory/adjustments")
-async def create_stock_adjustment(a: StockAdjustmentIn, user=Depends(get_current_user)):
+async def create_stock_adjustment(a: StockAdjustmentIn, user=Depends(require_roles("admin", "manager", "trial"))):
     item = await db.items.find_one({"id": a.item_id}, {"_id": 0})
     if not item:
         raise HTTPException(404, "Item not found")
@@ -3419,7 +3542,7 @@ def _parse_bill_json(text: str):
     }
 
 @api.post("/inventory/scan-bill")
-async def scan_bill(payload: BillScanIn, user=Depends(get_current_user)):
+async def scan_bill(payload: BillScanIn, user=Depends(require_roles("admin", "manager", "trial"))):
     """AI bill OCR via Claude vision. Returns {extracted:{supplier_name, bill_number, items:[...]}}."""
     if not ANTHROPIC_API_KEY:
         raise HTTPException(503, "AI bill scanning is not configured. Set ANTHROPIC_API_KEY in the backend environment.")
@@ -3451,7 +3574,7 @@ async def scan_bill(payload: BillScanIn, user=Depends(get_current_user)):
 
 # ---------------- BOM ----------------
 @api.post("/bom")
-async def create_bom(b: BOM, user=Depends(get_current_user)):
+async def create_bom(b: BOM, user=Depends(require_roles("admin", "manager", "production", "design", "trial"))):
     doc = b.model_dump()
     doc["code"] = await gen_code("BOM", "bom")
     # Back-fill parent part name + lines from PartMaster references
@@ -3489,7 +3612,7 @@ async def del_bom(bid: str, user=Depends(require_roles("admin", "manager", "prod
 
 # ---------------- Work Orders ----------------
 @api.post("/work-orders")
-async def create_wo(w: WorkOrder, user=Depends(get_current_user)):
+async def create_wo(w: WorkOrder, user=Depends(require_roles("admin", "manager", "production", "trial", "employee"))):
     doc = w.model_dump()
     doc["code"] = await gen_code("WO", "wo")
     await db.work_orders.insert_one(doc)
@@ -3551,7 +3674,7 @@ async def del_wo(wid: str, user=Depends(require_roles("admin", "manager"))):
 
 # ---------------- Job Cards ----------------
 @api.post("/job-cards")
-async def create_jc(j: JobCard, user=Depends(get_current_user)):
+async def create_jc(j: JobCard, user=Depends(require_roles("admin", "manager", "production", "trial", "employee"))):
     doc = j.model_dump()
     doc["code"] = await gen_code("JC", "jc")
     wo = await db.work_orders.find_one({"id": j.work_order_id}, {"_id": 0})
@@ -3713,7 +3836,7 @@ async def machine_type_presets(user=Depends(get_current_user)):
     }
 
 @api.post("/machines")
-async def create_machine(m: Machine, user=Depends(get_current_user)):
+async def create_machine(m: Machine, user=Depends(require_roles("admin", "manager", "production", "trial"))):
     doc = m.model_dump()
     if not doc.get("code"):
         doc["code"] = await gen_code("MC", "machine")
@@ -3802,7 +3925,7 @@ async def list_wo_operations(wid: str, user=Depends(get_current_user)):
     return ops
 
 @api.post("/work-orders/{wid}/operations")
-async def add_wo_operation(wid: str, op: WOOperation, user=Depends(get_current_user)):
+async def add_wo_operation(wid: str, op: WOOperation, user=Depends(require_roles("admin", "manager", "production", "trial", "employee"))):
     wo = await _wo_or_404(wid)
     doc = op.model_dump()
     doc["work_order_id"] = wid
@@ -3829,7 +3952,7 @@ async def del_wo_operation(wid: str, op_id: str, user=Depends(require_roles("adm
     return {"ok": True}
 
 @api.post("/work-orders/{wid}/operations/{op_id}/start")
-async def start_wo_operation(wid: str, op_id: str, user=Depends(get_current_user)):
+async def start_wo_operation(wid: str, op_id: str, user=Depends(require_roles("admin", "manager", "production", "trial", "employee"))):
     now = now_iso()
     await db.wo_operations.update_one(
         {"id": op_id, "work_order_id": wid},
@@ -3842,7 +3965,7 @@ async def start_wo_operation(wid: str, op_id: str, user=Depends(get_current_user
 
 @api.post("/work-orders/{wid}/operations/{op_id}/complete")
 async def complete_wo_operation(wid: str, op_id: str, qty_done: Optional[float] = None,
-                                user=Depends(get_current_user)):
+                                user=Depends(require_roles("admin", "manager", "production", "trial", "employee"))):
     op = await db.wo_operations.find_one({"id": op_id, "work_order_id": wid}, {"_id": 0})
     if not op:
         raise HTTPException(404, "Operation not found")
@@ -3862,7 +3985,7 @@ async def complete_wo_operation(wid: str, op_id: str, qty_done: Optional[float] 
     return {"ok": True, "finished_at": now, "actual_minutes": upd["actual_minutes"]}
 
 @api.post("/work-orders/{wid}/operations/{op_id}/hold")
-async def hold_wo_operation(wid: str, op_id: str, user=Depends(get_current_user)):
+async def hold_wo_operation(wid: str, op_id: str, user=Depends(require_roles("admin", "manager", "production", "trial", "employee"))):
     """Put an operation on hold (status only — preserves photos/timings)."""
     res = await db.wo_operations.update_one(
         {"id": op_id, "work_order_id": wid}, {"$set": {"status": "hold"}})
@@ -3874,7 +3997,7 @@ class OpPhotoIn(BaseModel):
     photo: str  # base64 (data URL or raw)
 
 @api.post("/work-orders/{wid}/operations/{op_id}/photo")
-async def add_op_photo(wid: str, op_id: str, body: OpPhotoIn, user=Depends(get_current_user)):
+async def add_op_photo(wid: str, op_id: str, body: OpPhotoIn, user=Depends(require_roles("admin", "manager", "production", "trial", "employee"))):
     """Shopfloor: attach an inspection photo to an operation (mobile)."""
     photo = (body.photo or "").split(",")[-1].strip()  # strip data-URL prefix if present
     if not photo:
@@ -3907,7 +4030,7 @@ async def get_op_photos(wid: str, op_id: str, user=Depends(get_current_user)):
     return {"photos": out}
 
 @api.post("/work-orders/{wid}/operations/seed-from-part")
-async def seed_operations_from_part(wid: str, user=Depends(get_current_user)):
+async def seed_operations_from_part(wid: str, user=Depends(require_roles("admin", "manager", "production", "trial", "employee"))):
     """Generate routing operations from the WO part's Part Master process list."""
     wo = await _wo_or_404(wid)
     part = None
@@ -4060,7 +4183,7 @@ def _parse_quote_json(text: str):
     }
 
 @api.post("/quotations/ai-estimate")
-async def ai_quote_estimate(body: QuoteEstimateIn, user=Depends(get_current_user)):
+async def ai_quote_estimate(body: QuoteEstimateIn, user=Depends(require_roles("admin", "manager", "sales", "trial"))):
     """AI Quote Generator: drawing + material -> machining time, costs, process, suggested price."""
     if not ANTHROPIC_API_KEY:
         raise HTTPException(503, "AI quote estimation is not configured. Set ANTHROPIC_API_KEY in the backend environment.")
@@ -4254,7 +4377,7 @@ class QuoteDocIn(BaseModel):
     sitevisit: str = ""
 
 @api.post("/quotations/docx")
-async def quotation_docx(body: QuoteDocIn, user=Depends(get_current_user)):
+async def quotation_docx(body: QuoteDocIn, user=Depends(require_roles("admin", "manager", "sales", "trial"))):
     """Generate an editable Word quotation (general | techno) on the Denplex letterhead."""
     photos = []
     for ph in (body.photos or []):
@@ -4283,7 +4406,7 @@ async def quotation_docx(body: QuoteDocIn, user=Depends(get_current_user)):
                     headers={"Content-Disposition": f"attachment; filename={fname}"})
 
 @api.post("/quotations")
-async def create_quote(q: Quotation, user=Depends(get_current_user)):
+async def create_quote(q: Quotation, user=Depends(require_roles("admin", "manager", "sales", "trial"))):
     doc = q.model_dump()
     doc["code"] = await gen_code("QT", "quote")
     t = compute_totals([l for l in doc["lines"]], 0, doc.get("extra_charges"))
@@ -4311,7 +4434,7 @@ async def del_quote(qid: str, user=Depends(require_roles("admin", "manager", "sa
 
 # ---------------- Purchase Orders ----------------
 @api.post("/purchase-orders")
-async def create_po(p: PurchaseOrder, user=Depends(get_current_user)):
+async def create_po(p: PurchaseOrder, user=Depends(require_roles("admin", "manager", "accountant", "trial"))):
     doc = p.model_dump()
     doc["code"] = (p.code or "").strip() or await gen_code("PO", "po")
     t = compute_totals(doc["lines"], doc.get("round_off", 0), doc.get("extra_charges")); doc.update(t)
@@ -4367,7 +4490,7 @@ async def po_receipts_summary(pid: str, user=Depends(get_current_user)):
             "supplier_name": po.get("supplier_name"), "lines": lines_out, "receipts": grns}
 
 @api.post("/goods-receipts")
-async def create_goods_receipt(g: GoodsReceipt, user=Depends(get_current_user)):
+async def create_goods_receipt(g: GoodsReceipt, user=Depends(require_roles("admin", "manager", "accountant", "ca", "production", "trial"))):
     po = await db.purchase_orders.find_one({"id": g.po_id}, {"_id": 0})
     if not po:
         raise HTTPException(404, "Purchase Order not found")
@@ -4500,7 +4623,7 @@ def compute_invoice_totals(lines: List[Dict[str, Any]], interstate: bool, round_
     return {"subtotal": round(subtotal, 2), "cgst": round(gst/2, 2), "sgst": round(gst/2, 2), "igst": 0.0, "total": round(total, 2), **extra}
 
 @api.post("/invoices")
-async def create_invoice(inv: Invoice, user=Depends(get_current_user)):
+async def create_invoice(inv: Invoice, user=Depends(require_roles("admin", "manager", "accountant", "ca", "trial"))):
     from datetime import timedelta
     doc = inv.model_dump()
     doc["code"] = (inv.code or "").strip() or await gen_code("INV", "invoice")
@@ -4547,7 +4670,7 @@ class EwayBillIn(BaseModel):
     details: dict = Field(default_factory=dict)   # full NIC form: dispatch/ship/transport/Part-B/value
 
 @api.post("/invoices/{iid}/eway-bill")
-async def record_eway_bill(iid: str, body: EwayBillIn, user=Depends(get_current_user)):
+async def record_eway_bill(iid: str, body: EwayBillIn, user=Depends(require_roles("admin", "manager", "accountant", "ca", "trial"))):
     """Record an e-way bill (and its full NIC form data) against an invoice + auto-compute validity.
     NOTE: actually filing to the government NIC system needs a GSP API connection; until then this
     captures the prepared payload and the number you generate on the NIC portal."""
@@ -4857,7 +4980,7 @@ class EInvoiceRecordIn(BaseModel):
     signed_qr: Optional[str] = ""
 
 @api.post("/invoices/{iid}/e-invoice/record")
-async def record_einvoice(iid: str, body: EInvoiceRecordIn, user=Depends(get_current_user)):
+async def record_einvoice(iid: str, body: EInvoiceRecordIn, user=Depends(require_roles("admin", "manager", "accountant", "ca", "trial"))):
     """Manually record an IRN / Ack / signed-QR generated on the IRP portal (used until the GSP API is wired)."""
     inv = await db.invoices.find_one({"id": iid}, {"_id": 0})
     if not inv:
@@ -5804,7 +5927,7 @@ async def del_invoice(iid: str, user=Depends(require_roles("admin", "accountant"
 
 # ---------------- QC Reports ----------------
 @api.post("/qc-reports")
-async def create_qc(q: QCReport, user=Depends(get_current_user)):
+async def create_qc(q: QCReport, user=Depends(require_roles("admin", "manager", "qc", "trial", "employee"))):
     doc = q.model_dump()
     doc["code"] = await gen_code("QC", "qc")
     if q.work_order_id:
@@ -5833,7 +5956,7 @@ def _doc_mime(name):
     return mimetypes.guess_type(name or "")[0] or "application/octet-stream"
 
 @api.post("/documents")
-async def upload_doc(d: DocumentMeta, user=Depends(get_current_user)):
+async def upload_doc(d: DocumentMeta, user=Depends(require_roles("admin", "manager", "trial"))):
     doc = d.model_dump()
     doc["uploaded_by"] = user["name"]
     doc["file_base64"] = await _drive_offload(doc.get("file_base64"), doc.get("name") or "document", _doc_mime(doc.get("name")), "Documents")
@@ -5912,7 +6035,7 @@ async def dashboard_stats(user=Depends(get_current_user)):
 
 # ---------------- P1: Accounting (Expenses + GST Report) ----------------
 @api.post("/expenses")
-async def create_expense(e: Expense, user=Depends(require_roles("admin", "manager", "accountant", "ca"))):
+async def create_expense(e: Expense, user=Depends(require_roles("admin", "manager", "accountant", "ca", "trial"))):
     doc = e.model_dump()
     amt = float(doc.get("amount") or 0)
     rate = float(doc.get("gst_rate") or 0)
@@ -6014,7 +6137,7 @@ async def del_att(aid: str, user=Depends(require_roles("admin", "manager"))):
 
 # ---------------- P1: Marketing / Social Campaigns ----------------
 @api.post("/campaigns")
-async def create_camp(c: Campaign, user=Depends(get_current_user)):
+async def create_camp(c: Campaign, user=Depends(require_roles("admin", "manager", "sales", "trial"))):
     doc = c.model_dump()
     await db.campaigns.insert_one(doc)
     return serialize(doc)
@@ -6036,7 +6159,7 @@ async def del_camp(cid: str, user=Depends(require_roles("admin", "manager", "sal
 
 # ---------------- P1: Document Revisions (ISO 9001 etc.) ----------------
 @api.post("/documents/{did}/revisions")
-async def add_revision(did: str, payload: DocRevIn, user=Depends(get_current_user)):
+async def add_revision(did: str, payload: DocRevIn, user=Depends(require_roles("admin", "manager", "trial"))):
     doc = await db.documents.find_one({"id": did}, {"_id": 0})
     if not doc:
         raise HTTPException(404, "Document not found")
@@ -6410,7 +6533,7 @@ class WhatsAppSendIn(BaseModel):
     media_url: Optional[str] = ""
 
 @api.post("/whatsapp/send")
-async def whatsapp_send(payload: WhatsAppSendIn, user=Depends(get_current_user)):
+async def whatsapp_send(payload: WhatsAppSendIn, user=Depends(require_roles("admin", "manager", "sales", "accountant", "trial"))):
     cfg = await get_setting("integrations")
     sid = cfg.get("twilio_account_sid"); tok = cfg.get("twilio_auth_token"); frm = cfg.get("twilio_whatsapp_from")
     if not (sid and tok and frm):
@@ -6864,7 +6987,7 @@ async def _run_backup():
             "size_kb": round(len(payload) / 1024, 1), "collections": len(dump)}
 
 @api.post("/google/backup")
-async def google_backup(user=Depends(get_current_user)):
+async def google_backup(user=Depends(require_roles("admin"))):
     """Export ERP data to JSON and upload to Google Drive (Denplex ERP / Backups)."""
     return await _run_backup()
 
@@ -6998,7 +7121,7 @@ class CAPA(BaseModel):
     created_at: str = Field(default_factory=now_iso)
 
 @api.post("/ncrs")
-async def create_ncr(n: NCR, user=Depends(get_current_user)):
+async def create_ncr(n: NCR, user=Depends(require_roles("admin", "manager", "qc", "trial"))):
     doc = n.model_dump(); doc["code"] = await gen_code("NCR", "ncr")
     if not doc.get("raised_by"): doc["raised_by"] = user.get("name", "")
     if doc.get("work_order_id"):
@@ -7025,7 +7148,7 @@ async def del_ncr(nid: str, user=Depends(require_roles("admin", "manager", "qc")
     return {"ok": True}
 
 @api.post("/capas")
-async def create_capa(c: CAPA, user=Depends(get_current_user)):
+async def create_capa(c: CAPA, user=Depends(require_roles("admin", "manager", "qc", "trial"))):
     doc = c.model_dump(); doc["code"] = await gen_code("CAPA", "capa")
     if not doc.get("raised_by"): doc["raised_by"] = user.get("name", "")
     if doc.get("ncr_id"):
@@ -7102,7 +7225,7 @@ class SupplierEvaluation(BaseModel):               # F/PUR/04
 
 # --- Calibration / Instruments ---
 @api.post("/instruments")
-async def create_instrument(i: Instrument, user=Depends(get_current_user)):
+async def create_instrument(i: Instrument, user=Depends(require_roles("admin", "manager", "qc", "trial"))):
     doc = i.model_dump(); await db.instruments.insert_one(doc); return serialize(doc)
 @api.get("/instruments")
 async def list_instruments(user=Depends(get_current_user)):
@@ -7117,7 +7240,7 @@ async def del_instrument(iid: str, user=Depends(require_roles("admin","manager",
 
 # --- Approved suppliers ---
 @api.post("/approved-suppliers")
-async def create_apsup(a: ApprovedSupplier, user=Depends(get_current_user)):
+async def create_apsup(a: ApprovedSupplier, user=Depends(require_roles("admin", "manager", "qc", "trial"))):
     doc = a.model_dump(); await db.approved_suppliers.insert_one(doc); return serialize(doc)
 @api.get("/approved-suppliers")
 async def list_apsup(user=Depends(get_current_user)):
@@ -7132,7 +7255,7 @@ async def del_apsup(sid: str, user=Depends(require_roles("admin","manager"))):
 
 # --- Supplier evaluations ---
 @api.post("/supplier-evaluations")
-async def create_supeval(e: SupplierEvaluation, user=Depends(get_current_user)):
+async def create_supeval(e: SupplierEvaluation, user=Depends(require_roles("admin", "manager", "qc", "trial"))):
     doc = e.model_dump()
     scores = [doc["quality_score"], doc["delivery_score"], doc["cost_score"], doc["responsiveness_score"], doc["system_score"]]
     if not doc.get("total_pct"):
@@ -7472,13 +7595,13 @@ def build_iso_doc_pdf(d: Dict[str, Any]) -> bytes:
     return buf.getvalue()
 
 @api.post("/iso-documents")
-async def create_iso_document(d: ISODocument, user=Depends(get_current_user)):
+async def create_iso_document(d: ISODocument, user=Depends(require_roles("admin", "manager", "qc", "trial"))):
     doc = d.model_dump(); doc["updated_at"] = now_iso()
     await db.iso_documents.insert_one(doc)
     return serialize(doc)
 
 @api.post("/iso-documents/bulk")
-async def bulk_iso_documents(body: ISODocBulkIn, user=Depends(get_current_user)):
+async def bulk_iso_documents(body: ISODocBulkIn, user=Depends(require_roles("admin", "manager", "qc", "trial"))):
     if user.get("role") not in ("admin", "manager"):
         raise HTTPException(403, "Only admin/manager can bulk import")
     if body.replace_all:
@@ -7705,7 +7828,7 @@ async def list_register_entries(tid: str, user=Depends(get_current_user)):
     return await cur.to_list(20000)
 
 @api.post("/registers/{tid}/entries")
-async def create_register_entry(tid: str, e: RegisterEntry, user=Depends(get_current_user)):
+async def create_register_entry(tid: str, e: RegisterEntry, user=Depends(require_roles("admin", "manager", "trial", "employee"))):
     t = await db.register_templates.find_one({"id": tid})
     if not t: raise HTTPException(404, "Register not found")
     doc = e.model_dump(); doc["template_id"] = tid
@@ -7713,7 +7836,7 @@ async def create_register_entry(tid: str, e: RegisterEntry, user=Depends(get_cur
     await db.register_entries.insert_one(doc); return serialize(doc)
 
 @api.post("/registers/{tid}/entries/bulk")
-async def bulk_register_entries(tid: str, body: RegisterEntryBulkIn, user=Depends(get_current_user)):
+async def bulk_register_entries(tid: str, body: RegisterEntryBulkIn, user=Depends(require_roles("admin", "manager", "trial", "employee"))):
     """Insert many entries in one request (used for historical data import)."""
     t = await db.register_templates.find_one({"id": tid})
     if not t: raise HTTPException(404, "Register not found")
@@ -8840,7 +8963,7 @@ def _doc_totals_with_gst(lines, interstate, round_off=0, tds=0, extra_charges=No
     return t
 
 @api.post("/sale-orders")
-async def create_sale_order(so: SaleOrder, user=Depends(get_current_user)):
+async def create_sale_order(so: SaleOrder, user=Depends(require_roles("admin", "manager", "sales", "trial"))):
     doc = so.model_dump()
     doc["code"] = (so.code or "").strip() or await gen_code("SO", "sale_order")
     doc.update(_doc_totals_with_gst(doc["lines"], doc.get("is_interstate", False), doc.get("round_off", 0),
@@ -8849,7 +8972,7 @@ async def create_sale_order(so: SaleOrder, user=Depends(get_current_user)):
     return serialize(doc)
 
 @api.post("/vendor-bills")
-async def create_vendor_bill(vb: VendorBill, user=Depends(get_current_user)):
+async def create_vendor_bill(vb: VendorBill, user=Depends(require_roles("admin", "manager", "accountant", "ca", "trial"))):
     doc = vb.model_dump()
     doc["code"] = (vb.code or "").strip() or await gen_code("PB", "vendor_bill")
     doc.update(_doc_totals_with_gst(doc["lines"], doc.get("is_interstate", False), doc.get("round_off", 0), doc.get("tds", 0), doc.get("extra_charges"), doc.get("tcs", 0)))
@@ -8994,7 +9117,7 @@ def _job_work_totals(doc: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @api.post("/job-work-out")
-async def create_job_work_out(j: JobWorkOut, user=Depends(get_current_user)):
+async def create_job_work_out(j: JobWorkOut, user=Depends(require_roles("admin", "manager", "production", "accountant", "trial"))):
     doc = j.model_dump()
     doc["code"] = (j.code or "").strip() or await gen_code("JW", "job_work_out")
     # Resolve the job worker from SUPPLIERS so the name on the challan matches the party record
@@ -9429,7 +9552,7 @@ async def _record_test(user_id: str, acct_id: str, ok: bool, err: str = ""):
     )
 
 @api.post("/email/accounts")
-async def add_email_account(payload: EmailAccountIn, user=Depends(get_current_user)):
+async def add_email_account(payload: EmailAccountIn, user=Depends(require_roles("admin"))):
     preset = _autodetect(payload.email)
     smtp_host = (payload.smtp_host or preset["smtp_host"]).strip()
     smtp_port = int(payload.smtp_port or preset["smtp_port"]) 
@@ -9495,7 +9618,7 @@ async def delete_email_account(acct_id: str, user=Depends(require_roles("admin")
     return {"ok": True}
 
 @api.post("/email/accounts/{acct_id}/default")
-async def set_default_email(acct_id: str, user=Depends(get_current_user)):
+async def set_default_email(acct_id: str, user=Depends(require_roles("admin"))):
     a = await db.email_accounts.find_one({"id": acct_id, "user_id": user["id"]})
     if not a:
         raise HTTPException(404, "Not found")
@@ -9504,7 +9627,7 @@ async def set_default_email(acct_id: str, user=Depends(get_current_user)):
     return {"ok": True}
 
 @api.post("/email/accounts/{acct_id}/test")
-async def test_email_account(acct_id: str, user=Depends(get_current_user)):
+async def test_email_account(acct_id: str, user=Depends(require_roles("admin"))):
     a = await db.email_accounts.find_one({"id": acct_id, "user_id": user["id"]})
     if not a:
         raise HTTPException(404, "Not found")
@@ -9540,7 +9663,7 @@ async def _pick_account(user_id: str, account_id: str = "") -> Dict[str, Any]:
     return a
 
 @api.post("/email/send")
-async def email_send(payload: EmailSendIn, user=Depends(get_current_user)):
+async def email_send(payload: EmailSendIn, user=Depends(require_roles("admin"))):
     a = await _pick_account(user["id"], payload.account_id or "")
     pw = _dec(a.get("encrypted_password", ""))
     msg = EmailMessage()
@@ -9698,7 +9821,7 @@ async def _sync_one_account(user_id: str, a: Dict[str, Any], max_n: int = 25) ->
     return {"added": added, "scanned": len(msgs)}
 
 @api.post("/email/accounts/{acct_id}/sync-leads")
-async def email_sync_one(acct_id: str, max: int = 25, user=Depends(get_current_user)):
+async def email_sync_one(acct_id: str, max: int = 25, user=Depends(require_roles("admin"))):
     a = await db.email_accounts.find_one({"id": acct_id, "user_id": user["id"]})
     if not a:
         raise HTTPException(404, "Not found")
@@ -9707,7 +9830,7 @@ async def email_sync_one(acct_id: str, max: int = 25, user=Depends(get_current_u
     return {"account": a["email"], **res}
 
 @api.post("/email/sync-leads")
-async def email_sync_all(max: int = 25, user=Depends(get_current_user)):
+async def email_sync_all(max: int = 25, user=Depends(require_roles("admin"))):
     accts = await db.email_accounts.find({"user_id": user["id"]}, {"_id": 0}).to_list(50)
     if not accts:
         raise HTTPException(400, "No email accounts connected.")
@@ -11488,7 +11611,7 @@ def _stl_bbox(b64: str):
     return {"x": dx, "y": dy, "z": dz, "bbox_volume_cm3": round(dx * dy * dz / 1000.0, 1)}
 
 @api.post("/fixture/concept")
-async def fixture_concept(inp: FixtureConceptIn, user=Depends(get_current_user)):
+async def fixture_concept(inp: FixtureConceptIn, user=Depends(require_roles("admin", "manager", "production", "design", "trial"))):
     if not ANTHROPIC_API_KEY:
         raise HTTPException(503, "AI fixture generator is not configured. Set ANTHROPIC_API_KEY in the backend environment.")
     dims = None
@@ -11580,7 +11703,7 @@ async def fixture_concept(inp: FixtureConceptIn, user=Depends(get_current_user))
             "fixture_cad_views": fixture_cad_views, "raw": text if not concept else ""}
 
 @api.post("/fixture/concept/pdf")
-async def fixture_concept_pdf(body: dict, user=Depends(get_current_user)):
+async def fixture_concept_pdf(body: dict, user=Depends(require_roles("admin", "manager", "production", "design", "trial"))):
     from reportlab.lib.pagesizes import A4
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, ListFlowable, ListItem
     from reportlab.lib import colors
@@ -11701,7 +11824,7 @@ class CadGlbIn(BaseModel):
     step_base64: str = ""
 
 @api.post("/cad/glb")
-async def cad_glb(inp: CadGlbIn, user=Depends(get_current_user)):
+async def cad_glb(inp: CadGlbIn, user=Depends(require_roles("admin", "manager", "production", "design", "trial"))):
     """Proxy a STEP to the CAD microservice and return a GLB mesh for the in-ERP 3D viewer."""
     if not CAD_SERVICE_URL:
         raise HTTPException(503, "CAD viewer not configured. Set CAD_SERVICE_URL in the backend environment.")
@@ -11784,7 +11907,7 @@ async def machining_materials(user=Depends(get_current_user)):
     return {"materials": MATERIAL_TYPES}
 
 @api.post("/machining/quote")
-async def machining_quote(inp: MachiningQuoteIn, user=Depends(get_current_user)):
+async def machining_quote(inp: MachiningQuoteIn, user=Depends(require_roles("admin", "manager", "production", "design", "trial"))):
     if not MACHINING_SERVICE_URL:
         raise HTTPException(503, "Machining quote service not configured. Set MACHINING_SERVICE_URL in the backend environment.")
     if not inp.step_base64:
@@ -11950,7 +12073,7 @@ class FixtureSketchIn(BaseModel):
     views: list = []   # rendered CAD view PNGs (base64) so the sketch matches the real part
 
 @api.post("/fixture/sketch")
-async def fixture_sketch(inp: FixtureSketchIn, user=Depends(get_current_user)):
+async def fixture_sketch(inp: FixtureSketchIn, user=Depends(require_roles("admin", "manager", "production", "design", "trial"))):
     if not ANTHROPIC_API_KEY:
         raise HTTPException(503, "AI fixture generator is not configured. Set ANTHROPIC_API_KEY in the backend environment.")
     c = inp.concept or {}
@@ -12137,7 +12260,7 @@ async def open_invoices_for_party(party_id: str, user=Depends(get_current_user))
     return out
 
 @api.post("/payments-in")
-async def create_payment_in(p: PaymentIn, user=Depends(get_current_user)):
+async def create_payment_in(p: PaymentIn, user=Depends(require_roles("admin", "accountant", "trial"))):
     doc = p.model_dump()
     doc["code"] = doc.get("code") or await gen_code("PMT-IN", "payment_in")
     _recalc_payment_status(doc)
@@ -12204,7 +12327,7 @@ async def open_bills_for_party(party_id: str, user=Depends(get_current_user)):
     return out
 
 @api.post("/payments-out")
-async def create_payment_out(p: PaymentOut, user=Depends(get_current_user)):
+async def create_payment_out(p: PaymentOut, user=Depends(require_roles("admin", "accountant", "trial"))):
     doc = p.model_dump()
     doc["code"] = doc.get("code") or await gen_code("PMT-OUT", "payment_out")
     _recalc_payment_status(doc)
@@ -12261,7 +12384,7 @@ async def del_expense_category(cid: str, user=Depends(require_roles("admin", "ac
 
 # Expenses
 @api.post("/expenses")
-async def create_expense(e: Expense, user=Depends(get_current_user)):
+async def create_expense(e: Expense, user=Depends(require_roles("admin", "accountant", "ca", "trial"))):
     doc = e.model_dump()
     doc["code"] = doc.get("code") or await gen_code("EXP", "expense")
     # Auto-set status from paid_amount
@@ -13098,7 +13221,7 @@ async def party_statement(pid: str, period: str = "this_year", user=Depends(get_
 
 # ---------------- Proforma Invoice (Phase B.1) ----------------
 @api.post("/proforma-invoices")
-async def create_proforma(p: ProformaInvoice, user=Depends(get_current_user)):
+async def create_proforma(p: ProformaInvoice, user=Depends(require_roles("admin", "accountant", "trial"))):
     doc = p.model_dump()
     doc["code"] = doc.get("code") or await gen_code("PFI", "proforma")
     doc.update(compute_invoice_totals(doc["lines"], doc.get("is_interstate", False), doc.get("round_off", 0),
@@ -13124,7 +13247,7 @@ async def del_proforma(pid: str, user=Depends(require_roles("admin", "manager", 
     return {"ok": True}
 
 @api.post("/proforma-invoices/{pid}/convert")
-async def convert_proforma(pid: str, user=Depends(get_current_user)):
+async def convert_proforma(pid: str, user=Depends(require_roles("admin", "accountant", "trial"))):
     pf = await db.proforma_invoices.find_one({"id": pid}, {"_id": 0})
     if not pf: raise HTTPException(404, "Proforma not found")
     if pf.get("status") == "converted": raise HTTPException(400, "Already converted")
@@ -13171,7 +13294,7 @@ async def proforma_pdf(pid: str, user=Depends(get_current_user)):
 
 # ---------------- Sale Return / Purchase Return (Phase B.2) ----------------
 @api.post("/sale-returns")
-async def create_sale_return(r: SaleReturn, user=Depends(get_current_user)):
+async def create_sale_return(r: SaleReturn, user=Depends(require_roles("admin", "manager", "accountant", "ca", "trial"))):
     doc = r.model_dump()
     doc["code"] = doc.get("code") or await gen_code("SR", "sale_return")
     subtotal = sum(float(l.get("qty", 0) or 0) * float(l.get("rate", 0) or 0) for l in doc["lines"])
@@ -13223,7 +13346,7 @@ async def del_sale_return(rid: str, user=Depends(require_roles("admin", "manager
     return {"ok": True}
 
 @api.post("/purchase-returns")
-async def create_purchase_return(r: PurchaseReturn, user=Depends(get_current_user)):
+async def create_purchase_return(r: PurchaseReturn, user=Depends(require_roles("admin", "manager", "accountant", "ca", "trial"))):
     doc = r.model_dump()
     doc["code"] = doc.get("code") or await gen_code("PR", "purchase_return")
     subtotal = sum(float(l.get("qty", 0) or 0) * float(l.get("rate", 0) or 0) for l in doc["lines"])
@@ -13387,7 +13510,7 @@ async def global_search(q: str = "", limit: int = 6, user=Depends(get_current_us
 
 # ---------------- BOM Revisions + Drawings (Phase M.2) ----------------
 @api.post("/bom/{bid}/revisions")
-async def add_bom_revision(bid: str, rev: BOMRevision, user=Depends(get_current_user)):
+async def add_bom_revision(bid: str, rev: BOMRevision, user=Depends(require_roles("admin", "manager", "production", "design", "trial"))):
     """Promote a new BOM revision. Snapshots the current lines into the history,
     bumps the active revision label, optionally updates the assembly drawing."""
     bom = await db.boms.find_one({"id": bid}, {"_id": 0})
@@ -13434,7 +13557,7 @@ async def download_bom_drawing(bid: str, revision: Optional[str] = None, user=De
 
 # ---------------- BOM auto-extraction from uploaded files (Phase M.3b) ----------------
 @api.post("/bom/extract")
-async def bom_extract(file: UploadFile = File(...), user=Depends(get_current_user)):
+async def bom_extract(file: UploadFile = File(...), user=Depends(require_roles("admin", "manager", "production", "design", "trial"))):
     """Extract candidate BOM lines from an uploaded file.
     Supports: PDF (assembly drawings with parts list), STEP/STP (CAD component tree),
     XLSX/XLS/CSV (BOM exports from SolidWorks/Solid Edge/any tool).
@@ -13622,7 +13745,7 @@ async def bom_explode(bid: str, levels: int = 3, user=Depends(get_current_user))
 
 # ---------------- Part Master (Phase M.1) ----------------
 @api.post("/parts")
-async def create_part(p: PartMaster, user=Depends(get_current_user)):
+async def create_part(p: PartMaster, user=Depends(require_roles("admin", "manager", "production", "design", "trial"))):
     doc = p.model_dump()
     doc["drawing_pdf_b64"] = await _drive_offload(doc.get("drawing_pdf_b64"), doc.get("drawing_filename") or f"{doc.get('part_number','part')}.pdf", "application/pdf", "Drawings")
     doc["step_file_b64"] = await _drive_offload(doc.get("step_file_b64"), doc.get("step_filename") or f"{doc.get('part_number','part')}.step", "application/octet-stream", "STEP Files")
@@ -13655,7 +13778,7 @@ class PartCandidate(BaseModel):
     sourcing_guess: Optional[str] = "manufactured"
 
 @api.post("/parts/bulk-from-candidates")
-async def bulk_parts_from_candidates(items: List[PartCandidate], user=Depends(get_current_user)):
+async def bulk_parts_from_candidates(items: List[PartCandidate], user=Depends(require_roles("admin", "manager", "production", "design", "trial"))):
     """Given a list of extracted candidates (from BOM file extract), match each to an existing Part
     or create a new one. Returns a list mirroring input order with the resolved part_id and status."""
     result = []
@@ -13771,7 +13894,7 @@ async def delete_part(pid: str, force: bool = False, user=Depends(require_roles(
     return {"ok": True, "soft_deleted": True}
 
 @api.post("/parts/{pid}/revisions")
-async def add_part_revision(pid: str, rev: PartRevision, user=Depends(get_current_user)):
+async def add_part_revision(pid: str, rev: PartRevision, user=Depends(require_roles("admin", "manager", "production", "design", "trial"))):
     """Promote a new revision. Mirrors the new revision's files into the part's current_revision fields."""
     p = await db.parts.find_one({"id": pid}, {"_id": 0})
     if not p: raise HTTPException(404, "Part not found")
@@ -13905,7 +14028,7 @@ async def list_material_states(user=Depends(get_current_user)):
     return [serialize(s) for s in items]
 
 @api.post("/material-states")
-async def create_material_state(s: MaterialState, user=Depends(get_current_user)):
+async def create_material_state(s: MaterialState, user=Depends(require_roles("admin", "manager", "production", "trial", "employee"))):
     doc = s.model_dump()
     if not doc.get("key"):
         doc["key"] = _slugify(doc.get("name", ""))
@@ -13968,7 +14091,7 @@ async def record_state_movement(*, item_id="", item_sku="", item_name="",
     return serialize(doc)
 
 @api.post("/material-states/move")
-async def post_state_movement(body: MaterialStateMovement, user=Depends(get_current_user)):
+async def post_state_movement(body: MaterialStateMovement, user=Depends(require_roles("admin", "manager", "production", "trial", "employee"))):
     try:
         email = ""
         if isinstance(user, dict):
