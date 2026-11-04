@@ -11968,16 +11968,11 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
                                     "date": str(r["txn_date"] or "")[:10] or now_iso()[:10],
                                     "amount": round(cash, 2), "ptype_id": r["txn_payment_type_id"],
                                     "doc_id": doc["id"], "doc_code": doc["code"], "txn_id": int(r["txn_id"])})
-        # Increment counter
-        if t == 1: res["sales"] += 1
-        elif t == 2: res["purchases"] += 1
-        elif t == 21: res["sale_returns"] += 1
-        elif t == 23: res["purchase_returns"] += 1
-        elif t == 24: res["sale_orders"] += 1
-        elif t == 27: res["quotations"] += 1
-        elif t == 28: res["purchase_orders"] += 1
-        elif t == 30: res["delivery_challans"] += 1
-        elif t == 65: res["proformas"] += 1
+        # The counter key comes straight from TYPE_ROUTES rather than a parallel if/elif chain.
+        # That chain was a second place to remember every type, and it silently under-reported
+        # anything added to the routing table but not to itself: txn_type 83 imported perfectly
+        # on 2026-11-04 while the summary still read "proformas: 1". One list, one source.
+        res[route[1]] = res.get(route[1], 0) + 1
 
     if not opts.dry_run:
         for _coll_name, _ops in doc_ops.items():
