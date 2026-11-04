@@ -4498,16 +4498,28 @@ DEFAULT_TDS_SECTIONS = [
 
 @api.get("/masters")
 async def get_masters(user=Depends(get_current_user)):
-    return {
-        "doc_terms": await _get_setting(MASTER_KEYS["doc_terms"], {}),
-        "payment_terms": await _get_setting(MASTER_KEYS["payment_terms"], []),
-        "prefixes": await _get_setting(MASTER_KEYS["prefixes"], {}),
-        "company_bank": await _get_setting(MASTER_KEYS["company_bank"], {}),
-        "tds_sections": await _get_setting(MASTER_KEYS["tds_sections"], DEFAULT_TDS_SECTIONS),
-        "doc_custom_fields": await _get_setting(MASTER_KEYS["doc_custom_fields"], DEFAULT_DOC_CUSTOM_FIELDS),
-        "currency": await _get_setting(MASTER_KEYS["currency"], DEFAULT_CURRENCY),
-        "theme": await _get_setting(MASTER_KEYS["theme"], DEFAULT_THEME),
+    """Every masters section in ONE query instead of eight.
+
+    This returns about a kilobyte but was taking 2.3 seconds, because eight sequential
+    _get_setting() calls are eight separate round-trips to Atlas at roughly 280ms each. The
+    latency was the entire cost; the data was never the problem. Same response shape as before.
+    """
+    wanted = {
+        "doc_terms": (MASTER_KEYS["doc_terms"], {}),
+        "payment_terms": (MASTER_KEYS["payment_terms"], []),
+        "prefixes": (MASTER_KEYS["prefixes"], {}),
+        "company_bank": (MASTER_KEYS["company_bank"], {}),
+        "tds_sections": (MASTER_KEYS["tds_sections"], DEFAULT_TDS_SECTIONS),
+        "doc_custom_fields": (MASTER_KEYS["doc_custom_fields"], DEFAULT_DOC_CUSTOM_FIELDS),
+        "currency": (MASTER_KEYS["currency"], DEFAULT_CURRENCY),
+        "theme": (MASTER_KEYS["theme"], DEFAULT_THEME),
     }
+    found: Dict[str, Any] = {}
+    async for d in db.settings.find({"_id": {"$in": [k for k, _ in wanted.values()]}}):
+        found[d["_id"]] = d.get("value")
+    # A stored doc with no "value" falls back to the default, matching _get_setting exactly.
+    return {name: (found[key] if found.get(key) is not None else default)
+            for name, (key, default) in wanted.items()}
 
 @api.put("/masters/{section}")
 async def put_masters(section: str, body: dict,
@@ -7281,26 +7293,30 @@ async def del_doc(did: str, user=Depends(require_roles("admin", "manager"))):
 # ---------------- Dashboard ----------------
 @api.get("/dashboard/stats")
 async def dashboard_stats(user=Depends(get_current_user)):
-    # Projection-limited fetches to keep dashboard fast even with thousands of records
-    items = await db.items.find(
-        {}, {"_id": 0, "id": 1, "sku": 1, "name": 1, "qty_on_hand": 1, "reorder_level": 1, "uom": 1}
-    ).to_list(5000)
-    low_stock = [i for i in items if i.get("qty_on_hand", 0) <= i.get("reorder_level", 0)]
-    open_wo = await db.work_orders.count_documents({"status": {"$in": ["planned", "in_progress"]}})
-    qc_pending = await db.work_orders.count_documents({"status": "qc"})
-    leads_open = await db.leads.count_documents({"status": {"$in": ["new", "contacted", "qualified"]}})
-    customers = await db.customers.count_documents({})
-    # Aggregate revenue at the DB layer instead of pulling 2000 docs into Python
+    # Nine independent queries, so they go CONCURRENTLY rather than one after another. Awaiting
+    # them in sequence meant nine round-trips to Atlas at ~280ms each — 3.4 seconds to return a
+    # single kilobyte. None of them depends on another's result, so gather costs one round-trip
+    # of wall time instead of nine. Projections stay as they were.
     rev_pipeline = [
         {"$match": {"status": {"$in": ["paid", "sent"]}}},
         {"$group": {"_id": None, "total": {"$sum": "$total"}}},
     ]
-    rev_cursor = db.invoices.aggregate(rev_pipeline)
-    rev_doc = await rev_cursor.to_list(1)
+    (items, open_wo, qc_pending, leads_open, customers,
+     rev_doc, items_count, repeat_customers, recent) = await asyncio.gather(
+        db.items.find(
+            {}, {"_id": 0, "id": 1, "sku": 1, "name": 1, "qty_on_hand": 1, "reorder_level": 1, "uom": 1}
+        ).to_list(5000),
+        db.work_orders.count_documents({"status": {"$in": ["planned", "in_progress"]}}),
+        db.work_orders.count_documents({"status": "qc"}),
+        db.leads.count_documents({"status": {"$in": ["new", "contacted", "qualified"]}}),
+        db.customers.count_documents({}),
+        db.invoices.aggregate(rev_pipeline).to_list(1),
+        db.items.count_documents({}),
+        db.customers.count_documents({"customer_type": "repeat"}),
+        db.work_orders.find({}, {"_id": 0}).sort("created_at", -1).to_list(8),
+    )
+    low_stock = [i for i in items if i.get("qty_on_hand", 0) <= i.get("reorder_level", 0)]
     revenue = float(rev_doc[0]["total"]) if rev_doc else 0.0
-    items_count = await db.items.count_documents({})
-    repeat_customers = await db.customers.count_documents({"customer_type": "repeat"})
-    recent = await db.work_orders.find({}, {"_id": 0}).sort("created_at", -1).to_list(8)
     return {
         "open_wo": open_wo,
         "qc_pending": qc_pending,
