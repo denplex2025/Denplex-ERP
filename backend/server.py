@@ -11731,6 +11731,12 @@ async def _do_import_sqlite(path: Path, opts: VyaparImportIn, auto_seed_company:
         28: ("purchase_orders", "purchase_orders", "supplier", "Purchase Order"),
         30: ("delivery_challans", "delivery_challans", "customer", "Delivery Challan"),
         65: ("proforma_invoices", "proformas", "customer", "Proforma Invoice"),
+        # Vyapar writes some proforma invoices as type 83 rather than 65 — both appear under its
+        # Quotations screen. Identified 2026-11-04 from two transactions the importer was
+        # skipping (ref "101", Rs 64,900 and Rs 64,074); Neel confirmed both are proformas.
+        # Routed the same as 65. A proforma touches no ledger balance, so a wrong call here
+        # costs a stray document, not a wrong number.
+        83: ("proforma_invoices", "proformas", "customer", "Proforma Invoice"),
     }
     # TDS section/rate lookup (tds_tax_rates)
     tds_lookup: Dict[int, Dict[str, Any]] = {}
