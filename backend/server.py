@@ -3379,6 +3379,7 @@ class BankStatement(BaseModel):
     source: str = "csv"              # csv | xlsx | pdf | pdf-ai
     period_from: str = ""
     period_to: str = ""
+    opening_date: str = ""
     opening_balance: float = 0
     closing_balance: float = 0
     total_credit: float = 0
@@ -3399,6 +3400,7 @@ class BankTxn(BaseModel):
     date: str = ""                   # ISO yyyy-mm-dd
     description: str = ""
     ref: str = ""
+    counterparty: str = ""
     debit: float = 0
     credit: float = 0
     balance: Optional[float] = None
@@ -3422,6 +3424,7 @@ class BankStatementCommitIn(BaseModel):
     account_id: str
     file_name: str = ""
     source: str = "csv"
+    opening_date: str = ""
     opening_balance: float = 0
     closing_balance: float = 0
     rows: List[Dict[str, Any]] = Field(default_factory=list)
@@ -3451,14 +3454,27 @@ def _bank_num(v) -> float:
 
 
 def _bank_date(v) -> str:
-    """Normalise a statement date to ISO. Indian statements are day-first; '' if unreadable."""
+    """Normalise a statement date to ISO. Indian statements are day-first; '' if unreadable.
+
+    Real-world shapes this has to survive, all seen in one IndusInd export:
+      "03 Nov 2026"          spaces, not separators — splitting on " " used to yield "03"
+      "'03-NOV-26 13:35:40"  Excel's leading apostrophe, uppercase month, trailing time
+      "01/06/2026"           the ordinary day-first case
+    """
     if v is None:
         return ""
-    s = str(v).strip()
-    if not s or s.lower() in {"nan", "none"}:
+    s = str(v).strip().lstrip("'’\"").strip()
+    if not s or s.lower() in {"nan", "none", "nat"}:
         return ""
-    s = s.split(" ")[0].replace(".", "-").replace("/", "-")
-    for fmt in ("%d-%m-%Y", "%d-%m-%y", "%Y-%m-%d", "%d-%b-%Y", "%d-%b-%y", "%b-%d-%Y"):
+    # Drop a trailing clock time ("03-NOV-26 13:35:40" / "2026-11-03T13:35")
+    m = re.match(r"^(.*?)[ T]\d{1,2}:\d{2}", s)
+    if m:
+        s = m.group(1).strip()
+    s = s.replace(".", "-").replace("/", "-").replace(" ", "-")
+    # "NOV" -> "Nov" so %b matches regardless of the bank's capitalisation
+    s = re.sub(r"[A-Za-z]+", lambda x: x.group(0).title(), s)
+    for fmt in ("%d-%m-%Y", "%d-%m-%y", "%Y-%m-%d", "%d-%b-%Y", "%d-%b-%y",
+                "%b-%d-%Y", "%d-%B-%Y", "%Y-%b-%d"):
         try:
             return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
         except Exception:
@@ -3467,18 +3483,31 @@ def _bank_date(v) -> str:
 
 
 _BANK_COLS = {
-    "date": {"date", "txndate", "transactiondate", "valuedate", "postingdate", "trandate", "dateofTxn".lower()},
+    "date": {"date", "txndate", "transactiondate", "valuedate", "postingdate", "trandate"},
     "description": {"description", "narration", "particulars", "remarks", "transactiondetails",
-                    "details", "transactionremarks", "transactiondescription"},
+                    "details", "transactionremarks", "transactiondescription", "paymentnarration"},
     "ref": {"ref", "refno", "referenceno", "chequeno", "chqrefno", "chqno", "chequerefno",
-            "utrno", "transactionid", "refchequeno"},
-    "debit": {"debit", "withdrawal", "withdrawalamt", "withdrawals", "dr", "debitamount",
+            "utrno", "transactionid", "refchequeno", "bankreference"},
+    "debit": {"debit", "withdrawal", "withdrawalamt", "withdrawals", "debitamount",
               "withdrawalamount", "withdrawaldr", "paymentsdebit"},
-    "credit": {"credit", "deposit", "depositamt", "deposits", "cr", "creditamount",
+    "credit": {"credit", "deposit", "depositamt", "deposits", "creditamount",
                "depositamount", "depositcr", "receiptscredit"},
-    "balance": {"balance", "closingbalance", "runningbalance", "balanceamt", "balanceinr"},
-    "amount": {"amount", "txnamount", "transactionamount", "amountinr"},
+    "balance": {"balance", "closingbalance", "runningbalance", "balanceamt", "availablebalance"},
+    "amount": {"amount", "txnamount", "transactionamount"},
     "drcr": {"type", "drcr", "crdr", "transactiontype", "indicator", "debitcredit"},
+}
+
+# Headers that must NEVER be taken for a field, however well they otherwise match. Without this,
+# IndusInd's "Debit_Account" (which holds the account NUMBER) wins the debit slot over the real
+# "Debit" column, and "FromDate"/"Todate" (the statement period, identical on every row) win the
+# date slot over the actual transaction date.
+_BANK_COL_REJECT = {
+    "date": ("fromdate", "todate", "from", "to", "printdate", "statementdate", "duedate"),
+    "debit": ("account", "acct", "accountno", "ac"),
+    "credit": ("account", "acct", "accountno", "ac"),
+    "balance": ("account", "acct"),
+    "amount": ("account", "acct"),
+    "ref": ("account", "acct"),
 }
 
 
@@ -3487,22 +3516,43 @@ def _bank_norm_header(h) -> str:
 
 
 def _bank_detect_columns(headers: List[Any]) -> Dict[str, Any]:
-    """Map a statement's own column names onto our field names. Unmatched fields are absent."""
-    found: Dict[str, Any] = {}
+    """Map a statement's own column names onto our field names.
+
+    Scored rather than first-match: a header is compared against every field and the best
+    (field, column) pairs win. Exact beats contained beats prefix, and a longer matched name
+    beats a shorter one — so "Payment_Narration" maps to description via "narration", while
+    "Debit_Account" is rejected outright for debit because it names an account, not an amount.
+    """
+    cands = []       # (score, field, idx)
     for idx, h in enumerate(headers):
         n = _bank_norm_header(h)
         if not n:
             continue
         for field, names in _BANK_COLS.items():
-            if field in found:
+            if any(bad in n for bad in _BANK_COL_REJECT.get(field, ())):
                 continue
-            if n in names or any(n.startswith(x) for x in names if len(x) > 4):
-                found[field] = idx
-                break
+            best = 0
+            for name in names:
+                if n == name:
+                    best = max(best, 1000)
+                elif name in n and len(name) > 3:
+                    best = max(best, 500 + len(name))
+                elif n.startswith(name) and len(name) > 4:
+                    best = max(best, 200 + len(name))
+            if best:
+                cands.append((best, field, idx))
+    found: Dict[str, Any] = {}
+    used = set()
+    for score, field, idx in sorted(cands, key=lambda c: -c[0]):
+        if field in found or idx in used:
+            continue
+        found[field] = idx
+        used.add(idx)
     return found
 
 
-def _bank_rows_from_table(table: List[List[Any]], column_map: Optional[Dict[str, str]] = None):
+def _bank_rows_from_table(table: List[List[Any]], column_map: Optional[Dict[str, str]] = None,
+                          parties=None):
     """Turn a raw table (list of rows, first useful row = header) into normalised transactions.
 
     Banks put a preamble above the real header (account no, address, period), so the header row
@@ -3567,7 +3617,8 @@ def _bank_rows_from_table(table: List[List[Any]], column_map: Optional[Dict[str,
             "debit": round(debit, 2),
             "credit": round(credit, 2),
             "balance": _bank_num(bal) if str(bal).strip() else None,
-            "category": _bank_categorise(desc, debit, credit),
+            "counterparty": _bank_counterparty(desc),
+            "category": _bank_categorise(desc, debit, credit, parties),
         })
     headers = [str(x or "") for x in table[header_idx]]
     return out, {"header_row": header_idx, "columns": {k: headers[v] if v < len(headers) else ""
@@ -3575,31 +3626,117 @@ def _bank_rows_from_table(table: List[List[Any]], column_map: Optional[Dict[str,
                  "available_columns": headers}, ""
 
 
-def _bank_categorise(desc: str, debit: float, credit: float) -> str:
-    """Keyword categorisation. Unmatched -> 'Unclear'; never a guess to fill the table."""
+# Reference tokens inside a narration: UTR numbers, IFSC codes, long digit strings. These are
+# never the payee, so they are skipped when hunting for the counterparty name.
+_BANK_REF_TOKEN = re.compile(r"^(?:[A-Z]{2,6}\d{6,}|\d{5,}|[A-Z]{4}0[A-Z0-9]{6}|[A-Z]{2,4}\d{2,}[A-Z]*)$", re.I)
+
+
+def _bank_counterparty(desc: str) -> str:
+    """Pull the other party's name out of a bank narration.
+
+    Indian bank exports are slash-delimited codes, not prose:
+        N/inv27/NYALKARAN INDU/INDBH03112846841/
+        UPI/667242904542/DR/DSP /KKBK/673365212kotak/DSP WORKS
+        N/IN42630258641973/ICIC0SF0002/HIGHLY ELECTRICAL A/PPLIANCES INDIA PVT LTD/...
+    The name is in there; the surrounding fields are UTRs, IFSCs and invoice refs. Banks also
+    truncate a long name at a fixed width and spill the rest into the next field, which is why
+    adjacent all-caps fragments are rejoined.
+    """
+    s = (desc or "").strip()
+    if not s:
+        return ""
+    parts = [p.strip() for p in s.split("/") if p.strip()]
+    if len(parts) < 2:
+        return ""
+    idx, cands = [], []
+    for i, p in enumerate(parts[1:], start=1):
+        if _BANK_REF_TOKEN.match(p.replace(" ", "")):
+            continue
+        letters = sum(ch.isalpha() for ch in p)
+        if letters < 3 or letters / max(len(p), 1) < 0.5:
+            continue
+        idx.append(i); cands.append(p)
+    if not cands:
+        return ""
+    best_i = max(range(len(cands)), key=lambda k: sum(ch.isalpha() for ch in cands[k]))
+    name = cands[best_i]
+    # Rejoin a name the bank chopped across two consecutive fields.
+    if best_i > 0 and idx[best_i] == idx[best_i - 1] + 1:
+        prev = cands[best_i - 1]
+        if len(prev) >= 15 and prev.upper() == prev and name.upper() == name:
+            name = prev + name
+    return re.sub(r"\s+", " ", name).strip()[:60]
+
+
+_BANK_NAME_NOISE = re.compile(r"\b(PVT|PRIVATE|LTD|LIMITED|LLP|INC|CO|COMPANY|AND|THE)\b", re.I)
+
+
+def _bank_name_key(n: str) -> str:
+    """Normalise a party name for matching — banks truncate and punctuate inconsistently."""
+    n = _BANK_NAME_NOISE.sub(" ", (n or "").upper())
+    return re.sub(r"[^A-Z0-9]", "", n)
+
+
+def _bank_match_party(name: str, keys) -> bool:
+    """True if this narration name matches a known party. Either may be the truncated one."""
+    k = _bank_name_key(name)
+    if len(k) < 5:
+        return False
+    for pk in keys:
+        if len(pk) < 5:
+            continue
+        if k == pk or k.startswith(pk) or pk.startswith(k):
+            return True
+    return False
+
+
+def _bank_categorise(desc: str, debit: float, credit: float, parties=None) -> str:
+    """Categorise one row. Unmatched -> 'Unclear'; never a guess to fill the table.
+
+    `parties` is {"suppliers": set_of_keys, "customers": set_of_keys} from the ERP's own masters.
+    Matching the payee against people you actually trade with beats any keyword list: IndusInd
+    writes "N/inv27/NYALKARAN INDU/..." with no word a keyword list could catch, but the name is
+    right there and it is in the supplier master.
+    """
     d = (desc or "").lower()
     if not d:
         return "Unclear"
+    parties = parties or {}
+    who = _bank_counterparty(desc)
+
+    # Self transfers first — these are not spending at all and would otherwise look like a vendor.
+    if any(k in d for k in ("internalbanktran", "trf to", "self", "own account")):
+        return "Transfers (self)"
+
     for kw, cat in _BANK_KEYWORDS_SORTED:
         if kw in d:
             # A credit that matched an expense keyword is a refund/reversal, not that expense.
             if credit > 0 and cat not in ("Revenue/Income", "Transfers (self)"):
                 return "Unclear"
             return cat
+
+    if who:
+        if credit > 0 and _bank_match_party(who, parties.get("customers") or ()):
+            return "Revenue/Income"
+        if debit > 0 and _bank_match_party(who, parties.get("suppliers") or ()):
+            return "Vendor & Supplier Payments"
+
+    # "N/" is how NEFT appears in IndusInd exports — the literal word "neft" never shows up.
+    neft_like = d.startswith("n/") or any(k in d for k in ("neft", "rtgs", "ecs", "ach"))
     if credit > 0:
-        if any(k in d for k in ("neft", "rtgs", "imps", "upi", "chq", "cheque", "clg", "inward")):
+        if neft_like or any(k in d for k in ("imps", "upi", "chq", "cheque", "clg", "inward", "deposit")):
             return "Revenue/Income"
         return "Unclear"
-    # NEFT/RTGS/IMPS out of a business account are the B2B rails, so vendor is a fair default.
-    # UPI deliberately is NOT: UPI-OUT mixes suppliers with school fees and jewellers, and calling
-    # all of it "vendor payments" would bury exactly the personal spending this report exists to
+    # NEFT/RTGS out of a business account are the B2B rails, so vendor is a fair default.
+    # UPI and IMPS deliberately are NOT: they mix suppliers with school fees and jewellers, and
+    # calling all of it "vendor payments" buries the personal spending this report exists to
     # surface. Unmatched UPI stays Unclear for a human to label.
-    if any(k in d for k in ("neft", "rtgs", "imps", "ecs", "ach")):
+    if neft_like:
         return "Vendor & Supplier Payments"
     return "Unclear"
 
 
-def _bank_parse_bytes(blob: bytes, name: str, mime: str, column_map=None):
+def _bank_parse_bytes(blob: bytes, name: str, mime: str, column_map=None, parties=None):
     """Parse CSV/XLSX/PDF bytes into rows. Returns (rows, meta, error). Runs off the event loop."""
     lname = (name or "").lower()
     is_excel = lname.endswith((".xlsx", ".xls", ".xlsm")) or "excel" in mime or "spreadsheet" in mime
@@ -3614,7 +3751,7 @@ def _bank_parse_bytes(blob: bytes, name: str, mime: str, column_map=None):
         except Exception as e:
             return [], {}, f"Could not read the Excel file: {e}"
         table = df.where(df.notna(), "").values.tolist()
-        rows, meta, err = _bank_rows_from_table(table, column_map)
+        rows, meta, err = _bank_rows_from_table(table, column_map, parties)
         meta["source"] = "xlsx"
         return rows, meta, err
     if is_pdf:
@@ -3631,7 +3768,7 @@ def _bank_parse_bytes(blob: bytes, name: str, mime: str, column_map=None):
         except Exception as e:
             return [], {}, f"Could not read the PDF: {e}"
         if len(table) >= 3:
-            rows, meta, err = _bank_rows_from_table(table, column_map)
+            rows, meta, err = _bank_rows_from_table(table, column_map, parties)
             if rows:
                 meta["source"] = "pdf"
                 return rows, meta, err
@@ -3651,7 +3788,7 @@ def _bank_parse_bytes(blob: bytes, name: str, mime: str, column_map=None):
     except Exception:
         reader = csv.reader(io.StringIO(text))
     table = [r for r in reader]
-    rows, meta, err = _bank_rows_from_table(table, column_map)
+    rows, meta, err = _bank_rows_from_table(table, column_map, parties)
     meta["source"] = "csv"
     return rows, meta, err
 
@@ -3707,6 +3844,7 @@ async def _bank_parse_pdf_ai(blob: bytes):
         rows.append({"date": d, "description": desc, "ref": str(r0.get("ref") or "").strip(),
                      "debit": round(debit, 2), "credit": round(credit, 2),
                      "balance": _bank_num(bal) if bal not in (None, "") else None,
+                     "counterparty": _bank_counterparty(desc),
                      "category": _bank_categorise(desc, debit, credit)})
     return rows, {"source": "pdf-ai", "ai_opening": data.get("opening_balance"),
                   "ai_closing": data.get("closing_balance")}
@@ -3740,8 +3878,18 @@ async def parse_bank_statement(body: BankStatementParseIn,
         blob = base64.b64decode(raw)
     except Exception:
         raise HTTPException(400, "The uploaded file could not be decoded.")
+    # The ERP already knows who you trade with — far better than any keyword list at telling a
+    # supplier payment from a personal one, especially with narrations like "N/inv27/NYALKARAN
+    # INDU/..." where no keyword could ever match.
+    sup = await db.suppliers.find({}, {"_id": 0, "name": 1}).to_list(5000)
+    cus = await db.customers.find({}, {"_id": 0, "name": 1}).to_list(5000)
+    parties = {
+        "suppliers": {k for k in (_bank_name_key(x.get("name", "")) for x in sup) if k},
+        "customers": {k for k in (_bank_name_key(x.get("name", "")) for x in cus) if k},
+    }
     rows, meta, err = await asyncio.to_thread(
-        _bank_parse_bytes, blob, body.file_name or "", (body.mime or "").lower(), body.column_map)
+        _bank_parse_bytes, blob, body.file_name or "", (body.mime or "").lower(),
+        body.column_map, parties)
     if err == "NO_TABLE":
         rows, meta = await _bank_parse_pdf_ai(blob)
         err = ""
@@ -3750,6 +3898,10 @@ async def parse_bank_statement(body: BankStatementParseIn,
     if not rows:
         raise HTTPException(400, "No transactions were found in that file. If it is a PDF, try the "
                                  "CSV or Excel export from your net banking instead.")
+    # Many banks export newest-first. A stable sort alone would keep same-day rows in reverse
+    # order, so the earliest row (used to derive the opening balance) could be the wrong one.
+    if rows[0]["date"] > rows[-1]["date"]:
+        rows.reverse()
     rows.sort(key=lambda r: r["date"])
     opening = body.opening_balance
     closing = body.closing_balance
@@ -3762,9 +3914,27 @@ async def parse_bank_statement(body: BankStatementParseIn,
         opening = _bank_num(meta["ai_opening"])
     if closing is None and meta.get("ai_closing") is not None:
         closing = _bank_num(meta["ai_closing"])
+    # Chain from the previous statement so successive uploads line up: its closing balance IS
+    # this one's opening. Only offered when the periods actually abut — a gap means transactions
+    # are missing in between and silently carrying the balance over would hide that.
+    prev = None
+    if body.account_id:
+        prev = await db.bank_statements.find_one(
+            {"account_id": body.account_id, "period_to": {"$lte": rows[0]["date"]}},
+            {"_id": 0, "id": 1, "period_to": 1, "closing_balance": 1, "file_name": 1},
+            sort=[("period_to", -1)])
+    suggested = None
+    if prev:
+        suggested = {"balance": prev.get("closing_balance"), "as_of": prev.get("period_to"),
+                     "from_file": prev.get("file_name") or "", "statement_id": prev.get("id")}
+        if opening is None:
+            opening = prev.get("closing_balance")
+    opening_date = body.opening_date or (prev.get("period_to") if prev else "")
     ok, tc, td, note = _bank_reconcile(rows, opening, closing)
     return {
         "rows": rows,
+        "opening_date": opening_date,
+        "suggested_opening": suggested,
         "meta": meta,
         "period_from": rows[0]["date"],
         "period_to": rows[-1]["date"],
@@ -3795,7 +3965,8 @@ async def create_bank_statement(body: BankStatementCommitIn,
         account_id=body.account_id, account_name=acct.get("name", ""),
         file_name=body.file_name, source=body.source,
         period_from=str(rows[0].get("date") or ""), period_to=str(rows[-1].get("date") or ""),
-        opening_balance=body.opening_balance, closing_balance=body.closing_balance,
+        opening_date=body.opening_date, opening_balance=body.opening_balance,
+        closing_balance=body.closing_balance,
         total_credit=tc, total_debit=td, row_count=len(rows),
         unclear_count=sum(1 for r in rows if (r.get("category") or "Unclear") == "Unclear"),
         reconciled=ok, reconcile_note=note,
@@ -3806,7 +3977,8 @@ async def create_bank_statement(body: BankStatementCommitIn,
         docs.append(BankTxn(
             statement_id=stmt["id"], account_id=body.account_id,
             date=str(r.get("date") or ""), description=str(r.get("description") or ""),
-            ref=str(r.get("ref") or ""), debit=round(float(r.get("debit") or 0), 2),
+            ref=str(r.get("ref") or ""), counterparty=str(r.get("counterparty") or ""),
+            debit=round(float(r.get("debit") or 0), 2),
             credit=round(float(r.get("credit") or 0), 2),
             balance=r.get("balance"),
             category=(r.get("category") if r.get("category") in BANK_TXN_CATEGORIES else "Unclear"),
