@@ -19,6 +19,7 @@ export default function BankCash() {
   const [stmts, setStmts] = useState([]);
   const [upload, setUpload] = useState(false);
   const [stmtId, setStmtId] = useState(null);
+  const [reconId, setReconId] = useState(null);
 
   const load = async () => {
     setLoading(true);
@@ -53,6 +54,7 @@ export default function BankCash() {
 
   if (ledger) return <Ledger data={ledger} onBack={() => setLedger(null)} />;
   if (stmtId) return <StatementReport id={stmtId} onBack={() => { setStmtId(null); load(); }} />;
+  if (reconId) return <ReconcileView id={reconId} onBack={() => { setReconId(null); load(); }} />;
 
   return (
     <div className="pb-10">
@@ -128,8 +130,9 @@ export default function BankCash() {
         <>
           <div className="flex items-center justify-between mb-3">
             <div className="text-sm text-slate-500">
-              Upload a bank statement to see where the money actually went. Nothing here touches your
-              ledger — no payments or expenses are created.
+              Upload a bank statement to see where the money actually went, then reconcile it against
+              what is already in the ERP. Reconciling only links rows to existing entries — it never
+              creates a payment or an expense.
             </div>
             <Button onClick={() => setUpload(true)} className="rounded-sm bg-red-600 hover:bg-red-700 shrink-0 ml-4">
               <Upload className="h-4 w-4 mr-1" /> Upload Statement
@@ -163,6 +166,7 @@ export default function BankCash() {
                     </td>
                     <td className="p-2 text-right whitespace-nowrap">
                       <button onClick={() => setStmtId(s.id)} className="text-xs text-red-600 hover:underline">Report →</button>
+                      <button onClick={() => setReconId(s.id)} className="ml-3 text-xs text-slate-600 hover:underline">Reconcile →</button>
                       <button onClick={async () => {
                         if (!window.confirm(`Delete this statement and its ${s.row_count} rows?`)) return;
                         try { await api.delete(`/bank-statements/${s.id}`); setStmts(x => x.filter(y => y.id !== s.id)); toast.success("Deleted"); }
@@ -411,6 +415,196 @@ function UploadStatementModal({ accts, onClose, onSaved }) {
           </Button>}
         </div>
       </div>
+    </div>
+  );
+}
+
+// Reconciliation: link each bank row to an entry that already exists in the ERP.
+// Nothing here creates a ledger entry — approving only records that this bank row and that
+// payment are the same event. That is why every action on this screen is reversible.
+const STATUS_LABEL = {
+  suggested: ["Suggested", "bg-blue-50 text-blue-700"],
+  approved: ["Approved", "bg-emerald-50 text-emerald-700"],
+  suspense: ["Suspense", "bg-amber-50 text-amber-700"],
+  unmatched: ["Not checked", "bg-slate-100 text-slate-500"],
+  ignored: ["Ignored", "bg-slate-100 text-slate-400"],
+};
+
+function ReconcileView({ id, onBack }) {
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState("");
+  const [filter, setFilter] = useState("suggested");
+  const [busy, setBusy] = useState(false);
+  const [picking, setPicking] = useState(null);     // { txn, candidates }
+
+  const load = async () => {
+    try { const r = await api.get(`/bank-statements/${id}/reconcile`); setData(r.data); }
+    catch (e) { setErr(e?.response?.data?.detail || "Could not load the reconciliation"); }
+  };
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [id]);
+
+  const runMatch = async () => {
+    setBusy(true);
+    try {
+      const r = await api.post(`/bank-statements/${id}/match`);
+      const c = r.data.counts || {};
+      toast.success(`${c.suggested || 0} suggested · ${c.suspense || 0} to classify`);
+      await load();
+    } catch (e) { toast.error(e?.response?.data?.detail || "Matching failed"); }
+    setBusy(false);
+  };
+
+  const approve = async (t, cand) => {
+    setBusy(true);
+    try {
+      const r = await api.post(`/bank-statements/${id}/transactions/${t.id}/approve`,
+        cand ? { match_type: cand.match_type, match_id: cand.match_id, party_id: cand.party_id,
+                 party_name: cand.party_name, save_rule: true } : { save_rule: true });
+      toast.success(r.data.rule_saved ? "Linked — and remembered for next month" : "Linked");
+      setPicking(null);
+      await load();
+    } catch (e) { toast.error(e?.response?.data?.detail || "Could not approve"); }
+    setBusy(false);
+  };
+
+  const act = async (t, what) => {
+    setBusy(true);
+    try { await api.post(`/bank-statements/${id}/transactions/${t.id}/${what}`); await load(); }
+    catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
+    setBusy(false);
+  };
+
+  const openPicker = async (t) => {
+    try {
+      const r = await api.get(`/bank-statements/${id}/transactions/${t.id}/candidates`);
+      setPicking({ txn: t, candidates: r.data.candidates || [] });
+    } catch (e) { toast.error("Could not load alternatives"); }
+  };
+
+  if (err) return <div className="pb-10"><button onClick={onBack} className="flex items-center gap-1 text-sm text-slate-500 hover:text-slate-800 mb-3"><ChevronLeft className="h-4 w-4" /> Back</button><div className="text-sm text-red-600">{err}</div></div>;
+  if (!data) return <div className="p-4 text-slate-400 text-sm">Loading…</div>;
+
+  const s = data.statement || {};
+  const counts = data.counts || {};
+  const rows = (data.transactions || []).filter(t => filter === "all" || (t.status || "unmatched") === filter);
+  const TABS = [["suggested", "Suggested"], ["suspense", "Suspense"], ["approved", "Approved"],
+                ["unmatched", "Not checked"], ["ignored", "Ignored"], ["all", "All"]];
+
+  return (
+    <div className="pb-10">
+      <button onClick={onBack} className="flex items-center gap-1 text-sm text-slate-500 hover:text-slate-800 mb-3"><ChevronLeft className="h-4 w-4" /> Back to statements</button>
+      <div className="flex items-start justify-between gap-4 mb-1">
+        <div>
+          <h1 className="text-xl font-bold font-display">{s.account_name} — Reconcile</h1>
+          <div className="text-sm text-slate-500">{s.period_from} → {s.period_to} · {s.row_count} rows</div>
+        </div>
+        <Button onClick={runMatch} disabled={busy} className="rounded-sm bg-red-600 hover:bg-red-700 shrink-0">
+          {busy ? "Matching…" : "Match against ERP"}
+        </Button>
+      </div>
+      <p className="text-[11px] text-slate-400 mb-4">
+        Matching proposes a link to an entry you already have — amount exact to the paisa, same
+        direction, within {data.window_days} days. Approving records that the two are the same event;
+        it does not create anything, and it can be undone.
+      </p>
+
+      <div className="flex gap-1 border-b border-slate-200 mb-3 flex-wrap">
+        {TABS.map(([k, l]) => (
+          <button key={k} onClick={() => setFilter(k)}
+                  className={`px-3 py-2 text-sm font-medium -mb-px border-b-2 ${filter === k ? "border-red-600 text-red-600" : "border-transparent text-slate-500 hover:text-slate-700"}`}>
+            {l}{k !== "all" && counts[k] ? ` (${counts[k]})` : ""}
+          </button>
+        ))}
+      </div>
+
+      <div className="overflow-x-auto border border-slate-200 rounded-md">
+        <table className="w-full text-sm">
+          <thead><tr className="bg-slate-100 text-left text-[11px] uppercase tracking-wider text-slate-500">
+            <th className="p-2">Date</th><th className="p-2">Party</th><th className="p-2 text-right">Amount</th>
+            <th className="p-2">Status</th><th className="p-2">Proposed link</th><th className="p-2"></th>
+          </tr></thead>
+          <tbody>
+            {rows.length === 0 && <tr><td colSpan={6} className="p-6 text-center text-slate-400">Nothing in this group.</td></tr>}
+            {rows.map(t => {
+              const [label, cls] = STATUS_LABEL[t.status || "unmatched"] || STATUS_LABEL.unmatched;
+              return (
+                <tr key={t.id} className="border-t border-slate-100 align-top">
+                  <td className="p-2 text-slate-500 whitespace-nowrap">{t.date}</td>
+                  <td className="p-2">
+                    <div className="font-medium">{t.counterparty || "—"}</div>
+                    <div className="text-[11px] text-slate-400 truncate max-w-[260px]" title={t.description}>{t.description}</div>
+                  </td>
+                  <td className={`p-2 text-right font-mono-tech whitespace-nowrap ${t.debit ? "text-red-700" : "text-emerald-700"}`}>
+                    {inr(t.debit || t.credit)}
+                  </td>
+                  <td className="p-2"><span className={`text-[10px] px-1.5 py-0.5 rounded-full ${cls}`}>{label}</span></td>
+                  <td className="p-2">
+                    {t.match_id ? (
+                      <>
+                        <div className="text-[12px]">
+                          <span className="uppercase text-[10px] text-slate-400 mr-1">{(t.match_type || "").replace("_", " ")}</span>
+                          <strong>{t.match_code || t.match_id.slice(0, 8)}</strong>
+                          {t.party_name ? ` · ${t.party_name}` : ""}
+                        </div>
+                        <div className="text-[11px] text-slate-400">
+                          {t.match_confidence ? `${t.match_confidence}% — ` : ""}{t.match_reason}
+                        </div>
+                      </>
+                    ) : <span className="text-[11px] text-slate-400">no entry found in the ERP</span>}
+                  </td>
+                  <td className="p-2 text-right whitespace-nowrap">
+                    {t.status === "approved" ? (
+                      <button disabled={busy} onClick={() => act(t, "unlink")} className="text-xs text-slate-500 hover:underline">Unlink</button>
+                    ) : (
+                      <>
+                        {t.match_id && <button disabled={busy} onClick={() => approve(t)} className="text-xs text-emerald-700 font-medium hover:underline">Approve</button>}
+                        <button disabled={busy} onClick={() => openPicker(t)} className="ml-3 text-xs text-slate-600 hover:underline">Choose…</button>
+                        <button disabled={busy} onClick={() => act(t, "ignore")} className="ml-3 text-xs text-slate-400 hover:underline">Ignore</button>
+                      </>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {picking && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onMouseDown={() => setPicking(null)}>
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-2xl" onMouseDown={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200">
+              <h3 className="font-semibold">Which entry is this?</h3>
+              <button onClick={() => setPicking(null)} className="text-slate-400 hover:text-slate-700"><X className="h-4 w-4" /></button>
+            </div>
+            <div className="p-4">
+              <div className="text-sm mb-3">
+                <strong>{picking.txn.counterparty || "—"}</strong> · {picking.txn.date} ·{" "}
+                <span className="font-mono-tech">{inr(picking.txn.debit || picking.txn.credit)}</span>
+                <div className="text-[11px] text-slate-400">{picking.txn.description}</div>
+              </div>
+              {picking.candidates.length === 0 && (
+                <div className="text-sm text-slate-500">
+                  No entry in the ERP matches this amount and direction within {data.window_days} days.
+                  Leave it in Suspense — creating the entry comes in the next stage.
+                </div>
+              )}
+              {picking.candidates.map(c => (
+                <button key={`${c.match_type}-${c.match_id}`} disabled={busy}
+                        onClick={() => approve(picking.txn, c)}
+                        className="w-full text-left border border-slate-200 rounded-md p-2 mb-2 hover:border-red-400 hover:bg-red-50/40">
+                  <div className="flex justify-between text-sm">
+                    <span><span className="uppercase text-[10px] text-slate-400 mr-1">{c.match_type.replace("_", " ")}</span>
+                      <strong>{c.match_code || c.match_id.slice(0, 8)}</strong>{c.party_name ? ` · ${c.party_name}` : ""}</span>
+                    <span className="font-mono-tech">{inr(c.amount)}</span>
+                  </div>
+                  <div className="text-[11px] text-slate-400">{c.confidence}% — {c.reason}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
