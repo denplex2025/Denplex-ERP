@@ -3405,6 +3405,42 @@ class BankTxn(BaseModel):
     credit: float = 0
     balance: Optional[float] = None
     category: str = "Unclear"
+    # --- reconciliation ---
+    # unmatched  : looked, found nothing yet
+    # suggested  : the engine proposes a link, waiting on a human
+    # approved   : a human confirmed it; the ERP record now carries bank_txn_id
+    # suspense   : no party and no entry — needs classifying before it can be posted
+    # ignored    : self transfers and the like, deliberately out of scope
+    status: Literal["unmatched", "suggested", "approved", "suspense", "ignored"] = "unmatched"
+    match_type: str = ""             # payment_in | payment_out | expense
+    match_id: str = ""
+    match_code: str = ""
+    match_confidence: int = 0        # 0-100, why it was proposed
+    match_reason: str = ""
+    party_id: str = ""
+    party_type: str = ""             # customer | supplier
+    party_name: str = ""
+    approved_by: str = ""
+    approved_at: str = ""
+
+
+class BankRule(BaseModel):
+    """A narration -> party link a human confirmed once, reused on later statements.
+
+    Only ever SUGGESTS. A rule pre-fills the proposal so a repeat supplier arrives already
+    matched, but the approval step is never skipped — a rule is a memory aid, not an authority.
+    """
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    key: str = ""                    # normalised counterparty name from the narration
+    sample_narration: str = ""
+    party_id: str = ""
+    party_type: str = ""
+    party_name: str = ""
+    category: str = ""
+    hits: int = 0
+    created_by: str = ""
+    created_at: str = Field(default_factory=now_iso)
 
 
 class BankStatementParseIn(BaseModel):
@@ -4153,10 +4189,275 @@ async def recategorise_bank_txn(sid: str, tid: str, body: dict,
 @api.delete("/bank-statements/{sid}")
 async def delete_bank_statement(sid: str,
                                 user=Depends(require_roles("admin", "manager", "accountant", "ca"))):
+    # Release any ERP records this statement had claimed, or they stay locked forever.
+    async for t in db.bank_txns.find({"statement_id": sid, "status": "approved"},
+                                     {"_id": 0, "match_type": 1, "match_id": 1}):
+        coll = _bank_match_coll(t.get("match_type"))
+        if coll is not None and t.get("match_id"):
+            await coll.update_one({"id": t["match_id"]}, {"$set": {"bank_txn_id": ""}})
     await db.bank_txns.delete_many({"statement_id": sid})
     res = await db.bank_statements.delete_one({"id": sid})
     if not res.deleted_count:
         raise HTTPException(404, "Statement not found")
+    return {"ok": True}
+
+
+# ---------------- Bank reconciliation ----------------
+# Stage 1: match each statement row to an entry that ALREADY exists in the ERP, and let a human
+# approve the link. Nothing new is written to the ledger here.
+#
+# The rule that matters: a bank row and an ERP payment are the SAME event, not two. Your books
+# already hold the payment you keyed in; the statement is the bank's account of it. So matching
+# always comes before creating, and a link is strictly one-to-one — approving stamps bank_txn_id
+# onto the ERP record, and any record already carrying one is refused. Without that lock two
+# bank rows can claim the same payment and the books silently double.
+#
+# Date tolerance exists because the bank's value date and the date somebody typed in rarely
+# agree to the day; amount never has a tolerance, because two different payments of the same
+# value days apart are exactly what a fuzzy amount match would merge by mistake.
+_BANK_MATCH_WINDOW_DAYS = 5
+
+
+def _bank_match_coll(kind: str):
+    """Which collection a match_type points at. None for anything unrecognised."""
+    return {"payment_in": db.payments_in,
+            "payment_out": db.payments_out,
+            "expense": db.expenses}.get(kind or "")
+
+
+def _bank_days_apart(a: str, b: str) -> Optional[int]:
+    try:
+        return abs((datetime.strptime(a, "%Y-%m-%d") - datetime.strptime(b, "%Y-%m-%d")).days)
+    except Exception:
+        return None
+
+
+async def _bank_candidates(txn: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Every ERP entry that could be this bank row, scored. Highest first.
+
+    Amount must be exact; direction must agree; the date must be within the window. Everything
+    else only moves the confidence, so a human can see WHY something is proposed.
+    """
+    debit = float(txn.get("debit") or 0)
+    credit = float(txn.get("credit") or 0)
+    amount = round(debit or credit, 2)
+    if amount <= 0:
+        return []
+    d0 = txn.get("date") or ""
+    try:
+        base = datetime.strptime(d0, "%Y-%m-%d")
+    except Exception:
+        return []
+    lo = (base - timedelta(days=_BANK_MATCH_WINDOW_DAYS)).strftime("%Y-%m-%d")
+    hi = (base + timedelta(days=_BANK_MATCH_WINDOW_DAYS)).strftime("%Y-%m-%d")
+    who_key = _bank_name_key(txn.get("counterparty") or "")
+
+    sources = []
+    if credit > 0:
+        sources.append(("payment_in", db.payments_in, "amount"))
+    if debit > 0:
+        sources.append(("payment_out", db.payments_out, "amount"))
+        # The live Expense model stores the vendor as free text with no party_id, so an expense
+        # can only ever be matched on name — it is scored lower on purpose and says so.
+        sources.append(("expense", db.expenses, "total"))
+
+    out = []
+    for kind, coll, amt_field in sources:
+        q = {"date": {"$gte": lo, "$lte": hi},
+             "$or": [{"bank_txn_id": {"$exists": False}}, {"bank_txn_id": ""}]}
+        try:
+            rows = await coll.find(q, {"_id": 0}).to_list(500)
+        except Exception:
+            rows = []
+        for r in rows:
+            val = round(float(r.get(amt_field) or r.get("amount") or 0), 2)
+            if val != amount:
+                continue
+            gap = _bank_days_apart(d0, r.get("date") or "")
+            if gap is None:
+                continue
+            score = 60 - min(gap, _BANK_MATCH_WINDOW_DAYS) * 5
+            why = [f"exact amount {amount}", f"{gap} day(s) apart"]
+            pname = r.get("party_name") or r.get("vendor") or ""
+            if who_key and pname and _bank_match_party(txn.get("counterparty") or "", {_bank_name_key(pname)}):
+                score += 30
+                why.append(f"party matches '{pname}'")
+            if r.get("ref_no") and txn.get("ref") and str(r["ref_no"]).strip() == str(txn["ref"]).strip():
+                score += 15
+                why.append("reference matches")
+            if kind == "expense":
+                score = min(score, 70)
+                why.append("expense: vendor is free text, so this is a weaker match")
+            out.append({
+                "match_type": kind, "match_id": r.get("id"), "match_code": r.get("code") or "",
+                "party_id": r.get("party_id") or "", "party_name": pname,
+                "date": r.get("date"), "amount": val,
+                "confidence": max(0, min(100, score)), "reason": "; ".join(why),
+            })
+    out.sort(key=lambda c: -c["confidence"])
+    return out[:5]
+
+
+@api.post("/bank-statements/{sid}/match")
+async def match_bank_statement(sid: str,
+                               user=Depends(require_roles("admin", "accountant"))):
+    """Propose a link for every unapproved row. Writes nothing to the ledger."""
+    stmt = await db.bank_statements.find_one({"id": sid}, {"_id": 0, "id": 1})
+    if not stmt:
+        raise HTTPException(404, "Statement not found")
+    txns = await db.bank_txns.find({"statement_id": sid}, {"_id": 0}).to_list(20000)
+    rules = {r["key"]: r for r in await db.bank_rules.find({}, {"_id": 0}).to_list(5000)}
+    counts = {"suggested": 0, "suspense": 0, "approved": 0, "ignored": 0}
+    for t in txns:
+        if t.get("status") == "approved":
+            counts["approved"] += 1
+            continue
+        if t.get("category") == "Transfers (self)":
+            await db.bank_txns.update_one({"id": t["id"]}, {"$set": {"status": "ignored"}})
+            counts["ignored"] += 1
+            continue
+        patch: Dict[str, Any] = {"match_type": "", "match_id": "", "match_code": "",
+                                 "match_confidence": 0, "match_reason": ""}
+        # A remembered rule fills in WHO before we look for the entry.
+        rule = rules.get(_bank_name_key(t.get("counterparty") or ""))
+        if rule:
+            patch.update({"party_id": rule.get("party_id", ""), "party_type": rule.get("party_type", ""),
+                          "party_name": rule.get("party_name", "")})
+        cands = await _bank_candidates(t)
+        if cands:
+            best = cands[0]
+            patch.update({"status": "suggested", "match_type": best["match_type"],
+                          "match_id": best["match_id"], "match_code": best["match_code"],
+                          "match_confidence": best["confidence"], "match_reason": best["reason"]})
+            if best.get("party_id") and not patch.get("party_id"):
+                patch["party_id"] = best["party_id"]
+            if best.get("party_name") and not patch.get("party_name"):
+                patch["party_name"] = best["party_name"]
+            counts["suggested"] += 1
+        else:
+            patch["status"] = "suspense"
+            counts["suspense"] += 1
+        await db.bank_txns.update_one({"id": t["id"]}, {"$set": patch})
+    return {"ok": True, "counts": counts, "total": len(txns)}
+
+
+@api.get("/bank-statements/{sid}/reconcile")
+async def reconcile_bank_statement(sid: str, user=Depends(get_current_user)):
+    """Rows plus their candidate matches, for the approval screen."""
+    stmt = await db.bank_statements.find_one({"id": sid}, {"_id": 0})
+    if not stmt:
+        raise HTTPException(404, "Statement not found")
+    txns = await db.bank_txns.find({"statement_id": sid}, {"_id": 0}).sort("date", 1).to_list(20000)
+    counts: Dict[str, int] = {}
+    for t in txns:
+        counts[t.get("status", "unmatched")] = counts.get(t.get("status", "unmatched"), 0) + 1
+    return {"statement": stmt, "transactions": txns, "counts": counts,
+            "window_days": _BANK_MATCH_WINDOW_DAYS}
+
+
+@api.get("/bank-statements/{sid}/transactions/{tid}/candidates")
+async def bank_txn_candidates(sid: str, tid: str, user=Depends(get_current_user)):
+    t = await db.bank_txns.find_one({"id": tid, "statement_id": sid}, {"_id": 0})
+    if not t:
+        raise HTTPException(404, "Transaction not found")
+    return {"transaction": t, "candidates": await _bank_candidates(t)}
+
+
+class BankApproveIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    match_type: str = ""             # payment_in | payment_out | expense
+    match_id: str = ""
+    party_id: str = ""
+    party_type: str = ""
+    party_name: str = ""
+    save_rule: bool = True
+
+
+@api.post("/bank-statements/{sid}/transactions/{tid}/approve")
+async def approve_bank_match(sid: str, tid: str, body: BankApproveIn,
+                             user=Depends(require_roles("admin", "accountant"))):
+    """Confirm a link. Stamps the ERP record so nothing else can claim the same payment."""
+    t = await db.bank_txns.find_one({"id": tid, "statement_id": sid}, {"_id": 0})
+    if not t:
+        raise HTTPException(404, "Transaction not found")
+    mtype = body.match_type or t.get("match_type") or ""
+    mid = body.match_id or t.get("match_id") or ""
+    coll = _bank_match_coll(mtype)
+    if coll is None or not mid:
+        raise HTTPException(400, "Pick which entry this row belongs to.")
+    rec = await coll.find_one({"id": mid}, {"_id": 0})
+    if not rec:
+        raise HTTPException(404, "That entry no longer exists.")
+    claimed = (rec.get("bank_txn_id") or "").strip()
+    if claimed and claimed != tid:
+        raise HTTPException(409, "That entry is already reconciled against another bank row. "
+                                 "Unlink it there first — one payment cannot answer two rows.")
+    await coll.update_one({"id": mid}, {"$set": {"bank_txn_id": tid, "reconciled_on": t.get("date", "")}})
+    pname = body.party_name or rec.get("party_name") or rec.get("vendor") or t.get("party_name") or ""
+    await db.bank_txns.update_one({"id": tid}, {"$set": {
+        "status": "approved", "match_type": mtype, "match_id": mid,
+        "match_code": rec.get("code") or "",
+        "party_id": body.party_id or rec.get("party_id") or "",
+        "party_type": body.party_type or ("customer" if mtype == "payment_in" else "supplier"),
+        "party_name": pname,
+        "approved_by": user.get("name") or user.get("email") or "", "approved_at": now_iso(),
+    }})
+    # Remember the narration -> party link so next month's statement arrives pre-matched.
+    saved_rule = False
+    key = _bank_name_key(t.get("counterparty") or "")
+    if body.save_rule and key and len(key) >= 5 and pname:
+        await db.bank_rules.update_one({"key": key}, {
+            "$set": {"party_id": body.party_id or rec.get("party_id") or "",
+                     "party_type": body.party_type or ("customer" if mtype == "payment_in" else "supplier"),
+                     "party_name": pname, "sample_narration": (t.get("description") or "")[:140],
+                     "category": t.get("category") or ""},
+            "$setOnInsert": {"id": new_id(), "key": key, "created_at": now_iso(),
+                             "created_by": user.get("name") or user.get("email") or ""},
+            "$inc": {"hits": 1},
+        }, upsert=True)
+        saved_rule = True
+    left = await db.bank_txns.count_documents({"statement_id": sid, "status": {"$in": ["suggested", "suspense", "unmatched"]}})
+    return {"ok": True, "rule_saved": saved_rule, "remaining": left}
+
+
+@api.post("/bank-statements/{sid}/transactions/{tid}/unlink")
+async def unlink_bank_match(sid: str, tid: str,
+                            user=Depends(require_roles("admin", "accountant"))):
+    """Undo an approval and release the ERP record. Links are reversible by design."""
+    t = await db.bank_txns.find_one({"id": tid, "statement_id": sid}, {"_id": 0})
+    if not t:
+        raise HTTPException(404, "Transaction not found")
+    coll = _bank_match_coll(t.get("match_type"))
+    if coll is not None and t.get("match_id"):
+        await coll.update_one({"id": t["match_id"]}, {"$set": {"bank_txn_id": ""}})
+    await db.bank_txns.update_one({"id": tid}, {"$set": {
+        "status": "unmatched", "match_type": "", "match_id": "", "match_code": "",
+        "match_confidence": 0, "match_reason": "", "approved_by": "", "approved_at": "",
+    }})
+    return {"ok": True}
+
+
+@api.post("/bank-statements/{sid}/transactions/{tid}/ignore")
+async def ignore_bank_txn(sid: str, tid: str,
+                          user=Depends(require_roles("admin", "accountant"))):
+    res = await db.bank_txns.update_one({"id": tid, "statement_id": sid},
+                                        {"$set": {"status": "ignored"}})
+    if not res.matched_count:
+        raise HTTPException(404, "Transaction not found")
+    return {"ok": True}
+
+
+@api.get("/bank-rules")
+async def list_bank_rules(user=Depends(get_current_user)):
+    return await list_collection(db.bank_rules, sort_key="hits")
+
+
+@api.delete("/bank-rules/{rid}")
+async def delete_bank_rule(rid: str,
+                           user=Depends(require_roles("admin", "accountant"))):
+    res = await db.bank_rules.delete_one({"id": rid})
+    if not res.deleted_count:
+        raise HTTPException(404, "Rule not found")
     return {"ok": True}
 
 # ---- Document Masters (Terms & Conditions, prefixes, payment terms, bank) ----
