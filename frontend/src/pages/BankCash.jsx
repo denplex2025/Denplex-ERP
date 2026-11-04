@@ -147,7 +147,9 @@ export default function BankCash() {
                 {stmts.map(s => (
                   <tr key={s.id} className="border-t border-slate-100 hover:bg-slate-50">
                     <td className="p-2 font-medium text-slate-800">{s.account_name || "—"}</td>
-                    <td className="p-2 text-slate-500">{s.period_from} → {s.period_to}</td>
+                    <td className="p-2 text-slate-500">{s.period_from} → {s.period_to}
+                      {s.opening_date && <span className="block text-[10px] text-slate-400">opening as on {s.opening_date}</span>}
+                    </td>
                     <td className="p-2 text-slate-500 truncate max-w-[180px]" title={s.file_name}>{s.file_name}</td>
                     <td className="p-2 text-right font-mono-tech text-emerald-700">{inr(s.total_credit)}</td>
                     <td className="p-2 text-right font-mono-tech text-red-700">{inr(s.total_debit)}</td>
@@ -236,6 +238,8 @@ function UploadStatementModal({ accts, onClose, onSaved }) {
   const [file, setFile] = useState(null);
   const [busy, setBusy] = useState(false);
   const [preview, setPreview] = useState(null);
+  const [openBal, setOpenBal] = useState("");
+  const [openDate, setOpenDate] = useState("");
 
   const pick = (f) => {
     if (!f) return;
@@ -255,8 +259,12 @@ function UploadStatementModal({ accts, onClose, onSaved }) {
       });
       const r = await api.post("/bank-statements/parse", {
         file_base64: b64, file_name: file.name, mime: file.type || "", account_id: acctId,
+        opening_balance: openBal === "" ? null : Number(openBal),
+        opening_date: openDate || "",
       });
       setPreview(r.data);
+      if (r.data.opening_balance != null && openBal === "") setOpenBal(String(r.data.opening_balance));
+      if (r.data.opening_date && !openDate) setOpenDate(r.data.opening_date);
       if (!r.data.reconciled) toast.warning("Parsed, but the totals do not tally — check before saving");
     } catch (e) {
       toast.error(e?.response?.data?.detail || "Could not read that statement");
@@ -269,7 +277,8 @@ function UploadStatementModal({ accts, onClose, onSaved }) {
     try {
       await api.post("/bank-statements", {
         account_id: acctId, file_name: file?.name || "", source: preview.meta?.source || "csv",
-        opening_balance: Number(preview.opening_balance || 0),
+        opening_date: openDate || preview.opening_date || "",
+        opening_balance: Number((openBal !== "" ? openBal : preview.opening_balance) || 0),
         closing_balance: Number(preview.closing_balance || 0),
         rows: preview.rows,
       });
@@ -302,7 +311,32 @@ function UploadStatementModal({ accts, onClose, onSaved }) {
                      className="w-full text-sm file:mr-2 file:px-2 file:py-1 file:text-xs file:rounded-sm file:border file:border-slate-200 file:bg-slate-50" />
             </Fld>
           </div>
+          <div className="grid grid-cols-2 gap-3">
+            <Fld label="Opening Balance (optional)">
+              <Input type="number" value={openBal} onChange={e => setOpenBal(e.target.value)}
+                     placeholder="auto from the statement" />
+            </Fld>
+            <Fld label="Opening Balance As On">
+              <Input type="date" value={openDate} onChange={e => setOpenDate(e.target.value)} />
+            </Fld>
+          </div>
+          {preview?.suggested_opening && (
+            <div className="text-[11px] text-slate-600 bg-slate-50 border border-slate-200 rounded-sm p-2">
+              Previous statement for this account closed at{" "}
+              <strong className="font-mono-tech">{inr(preview.suggested_opening.balance)}</strong>{" "}
+              on {preview.suggested_opening.as_of}
+              {preview.suggested_opening.from_file ? ` (${preview.suggested_opening.from_file})` : ""} —
+              use that as this one's opening so the two line up.
+              <button type="button" className="ml-2 text-red-600 hover:underline"
+                      onClick={() => { setOpenBal(String(preview.suggested_opening.balance ?? ""));
+                                       setOpenDate(preview.suggested_opening.as_of || ""); }}>
+                Use it
+              </button>
+            </div>
+          )}
           <p className="text-[11px] text-slate-400">
+            Leave the opening balance blank and it is derived from the statement's own running
+            balance. Set the date so the next upload can pick up exactly where this one ends.
             CSV and Excel are read exactly. A PDF is read from its table where it has one, and only
             falls back to AI when it does not — AI reading can misread a figure, so check the preview.
           </p>
@@ -348,14 +382,15 @@ function UploadStatementModal({ accts, onClose, onSaved }) {
               <div className="border border-slate-200 rounded-md overflow-auto max-h-64">
                 <table className="w-full text-sm">
                   <thead className="sticky top-0"><tr className="bg-slate-100 text-left text-[11px] uppercase tracking-wider text-slate-500">
-                    <th className="p-2">Date</th><th className="p-2">Description</th><th className="p-2">Category</th>
+                    <th className="p-2">Date</th><th className="p-2">Party</th><th className="p-2">Description</th><th className="p-2">Category</th>
                     <th className="p-2 text-right">Debit</th><th className="p-2 text-right">Credit</th>
                   </tr></thead>
                   <tbody>
                     {preview.rows.map((r, i) => (
                       <tr key={i} className="border-t border-slate-100">
                         <td className="p-2 text-slate-500 whitespace-nowrap">{r.date}</td>
-                        <td className="p-2 truncate max-w-[260px]" title={r.description}>{r.description}</td>
+                        <td className="p-2 font-medium truncate max-w-[160px]" title={r.counterparty}>{r.counterparty || "—"}</td>
+                        <td className="p-2 text-slate-500 truncate max-w-[220px]" title={r.description}>{r.description}</td>
                         <td className={`p-2 text-[11px] ${r.category === "Unclear" ? "text-amber-600" : "text-slate-500"}`}>{r.category}</td>
                         <td className="p-2 text-right font-mono-tech text-red-700">{r.debit ? inr(r.debit) : ""}</td>
                         <td className="p-2 text-right font-mono-tech text-emerald-700">{r.credit ? inr(r.credit) : ""}</td>
@@ -507,14 +542,15 @@ function StatementReport({ id, onBack }) {
       <div className="overflow-x-auto border border-slate-200 rounded-md">
         <table className="w-full text-sm">
           <thead><tr className="bg-slate-100 text-left text-[11px] uppercase tracking-wider text-slate-500">
-            <th className="p-2">Date</th><th className="p-2">Description</th><th className="p-2">Ref</th>
+            <th className="p-2">Date</th><th className="p-2">Party</th><th className="p-2">Description</th><th className="p-2">Ref</th>
             <th className="p-2">Category</th><th className="p-2 text-right">Debit</th><th className="p-2 text-right">Credit</th><th className="p-2 text-right">Balance</th>
           </tr></thead>
           <tbody>
             {txns.map(t => (
               <tr key={t.id} className={`border-t border-slate-100 ${t.category === "Unclear" ? "bg-amber-50/40" : ""}`}>
                 <td className="p-2 text-slate-500 whitespace-nowrap">{t.date}</td>
-                <td className="p-2">{t.description}</td>
+                <td className="p-2 font-medium">{t.counterparty || "—"}</td>
+                <td className="p-2 text-slate-500 text-[12px]">{t.description}</td>
                 <td className="p-2 text-slate-400 text-[11px]">{t.ref}</td>
                 <td className="p-2">
                   <select value={t.category} onChange={e => recat(t, e.target.value)}
