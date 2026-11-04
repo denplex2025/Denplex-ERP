@@ -371,6 +371,7 @@ MODULE_PATHS = [
     # accounts
     ("/api/accounting", "accounts"),
     ("/api/accounts", "accounts"),
+    ("/api/bank-statements", "accounts"),
     ("/api/costing", "accounts"),
     ("/api/cheques", "accounts"),
     ("/api/reports/pnl", "accounts"),
@@ -3298,6 +3299,692 @@ async def update_cheque_status(coll: str, pid: str, body: dict,
     if status not in ("Pending", "Cleared", "Bounced"):
         raise HTTPException(400, "Bad status")
     await db[coll].update_one({"id": pid}, {"$set": {"cheque_status": status}})
+    return {"ok": True}
+
+# ---------------- Bank statements ----------------
+# Upload a bank statement against a FinAccount, parse every line, and show where the money went.
+#
+# This deliberately does NOT touch the ledger. Nothing here creates a payment, an expense or a
+# journal entry — it is a read-only lens over what the bank says happened. A statement is an
+# outside document that can be mis-parsed; letting a mis-read row write into the books would be
+# the worst kind of bug to find later. Matching these rows against payments-in/out is a separate
+# feature and a separate decision.
+#
+# pandas / openpyxl / pdfplumber are imported lazily inside the parser rather than at module
+# scope: if one is ever missing from the image, this one endpoint returns a clear 503 instead of
+# the whole ERP failing to boot.
+
+BANK_TXN_CATEGORIES = [
+    "Revenue/Income", "Vendor & Supplier Payments", "Salaries & Staff", "Rent & Utilities",
+    "EMI & Loan Payments", "Bank Charges & Fees", "Subscriptions & Software", "Travel & Fuel",
+    "Food & Entertainment", "Taxes & Statutory", "Personal Withdrawals", "Cash Withdrawals",
+    "Transfers (self)", "Unclear",
+]
+
+# Keyword -> category, matched against the lowercased narration. Longest keyword wins, so
+# "credit card" beats "credit". Anything matching nothing stays "Unclear" ON PURPOSE: a money
+# report is worthless if a category was a guess, so unmatched rows are surfaced for a human to
+# label rather than quietly bucketed to make the pie chart look complete.
+BANK_CATEGORY_KEYWORDS = {
+    "salary": "Salaries & Staff", "payroll": "Salaries & Staff", "wages": "Salaries & Staff",
+    "pf ": "Salaries & Staff", "esic": "Salaries & Staff", "gratuity": "Salaries & Staff",
+    "rent": "Rent & Utilities", "electricity": "Rent & Utilities", "torrent power": "Rent & Utilities",
+    "gebnet": "Rent & Utilities", "water bill": "Rent & Utilities", "gas bill": "Rent & Utilities",
+    "broadband": "Rent & Utilities", "jio": "Rent & Utilities", "airtel": "Rent & Utilities",
+    "vodafone": "Rent & Utilities", "bsnl": "Rent & Utilities",
+    "emi": "EMI & Loan Payments", "loan": "EMI & Loan Payments", "lease": "EMI & Loan Payments",
+    "hdfc ltd": "EMI & Loan Payments", "bajaj fin": "EMI & Loan Payments",
+    "int.pd": "EMI & Loan Payments", "interest paid": "EMI & Loan Payments",
+    "chrg": "Bank Charges & Fees", "charge": "Bank Charges & Fees", "chgs": "Bank Charges & Fees",
+    "gst on": "Bank Charges & Fees", "sms alert": "Bank Charges & Fees", "amc": "Bank Charges & Fees",
+    "annual fee": "Bank Charges & Fees", "penalty": "Bank Charges & Fees",
+    "min bal": "Bank Charges & Fees", "neft chg": "Bank Charges & Fees",
+    "rtgs chg": "Bank Charges & Fees", "imps chg": "Bank Charges & Fees",
+    "aws": "Subscriptions & Software", "google": "Subscriptions & Software",
+    "microsoft": "Subscriptions & Software", "adobe": "Subscriptions & Software",
+    "zoho": "Subscriptions & Software", "tally": "Subscriptions & Software",
+    "razorpay": "Subscriptions & Software", "godaddy": "Subscriptions & Software",
+    "hostinger": "Subscriptions & Software", "railway": "Subscriptions & Software",
+    "vercel": "Subscriptions & Software", "openai": "Subscriptions & Software",
+    "anthropic": "Subscriptions & Software", "subscription": "Subscriptions & Software",
+    "petrol": "Travel & Fuel", "diesel": "Travel & Fuel", "fuel": "Travel & Fuel",
+    "hpcl": "Travel & Fuel", "iocl": "Travel & Fuel", "bpcl": "Travel & Fuel",
+    "indian oil": "Travel & Fuel", "uber": "Travel & Fuel", "ola": "Travel & Fuel",
+    "irctc": "Travel & Fuel", "makemytrip": "Travel & Fuel", "indigo": "Travel & Fuel",
+    "toll": "Travel & Fuel", "fastag": "Travel & Fuel",
+    "swiggy": "Food & Entertainment", "zomato": "Food & Entertainment",
+    "restaurant": "Food & Entertainment", "cafe": "Food & Entertainment",
+    "hotel": "Food & Entertainment", "netflix": "Food & Entertainment",
+    "spotify": "Food & Entertainment", "bookmyshow": "Food & Entertainment",
+    "gst payment": "Taxes & Statutory", "gstin": "Taxes & Statutory", "gst challan": "Taxes & Statutory",
+    "tds": "Taxes & Statutory", "advance tax": "Taxes & Statutory", "income tax": "Taxes & Statutory",
+    "challan": "Taxes & Statutory", "profession tax": "Taxes & Statutory",
+    "maintenance fee": "Bank Charges & Fees", "acct maintenance": "Bank Charges & Fees",
+    "folio": "Bank Charges & Fees", "service charge": "Bank Charges & Fees",
+    "personal": "Personal Withdrawals", "schoolfee": "Personal Withdrawals",
+    "school fee": "Personal Withdrawals", "tuition": "Personal Withdrawals",
+    "jewell": "Personal Withdrawals", "insurance prem": "Personal Withdrawals",
+    "atm": "Cash Withdrawals", "cash wdl": "Cash Withdrawals", "cash withdrawal": "Cash Withdrawals",
+    "self": "Transfers (self)", "own account": "Transfers (self)",
+}
+_BANK_KEYWORDS_SORTED = sorted(BANK_CATEGORY_KEYWORDS.items(), key=lambda kv: -len(kv[0]))
+
+
+class BankStatement(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    account_id: str = ""
+    account_name: str = ""
+    file_name: str = ""
+    source: str = "csv"              # csv | xlsx | pdf | pdf-ai
+    period_from: str = ""
+    period_to: str = ""
+    opening_balance: float = 0
+    closing_balance: float = 0
+    total_credit: float = 0
+    total_debit: float = 0
+    row_count: int = 0
+    unclear_count: int = 0
+    reconciled: bool = False
+    reconcile_note: str = ""
+    uploaded_by: str = ""
+    created_at: str = Field(default_factory=now_iso)
+
+
+class BankTxn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=new_id)
+    statement_id: str = ""
+    account_id: str = ""
+    date: str = ""                   # ISO yyyy-mm-dd
+    description: str = ""
+    ref: str = ""
+    debit: float = 0
+    credit: float = 0
+    balance: Optional[float] = None
+    category: str = "Unclear"
+
+
+class BankStatementParseIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    file_base64: str
+    file_name: str = ""
+    mime: str = ""
+    account_id: str = ""
+    # Optional manual override when auto-detection picks the wrong columns.
+    column_map: Optional[Dict[str, str]] = None
+    opening_balance: Optional[float] = None
+    closing_balance: Optional[float] = None
+
+
+class BankStatementCommitIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    account_id: str
+    file_name: str = ""
+    source: str = "csv"
+    opening_balance: float = 0
+    closing_balance: float = 0
+    rows: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+def _bank_num(v) -> float:
+    """Parse an amount out of a bank cell. Returns 0.0 for blanks and unparseable junk.
+
+    Handles the shapes Indian statements actually use: '1,23,456.78', '1234.56 Dr', '(500.00)'
+    for negatives, a bare '-' for empty, and stray currency symbols.
+    """
+    if v is None:
+        return 0.0
+    s = str(v).strip()
+    if not s or s in {"-", "--", "nan", "NaN", "None"}:
+        return 0.0
+    neg = s.startswith("(") and s.endswith(")")
+    s = re.sub(r"(?i)\b(dr|cr)\b", "", s)
+    s = re.sub(r"[^0-9.\-]", "", s)
+    if not s or s in {"-", "."}:
+        return 0.0
+    try:
+        n = float(s)
+    except Exception:
+        return 0.0
+    return -abs(n) if neg else n
+
+
+def _bank_date(v) -> str:
+    """Normalise a statement date to ISO. Indian statements are day-first; '' if unreadable."""
+    if v is None:
+        return ""
+    s = str(v).strip()
+    if not s or s.lower() in {"nan", "none"}:
+        return ""
+    s = s.split(" ")[0].replace(".", "-").replace("/", "-")
+    for fmt in ("%d-%m-%Y", "%d-%m-%y", "%Y-%m-%d", "%d-%b-%Y", "%d-%b-%y", "%b-%d-%Y"):
+        try:
+            return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
+        except Exception:
+            continue
+    return ""
+
+
+_BANK_COLS = {
+    "date": {"date", "txndate", "transactiondate", "valuedate", "postingdate", "trandate", "dateofTxn".lower()},
+    "description": {"description", "narration", "particulars", "remarks", "transactiondetails",
+                    "details", "transactionremarks", "transactiondescription"},
+    "ref": {"ref", "refno", "referenceno", "chequeno", "chqrefno", "chqno", "chequerefno",
+            "utrno", "transactionid", "refchequeno"},
+    "debit": {"debit", "withdrawal", "withdrawalamt", "withdrawals", "dr", "debitamount",
+              "withdrawalamount", "withdrawaldr", "paymentsdebit"},
+    "credit": {"credit", "deposit", "depositamt", "deposits", "cr", "creditamount",
+               "depositamount", "depositcr", "receiptscredit"},
+    "balance": {"balance", "closingbalance", "runningbalance", "balanceamt", "balanceinr"},
+    "amount": {"amount", "txnamount", "transactionamount", "amountinr"},
+    "drcr": {"type", "drcr", "crdr", "transactiontype", "indicator", "debitcredit"},
+}
+
+
+def _bank_norm_header(h) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(h or "").lower())
+
+
+def _bank_detect_columns(headers: List[Any]) -> Dict[str, Any]:
+    """Map a statement's own column names onto our field names. Unmatched fields are absent."""
+    found: Dict[str, Any] = {}
+    for idx, h in enumerate(headers):
+        n = _bank_norm_header(h)
+        if not n:
+            continue
+        for field, names in _BANK_COLS.items():
+            if field in found:
+                continue
+            if n in names or any(n.startswith(x) for x in names if len(x) > 4):
+                found[field] = idx
+                break
+    return found
+
+
+def _bank_rows_from_table(table: List[List[Any]], column_map: Optional[Dict[str, str]] = None):
+    """Turn a raw table (list of rows, first useful row = header) into normalised transactions.
+
+    Banks put a preamble above the real header (account no, address, period), so the header row
+    is found by scanning for the first row that yields both a date and a description column
+    rather than assuming row 0.
+    """
+    header_idx, cols = -1, {}
+    limit = min(len(table), 30)
+    for i in range(limit):
+        c = _bank_detect_columns(table[i])
+        if "date" in c and ("description" in c or "ref" in c) and (
+                "debit" in c or "credit" in c or "amount" in c):
+            header_idx, cols = i, c
+            break
+    if header_idx < 0:
+        return [], {}, "Could not find a header row with a date and an amount column."
+    if column_map:
+        hdr = table[header_idx]
+        for field, colname in column_map.items():
+            want = _bank_norm_header(colname)
+            for idx, h in enumerate(hdr):
+                if _bank_norm_header(h) == want:
+                    cols[field] = idx
+                    break
+
+    def cell(row, field):
+        i = cols.get(field)
+        if i is None or i >= len(row):
+            return ""
+        v = row[i]
+        return "" if v is None else v
+
+    out = []
+    for row in table[header_idx + 1:]:
+        if not any(str(x or "").strip() for x in row):
+            continue
+        d = _bank_date(cell(row, "date"))
+        if not d:
+            continue          # totals rows, repeated headers, page footers
+        debit = credit = 0.0
+        if "debit" in cols or "credit" in cols:
+            debit, credit = abs(_bank_num(cell(row, "debit"))), abs(_bank_num(cell(row, "credit")))
+        elif "amount" in cols:
+            amt = _bank_num(cell(row, "amount"))
+            ind = str(cell(row, "drcr") or "").strip().lower()
+            if ind.startswith("d") or ind in {"w", "withdrawal"}:
+                debit = abs(amt)
+            elif ind.startswith("c") or ind in {"d2", "deposit"}:
+                credit = abs(amt)
+            elif amt < 0:
+                debit = abs(amt)
+            else:
+                credit = abs(amt)
+        if debit == 0 and credit == 0:
+            continue
+        desc = str(cell(row, "description") or "").strip()
+        bal = cell(row, "balance")
+        out.append({
+            "date": d,
+            "description": desc,
+            "ref": str(cell(row, "ref") or "").strip(),
+            "debit": round(debit, 2),
+            "credit": round(credit, 2),
+            "balance": _bank_num(bal) if str(bal).strip() else None,
+            "category": _bank_categorise(desc, debit, credit),
+        })
+    headers = [str(x or "") for x in table[header_idx]]
+    return out, {"header_row": header_idx, "columns": {k: headers[v] if v < len(headers) else ""
+                                                       for k, v in cols.items()},
+                 "available_columns": headers}, ""
+
+
+def _bank_categorise(desc: str, debit: float, credit: float) -> str:
+    """Keyword categorisation. Unmatched -> 'Unclear'; never a guess to fill the table."""
+    d = (desc or "").lower()
+    if not d:
+        return "Unclear"
+    for kw, cat in _BANK_KEYWORDS_SORTED:
+        if kw in d:
+            # A credit that matched an expense keyword is a refund/reversal, not that expense.
+            if credit > 0 and cat not in ("Revenue/Income", "Transfers (self)"):
+                return "Unclear"
+            return cat
+    if credit > 0:
+        if any(k in d for k in ("neft", "rtgs", "imps", "upi", "chq", "cheque", "clg", "inward")):
+            return "Revenue/Income"
+        return "Unclear"
+    # NEFT/RTGS/IMPS out of a business account are the B2B rails, so vendor is a fair default.
+    # UPI deliberately is NOT: UPI-OUT mixes suppliers with school fees and jewellers, and calling
+    # all of it "vendor payments" would bury exactly the personal spending this report exists to
+    # surface. Unmatched UPI stays Unclear for a human to label.
+    if any(k in d for k in ("neft", "rtgs", "imps", "ecs", "ach")):
+        return "Vendor & Supplier Payments"
+    return "Unclear"
+
+
+def _bank_parse_bytes(blob: bytes, name: str, mime: str, column_map=None):
+    """Parse CSV/XLSX/PDF bytes into rows. Returns (rows, meta, error). Runs off the event loop."""
+    lname = (name or "").lower()
+    is_excel = lname.endswith((".xlsx", ".xls", ".xlsm")) or "excel" in mime or "spreadsheet" in mime
+    is_pdf = lname.endswith(".pdf") or "pdf" in mime
+    if is_excel:
+        try:
+            import pandas as pd
+        except Exception:
+            return [], {}, "Excel parsing is unavailable on the server (pandas missing)."
+        try:
+            df = pd.read_excel(io.BytesIO(blob), header=None, dtype=str)
+        except Exception as e:
+            return [], {}, f"Could not read the Excel file: {e}"
+        table = df.where(df.notna(), "").values.tolist()
+        rows, meta, err = _bank_rows_from_table(table, column_map)
+        meta["source"] = "xlsx"
+        return rows, meta, err
+    if is_pdf:
+        try:
+            import pdfplumber
+        except Exception:
+            return [], {}, "PDF parsing is unavailable on the server (pdfplumber missing)."
+        table: List[List[Any]] = []
+        try:
+            with pdfplumber.open(io.BytesIO(blob)) as pdf:
+                for page in pdf.pages:
+                    for t in (page.extract_tables() or []):
+                        table.extend(t)
+        except Exception as e:
+            return [], {}, f"Could not read the PDF: {e}"
+        if len(table) >= 3:
+            rows, meta, err = _bank_rows_from_table(table, column_map)
+            if rows:
+                meta["source"] = "pdf"
+                return rows, meta, err
+        return [], {"source": "pdf", "needs_ai": True}, "NO_TABLE"
+    # default: CSV / text
+    for enc in ("utf-8-sig", "utf-8", "latin-1"):
+        try:
+            text = blob.decode(enc)
+            break
+        except Exception:
+            text = ""
+    if not text:
+        return [], {}, "Could not decode the file as text. Try the Excel or PDF export instead."
+    try:
+        dialect = csv.Sniffer().sniff(text[:4000], delimiters=",;\t|")
+        reader = csv.reader(io.StringIO(text), dialect)
+    except Exception:
+        reader = csv.reader(io.StringIO(text))
+    table = [r for r in reader]
+    rows, meta, err = _bank_rows_from_table(table, column_map)
+    meta["source"] = "csv"
+    return rows, meta, err
+
+
+BANK_STMT_AI_PROMPT = (
+    "This is a bank statement. Extract EVERY transaction row as strict JSON, no prose, no markdown.\n"
+    'Return {"opening_balance": number|null, "closing_balance": number|null, "rows": [...]} where each row is\n'
+    '{"date":"YYYY-MM-DD","description":"...","ref":"","debit":0,"credit":0,"balance":null}.\n'
+    "Rules: money OUT goes in debit, money IN goes in credit, never both on one row. Strip commas from\n"
+    "numbers. Dates are day-first (Indian format). If a row is unreadable, omit it rather than guessing.\n"
+    "Do not invent, round or total anything — copy the figures exactly as printed."
+)
+
+
+async def _bank_parse_pdf_ai(blob: bytes):
+    """Fall back to Claude vision for PDFs whose tables will not extract (scanned/flattened)."""
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(503, "This PDF has no extractable table and AI reading is not configured. "
+                                 "Set ANTHROPIC_API_KEY, or upload the CSV/Excel export instead.")
+    b64 = base64.b64encode(blob).decode()
+    body = {"model": QC_VISION_MODEL, "max_tokens": 8000,
+            "messages": [{"role": "user", "content": [
+                {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": b64}},
+                {"type": "text", "text": BANK_STMT_AI_PROMPT}]}]}
+    headers = {"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01",
+               "content-type": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=180) as cx:
+            r = await cx.post(f"{ANTHROPIC_BASE_URL}/v1/messages", json=body, headers=headers)
+    except Exception as e:
+        raise HTTPException(502, f"Could not reach the AI reader: {e}")
+    if r.status_code >= 400:
+        raise HTTPException(502, f"AI reader error {r.status_code}: {r.text[:300]}")
+    text = "".join(b.get("text", "") for b in r.json().get("content", []) if b.get("type") == "text")
+    m = re.search(r"\{.*\}", text, re.S)
+    if not m:
+        raise HTTPException(502, "The AI reader did not return usable rows for this PDF.")
+    import json
+    try:
+        data = json.loads(m.group(0))
+    except Exception as e:
+        raise HTTPException(502, f"The AI reader returned malformed data: {e}")
+    rows = []
+    for r0 in (data.get("rows") or []):
+        d = _bank_date(r0.get("date"))
+        if not d:
+            continue
+        debit, credit = abs(_bank_num(r0.get("debit"))), abs(_bank_num(r0.get("credit")))
+        if debit == 0 and credit == 0:
+            continue
+        desc = str(r0.get("description") or "").strip()
+        bal = r0.get("balance")
+        rows.append({"date": d, "description": desc, "ref": str(r0.get("ref") or "").strip(),
+                     "debit": round(debit, 2), "credit": round(credit, 2),
+                     "balance": _bank_num(bal) if bal not in (None, "") else None,
+                     "category": _bank_categorise(desc, debit, credit)})
+    return rows, {"source": "pdf-ai", "ai_opening": data.get("opening_balance"),
+                  "ai_closing": data.get("closing_balance")}
+
+
+def _bank_reconcile(rows, opening, closing):
+    """opening + credits - debits must equal closing, or the parse is not trustworthy."""
+    tc = round(sum(r.get("credit", 0) or 0 for r in rows), 2)
+    td = round(sum(r.get("debit", 0) or 0 for r in rows), 2)
+    if opening in (None, "") or closing in (None, ""):
+        return False, tc, td, "No opening/closing balance given, so the parse could not be reconciled."
+    expected = round(float(opening) + tc - td, 2)
+    diff = round(expected - float(closing), 2)
+    if abs(diff) <= 1.0:          # a rupee of rounding across hundreds of rows is acceptable
+        return True, tc, td, ""
+    return False, tc, td, (
+        f"Does not reconcile: opening {opening} + credits {tc} - debits {td} = {expected}, "
+        f"but the closing balance says {closing} (out by {diff}). Rows were probably missed or "
+        "mis-read - check the preview before saving."
+    )
+
+
+@api.post("/bank-statements/parse")
+async def parse_bank_statement(body: BankStatementParseIn,
+                               user=Depends(require_roles("admin", "manager", "accountant", "ca"))):
+    """Parse a statement and return a PREVIEW. Saves nothing — commit is a separate call."""
+    raw = (body.file_base64 or "").split(",")[-1].strip()
+    if not raw:
+        raise HTTPException(400, "No file received.")
+    try:
+        blob = base64.b64decode(raw)
+    except Exception:
+        raise HTTPException(400, "The uploaded file could not be decoded.")
+    rows, meta, err = await asyncio.to_thread(
+        _bank_parse_bytes, blob, body.file_name or "", (body.mime or "").lower(), body.column_map)
+    if err == "NO_TABLE":
+        rows, meta = await _bank_parse_pdf_ai(blob)
+        err = ""
+    if err:
+        raise HTTPException(400, err)
+    if not rows:
+        raise HTTPException(400, "No transactions were found in that file. If it is a PDF, try the "
+                                 "CSV or Excel export from your net banking instead.")
+    rows.sort(key=lambda r: r["date"])
+    opening = body.opening_balance
+    closing = body.closing_balance
+    # If the statement carries a running balance we can derive both ends ourselves.
+    if opening is None and rows[0].get("balance") is not None:
+        opening = round(rows[0]["balance"] - rows[0]["credit"] + rows[0]["debit"], 2)
+    if closing is None and rows[-1].get("balance") is not None:
+        closing = rows[-1]["balance"]
+    if opening is None and meta.get("ai_opening") is not None:
+        opening = _bank_num(meta["ai_opening"])
+    if closing is None and meta.get("ai_closing") is not None:
+        closing = _bank_num(meta["ai_closing"])
+    ok, tc, td, note = _bank_reconcile(rows, opening, closing)
+    return {
+        "rows": rows,
+        "meta": meta,
+        "period_from": rows[0]["date"],
+        "period_to": rows[-1]["date"],
+        "opening_balance": opening,
+        "closing_balance": closing,
+        "total_credit": tc,
+        "total_debit": td,
+        "row_count": len(rows),
+        "unclear_count": sum(1 for r in rows if r["category"] == "Unclear"),
+        "reconciled": ok,
+        "reconcile_note": note,
+        "categories": BANK_TXN_CATEGORIES,
+    }
+
+
+@api.post("/bank-statements")
+async def create_bank_statement(body: BankStatementCommitIn,
+                                user=Depends(require_roles("admin", "manager", "accountant", "ca"))):
+    """Commit a previewed statement. Rows are stored as-is — the user has seen them."""
+    if not body.rows:
+        raise HTTPException(400, "No rows to save.")
+    acct = await db.accounts.find_one({"id": body.account_id}, {"_id": 0, "name": 1})
+    if not acct:
+        raise HTTPException(400, "Pick which bank account this statement belongs to.")
+    rows = sorted(body.rows, key=lambda r: str(r.get("date") or ""))
+    ok, tc, td, note = _bank_reconcile(rows, body.opening_balance, body.closing_balance)
+    stmt = BankStatement(
+        account_id=body.account_id, account_name=acct.get("name", ""),
+        file_name=body.file_name, source=body.source,
+        period_from=str(rows[0].get("date") or ""), period_to=str(rows[-1].get("date") or ""),
+        opening_balance=body.opening_balance, closing_balance=body.closing_balance,
+        total_credit=tc, total_debit=td, row_count=len(rows),
+        unclear_count=sum(1 for r in rows if (r.get("category") or "Unclear") == "Unclear"),
+        reconciled=ok, reconcile_note=note,
+        uploaded_by=user.get("name") or user.get("email") or "",
+    ).model_dump()
+    docs = []
+    for r in rows:
+        docs.append(BankTxn(
+            statement_id=stmt["id"], account_id=body.account_id,
+            date=str(r.get("date") or ""), description=str(r.get("description") or ""),
+            ref=str(r.get("ref") or ""), debit=round(float(r.get("debit") or 0), 2),
+            credit=round(float(r.get("credit") or 0), 2),
+            balance=r.get("balance"),
+            category=(r.get("category") if r.get("category") in BANK_TXN_CATEGORIES else "Unclear"),
+        ).model_dump())
+    await db.bank_statements.insert_one(stmt)
+    if docs:
+        await db.bank_txns.insert_many(docs)
+    return serialize(stmt)
+
+
+@api.get("/bank-statements")
+async def list_bank_statements(account_id: str = "", user=Depends(get_current_user)):
+    q = {"account_id": account_id} if account_id else {}
+    return await list_collection(db.bank_statements, q)
+
+
+@api.get("/bank-statements/{sid}")
+async def get_bank_statement(sid: str, user=Depends(get_current_user)):
+    stmt = await db.bank_statements.find_one({"id": sid}, {"_id": 0})
+    if not stmt:
+        raise HTTPException(404, "Statement not found")
+    txns = await db.bank_txns.find({"statement_id": sid}, {"_id": 0}).sort("date", 1).to_list(20000)
+    return {"statement": stmt, "transactions": txns}
+
+
+@api.get("/bank-statements/{sid}/analysis")
+async def analyse_bank_statement(sid: str, user=Depends(get_current_user)):
+    """Where the money went. Every figure is computed from the stored rows — nothing estimated."""
+    stmt = await db.bank_statements.find_one({"id": sid}, {"_id": 0})
+    if not stmt:
+        raise HTTPException(404, "Statement not found")
+    txns = await db.bank_txns.find({"statement_id": sid}, {"_id": 0}).sort("date", 1).to_list(20000)
+    if not txns:
+        raise HTTPException(400, "This statement has no transactions.")
+
+    inflow = round(sum(t["credit"] for t in txns), 2)
+    outflow = round(sum(t["debit"] for t in txns), 2)
+    debits = [t for t in txns if t["debit"] > 0]
+    credits = [t for t in txns if t["credit"] > 0]
+
+    by_cat: Dict[str, Dict[str, float]] = {}
+    for t in debits:
+        c = by_cat.setdefault(t["category"], {"amount": 0.0, "count": 0})
+        c["amount"] = round(c["amount"] + t["debit"], 2)
+        c["count"] += 1
+    categories = sorted(
+        [{"category": k, "amount": v["amount"], "count": v["count"],
+          "pct": round(v["amount"] * 100.0 / outflow, 1) if outflow else 0.0}
+         for k, v in by_cat.items()], key=lambda x: -x["amount"])
+
+    top5 = sorted(debits, key=lambda t: -t["debit"])[:5]
+    # The "leak" is the small stuff nobody adds up, so it has to be defined by SIZE, not by
+    # count: taking the smallest 20 of a 14-row statement returns every debit and reports the
+    # leak as the entire outflow, which is worse than useless. Anything under 1% of outflow.
+    leak_cap = outflow * 0.01
+    smallest = sorted([t for t in debits if t["debit"] <= leak_cap], key=lambda t: t["debit"])
+    leak_total = round(sum(t["debit"] for t in smallest), 2)
+
+    dow_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    by_dow = {n: 0.0 for n in dow_names}
+    by_week = {1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0}
+    weekend = 0.0
+    for t in debits:
+        try:
+            dt = datetime.strptime(t["date"], "%Y-%m-%d")
+        except Exception:
+            continue
+        by_dow[dow_names[dt.weekday()]] = round(by_dow[dow_names[dt.weekday()]] + t["debit"], 2)
+        wk = min((dt.day - 1) // 7 + 1, 5)
+        by_week[wk] = round(by_week[wk] + t["debit"], 2)
+        if dt.weekday() >= 5:
+            weekend = round(weekend + t["debit"], 2)
+
+    # How much of a big credit leaves within 72 hours — the clearest "money doesn't stay" signal.
+    # Count each debit ONCE however many big credits it falls near — summing per credit
+    # double-counts a debit that sits inside two windows and can exceed total outflow.
+    big_dates = []
+    avg_credit_size = inflow / max(len(credits), 1)
+    for c in credits:
+        if c["credit"] >= avg_credit_size:
+            try:
+                big_dates.append(datetime.strptime(c["date"], "%Y-%m-%d"))
+            except Exception:
+                pass
+    hit_ids = set()
+    for t in debits:
+        try:
+            d1 = datetime.strptime(t["date"], "%Y-%m-%d")
+        except Exception:
+            continue
+        if any(0 <= (d1 - d0).days <= 3 for d0 in big_dates):
+            hit_ids.add(t["id"])
+    after_credit = round(sum(t["debit"] for t in debits if t["id"] in hit_ids), 2)
+
+    # Duplicates: same day, same amount, same narration — the classic double-payment.
+    seen, dupes = {}, []
+    for t in debits:
+        k = (t["date"], t["debit"], (t["description"] or "")[:40].lower())
+        if k in seen:
+            dupes.append({"date": t["date"], "amount": t["debit"], "description": t["description"]})
+        seen[k] = True
+
+    # Burn is per CALENDAR day of the statement period, not per day-that-had-a-transaction.
+    # Dividing by transaction-days inflates the rate (16 active days in a 30-day month nearly
+    # doubles it) and so understates runway — the one number nobody should be optimistic about.
+    try:
+        d_from = datetime.strptime(stmt.get("period_from") or txns[0]["date"], "%Y-%m-%d")
+        d_to = datetime.strptime(stmt.get("period_to") or txns[-1]["date"], "%Y-%m-%d")
+        days = max((d_to - d_from).days + 1, 1)
+    except Exception:
+        days = len({t["date"] for t in txns}) or 1
+    burn = round(outflow / days, 2)
+    charges = round(sum(t["debit"] for t in debits if t["category"] == "Bank Charges & Fees"), 2)
+    emi = round(sum(t["debit"] for t in debits if t["category"] == "EMI & Loan Payments"), 2)
+    personal = round(sum(t["debit"] for t in debits
+                         if t["category"] in ("Personal Withdrawals", "Food & Entertainment")), 2)
+
+    danger = []
+    week_outflow = burn * 7
+    for t in txns:
+        if t.get("balance") is not None and t["balance"] < week_outflow:
+            danger.append({"date": t["date"], "balance": t["balance"]})
+
+    return {
+        "statement": stmt,
+        "currency_note": "Figures are exactly as parsed from the statement; nothing is estimated.",
+        "inflow": inflow, "outflow": outflow,
+        "net": round(inflow - outflow, 2),
+        "savings_rate_pct": round((inflow - outflow) * 100.0 / inflow, 1) if inflow else 0.0,
+        "expense_to_income_pct": round(outflow * 100.0 / inflow, 1) if inflow else 0.0,
+        "credit_count": len(credits), "debit_count": len(debits),
+        "avg_credit": round(inflow / len(credits), 2) if credits else 0.0,
+        "largest_credit": max((c["credit"] for c in credits), default=0.0),
+        "income_concentration_pct": (round(max((c["credit"] for c in credits), default=0.0) * 100.0 / inflow, 1)
+                                     if inflow else 0.0),
+        "categories": categories,
+        "top_expenses": [{"date": t["date"], "description": t["description"], "amount": t["debit"],
+                          "category": t["category"]} for t in top5],
+        "leak_total": leak_total, "leak_count": len(smallest),
+        "by_day_of_week": by_dow, "by_week_of_month": by_week,
+        "weekend_spend": weekend,
+        "spent_within_72h_of_credit": after_credit,
+        "duplicates": dupes,
+        "bank_charges": charges, "bank_charges_annualised": round(charges * 12, 2),
+        "emi_total": emi,
+        "emi_pct_of_inflow": round(emi * 100.0 / inflow, 1) if inflow else 0.0,
+        "personal_spend": personal,
+        "daily_burn": burn,
+        "runway_days": (round(stmt.get("closing_balance", 0) / burn, 1) if burn else None),
+        "danger_days": danger,
+        "unclear_count": sum(1 for t in txns if t["category"] == "Unclear"),
+        "unclear_total": round(sum(t["debit"] for t in txns if t["category"] == "Unclear"), 2),
+        "projected_closing_next_month": round(stmt.get("closing_balance", 0) + inflow - outflow, 2),
+    }
+
+
+@api.put("/bank-statements/{sid}/transactions/{tid}")
+async def recategorise_bank_txn(sid: str, tid: str, body: dict,
+                                user=Depends(require_roles("admin", "manager", "accountant", "ca"))):
+    """Let a human fix a category. This is how 'Unclear' rows get resolved — never auto-guessed."""
+    cat = (body or {}).get("category")
+    if cat not in BANK_TXN_CATEGORIES:
+        raise HTTPException(400, "Unknown category")
+    res = await db.bank_txns.update_one({"id": tid, "statement_id": sid}, {"$set": {"category": cat}})
+    if not res.matched_count:
+        raise HTTPException(404, "Transaction not found")
+    n = await db.bank_txns.count_documents({"statement_id": sid, "category": "Unclear"})
+    await db.bank_statements.update_one({"id": sid}, {"$set": {"unclear_count": n}})
+    return {"ok": True, "unclear_count": n}
+
+
+@api.delete("/bank-statements/{sid}")
+async def delete_bank_statement(sid: str,
+                                user=Depends(require_roles("admin", "manager", "accountant", "ca"))):
+    await db.bank_txns.delete_many({"statement_id": sid})
+    res = await db.bank_statements.delete_one({"id": sid})
+    if not res.deleted_count:
+        raise HTTPException(404, "Statement not found")
     return {"ok": True}
 
 # ---- Document Masters (Terms & Conditions, prefixes, payment terms, bank) ----
