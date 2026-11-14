@@ -4684,6 +4684,9 @@ async def approve_bank_match(sid: str, tid: str, body: BankApproveIn,
     return {"ok": True, "rule_saved": saved_rule, "remaining": left}
 
 
+_BANK_ENTRY_SOURCE = "bank_reconcile"   # stamped on anything this screen creates, so it can be undone
+
+
 class BankCreateEntryIn(BaseModel):
     """Create the missing ERP entry FROM a bank row, then link the two in one step."""
     model_config = ConfigDict(extra="ignore")
@@ -4776,6 +4779,12 @@ async def create_entry_from_bank_txn(sid: str, tid: str, body: BankCreateEntryIn
         coll, doc = _bank_entry_doc(kind, t, body, code, user)
         doc["bank_txn_id"] = t["id"]
         doc["reconciled_on"] = t.get("date", "")
+        # Tag it. Everything else on the reconcile screen is reversible, and this was not: Unlink
+        # released the link and left the entry behind in the books, indistinguishable from one
+        # somebody typed in. The tag is what lets Unlink take back what this feature created —
+        # and ONLY what it created.
+        doc["source"] = _BANK_ENTRY_SOURCE
+        doc["created_from_bank_txn"] = t["id"]
         await coll.insert_one(doc)
         mtype = "expense" if kind in ("expense", "loan_repayment") else kind
         ops.append(UpdateOne({"id": t["id"]}, {"$set": {
@@ -4826,15 +4835,36 @@ async def unlink_bank_match(sid: str, tid: str,
     # Release every record the row claimed, not just the first — a settlement that unlinks
     # partially would strand the rest as reconciled against a row that no longer points at them.
     mids = [m for m in (list(t.get("match_ids") or []) + [t.get("match_id") or ""]) if m]
+    removed = []
     if coll is not None and mids:
-        await coll.update_many({"id": {"$in": list(set(mids))}}, {"$set": {"bank_txn_id": ""}})
+        mids = list(set(mids))
+        # An entry this screen CREATED has no life of its own — it exists only because the bank
+        # row did. Undoing the link has to take it with it, or Unlink quietly leaves a real
+        # expense in the books that nobody typed and nothing points at. An entry that was merely
+        # MATCHED is somebody else's record and is only released, never touched.
+        born_here = await coll.find(
+            {"id": {"$in": mids}, "source": _BANK_ENTRY_SOURCE, "created_from_bank_txn": tid},
+            {"_id": 0, "id": 1, "code": 1, "amount": 1, "total": 1}).to_list(len(mids) + 1)
+        born_ids = [r["id"] for r in born_here]
+        if born_ids:
+            await coll.delete_many({"id": {"$in": born_ids}})
+            removed = [{"id": r["id"], "code": r.get("code") or "",
+                        "amount": r.get("total") if r.get("total") is not None else r.get("amount")}
+                       for r in born_here]
+        rest = [m for m in mids if m not in set(born_ids)]
+        if rest:
+            await coll.update_many({"id": {"$in": rest}}, {"$set": {"bank_txn_id": ""}})
     await db.bank_txns.update_one({"id": tid}, {"$set": {
         "status": "unmatched", "match_type": "", "match_id": "", "match_code": "",
         "match_ids": [], "match_codes": [], "settlement_total": 0,
         "short_by": 0, "short_reason": "",
         "match_confidence": 0, "match_reason": "", "approved_by": "", "approved_at": "",
     }})
-    return {"ok": True}
+    if removed:
+        await write_audit(user.get("name", ""), "bank_entry_deleted_on_unlink",
+                          t.get("match_type") or "entry", tid,
+                          {"removed": removed, "statement_id": sid})
+    return {"ok": True, "deleted_entries": removed}
 
 
 @api.post("/bank-statements/{sid}/transactions/{tid}/ignore")
