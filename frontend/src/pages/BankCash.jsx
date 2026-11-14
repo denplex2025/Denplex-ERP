@@ -436,6 +436,7 @@ function ReconcileView({ id, onBack }) {
   const [filter, setFilter] = useState("suggested");
   const [busy, setBusy] = useState(false);
   const [picking, setPicking] = useState(null);     // { txn, candidates }
+  const [creating, setCreating] = useState(null);   // { txn, siblings, form }
 
   const load = async () => {
     try { const r = await api.get(`/bank-statements/${id}/reconcile`); setData(r.data); }
@@ -451,6 +452,40 @@ function ReconcileView({ id, onBack }) {
       toast.success(`${c.suggested || 0} suggested · ${c.suspense || 0} to classify`);
       await load();
     } catch (e) { toast.error(e?.response?.data?.detail || "Matching failed"); }
+    setBusy(false);
+  };
+
+  // A suspense row is one the ERP has no record of at all, so there is nothing to approve — the
+  // entry has to be written first. Rows from the same counterparty going the same way are offered
+  // together, because a recurring payee like an EMI or a subscription is one decision, not ten.
+  const openCreate = (t) => {
+    const key = (t.counterparty || "").trim().toUpperCase();
+    const dir = t.credit > 0 ? "in" : "out";
+    const siblings = (data?.transactions || []).filter(x =>
+      x.id !== t.id && (x.status === "suspense" || x.status === "unmatched") &&
+      (x.counterparty || "").trim().toUpperCase() === key && key &&
+      (x.credit > 0 ? "in" : "out") === dir);
+    setCreating({
+      txn: t, siblings, applyAll: false,
+      form: { kind: dir === "in" ? "payment_in" : "expense",
+              party_name: t.party_name || t.counterparty || "",
+              category: t.category && t.category !== "Unclear" ? t.category : "",
+              description: "", notes: "" },
+    });
+  };
+
+  const submitCreate = async () => {
+    if (!creating) return;
+    const { txn, siblings, applyAll, form } = creating;
+    setBusy(true);
+    try {
+      const r = await api.post(`/bank-statements/${id}/transactions/${txn.id}/create-entry`,
+        { ...form, save_rule: true, tids: applyAll ? siblings.map(s => s.id) : [] });
+      toast.success(`${r.data.count} entr${r.data.count === 1 ? "y" : "ies"} created and linked`
+        + (r.data.rule_saved ? " — remembered for next month" : ""));
+      setCreating(null);
+      await load();
+    } catch (e) { toast.error(e?.response?.data?.detail || "Could not create the entry"); }
     setBusy(false);
   };
 
@@ -576,6 +611,7 @@ function ReconcileView({ id, onBack }) {
                     ) : (
                       <>
                         {t.match_id && <button disabled={busy} onClick={() => approve(t)} className="text-xs text-emerald-700 font-medium hover:underline">Approve</button>}
+                        {!t.match_id && <button disabled={busy} onClick={() => openCreate(t)} className="text-xs text-red-600 font-medium hover:underline">Create entry…</button>}
                         <button disabled={busy} onClick={() => openPicker(t)} className="ml-3 text-xs text-slate-600 hover:underline">Choose…</button>
                         <button disabled={busy} onClick={() => act(t, "ignore")} className="ml-3 text-xs text-slate-400 hover:underline">Ignore</button>
                       </>
@@ -604,7 +640,10 @@ function ReconcileView({ id, onBack }) {
               {picking.candidates.length === 0 && (
                 <div className="text-sm text-slate-500">
                   No entry in the ERP matches this amount and direction within {data.window_days} days.
-                  Leave it in Suspense — creating the entry comes in the next stage.
+                  <button className="ml-1 text-red-600 font-medium hover:underline"
+                          onClick={() => { const t = picking.txn; setPicking(null); openCreate(t); }}>
+                    Create the entry instead
+                  </button>.
                 </div>
               )}
               {picking.candidates.map(c => (
@@ -623,9 +662,102 @@ function ReconcileView({ id, onBack }) {
           </div>
         </div>
       )}
+
+      {creating && (() => {
+        const t = creating.txn;
+        const isIn = t.credit > 0;
+        const amount = t.debit || t.credit;
+        const sibTotal = creating.siblings.reduce((a, s) => a + (s.debit || s.credit), 0);
+        const set = (k, v) => setCreating(c => ({ ...c, form: { ...c.form, [k]: v } }));
+        const KINDS = isIn
+          ? [["payment_in", "Receipt from a customer"]]
+          : [["expense", "Expense"], ["payment_out", "Payment to a supplier"],
+             ["loan_repayment", "Loan / EMI repayment"]];
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onMouseDown={() => setCreating(null)}>
+            <div className="bg-white rounded-lg shadow-xl w-full max-w-lg" onMouseDown={e => e.stopPropagation()}>
+              <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200">
+                <h3 className="font-semibold">Create the missing entry</h3>
+                <button onClick={() => setCreating(null)} className="text-slate-400 hover:text-slate-700"><X className="h-4 w-4" /></button>
+              </div>
+              <div className="p-4 space-y-3">
+                <div className="text-sm bg-slate-50 border border-slate-200 rounded-sm p-2">
+                  <div className="flex justify-between">
+                    <strong>{t.counterparty || "—"}</strong>
+                    <span className="font-mono-tech">{isIn ? "+" : "−"}{inr(amount)}</span>
+                  </div>
+                  <div className="text-[11px] text-slate-400">{t.date} · {t.description}</div>
+                </div>
+
+                <Fld label="Record it as">
+                  <select value={creating.form.kind} onChange={e => set("kind", e.target.value)}
+                          className="w-full h-9 text-sm border border-slate-200 rounded-sm px-2 bg-white">
+                    {KINDS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                  </select>
+                  {isIn && <div className="text-[11px] text-slate-400 mt-1">
+                    Money came in, so this can only be a receipt.
+                  </div>}
+                </Fld>
+
+                <Fld label={creating.form.kind === "expense" || creating.form.kind === "loan_repayment" ? "Paid to" : "Party"}>
+                  <input value={creating.form.party_name} onChange={e => set("party_name", e.target.value)}
+                         className="w-full h-9 text-sm border border-slate-200 rounded-sm px-2"
+                         placeholder="Name as you want it in the books" />
+                </Fld>
+
+                {(creating.form.kind === "expense" || creating.form.kind === "loan_repayment") && (
+                  <Fld label="Category">
+                    <select value={creating.form.category} onChange={e => set("category", e.target.value)}
+                            className="w-full h-9 text-sm border border-slate-200 rounded-sm px-2 bg-white">
+                      <option value="">{creating.form.kind === "loan_repayment" ? "Loan & Interest" : "general"}</option>
+                      {(data.categories || CATS).map(c => <option key={c} value={c}>{c}</option>)}
+                    </select>
+                  </Fld>
+                )}
+
+                <Fld label="Note (optional)">
+                  <input value={creating.form.notes} onChange={e => set("notes", e.target.value)}
+                         className="w-full h-9 text-sm border border-slate-200 rounded-sm px-2"
+                         placeholder="Defaults to the bank narration" />
+                </Fld>
+
+                {creating.siblings.length > 0 && (
+                  <label className="flex items-start gap-2 text-xs bg-amber-50 border border-amber-200 rounded-sm p-2 cursor-pointer">
+                    <input type="checkbox" checked={creating.applyAll} className="mt-0.5"
+                           onChange={e => setCreating(c => ({ ...c, applyAll: e.target.checked }))} />
+                    <span>
+                      Do the same for the other <strong>{creating.siblings.length}</strong> suspense row
+                      {creating.siblings.length === 1 ? "" : "s"} from <strong>{t.counterparty}</strong>
+                      {" "}({inr(sibTotal)} more). Each one becomes its own entry for its own amount and date.
+                    </span>
+                  </label>
+                )}
+
+                <div className="text-[11px] text-slate-400">
+                  {creating.form.kind === "loan_repayment"
+                    ? "There is no loan module yet, so this is booked as an expense under Loan & Interest. It records the cash leaving — it does not split principal from interest."
+                    : "The entry is created and linked to this bank row in one step, and the narration is remembered so next month's statement recognises it."}
+                </div>
+              </div>
+              <div className="flex justify-end gap-2 px-4 py-3 border-t border-slate-200">
+                <button onClick={() => setCreating(null)} className="px-3 h-9 text-sm rounded-sm border border-slate-200">Cancel</button>
+                <button disabled={busy} onClick={submitCreate}
+                        className="px-3 h-9 text-sm rounded-sm bg-red-600 text-white hover:bg-red-700 disabled:opacity-60">
+                  {busy ? "Creating…" : `Create ${creating.applyAll ? creating.siblings.length + 1 : 1} entr${(creating.applyAll ? creating.siblings.length + 1 : 1) === 1 ? "y" : "ies"}`}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
+
+// Fallback list for the category dropdown when the reconcile payload predates the field.
+const CATS = ["Vendor & Supplier Payments", "Salaries & Staff", "Rent & Utilities",
+  "Subscriptions & Software", "Travel & Fuel", "Taxes & Statutory", "Bank Charges & Fees",
+  "Loan & Interest", "Unclear"];
 
 function Bar({ pct }) {
   const filled = Math.max(0, Math.min(10, Math.round((pct || 0) / 10)));
