@@ -3417,6 +3417,15 @@ class BankTxn(BaseModel):
     match_code: str = ""
     match_confidence: int = 0        # 0-100, why it was proposed
     match_reason: str = ""
+    # --- settlement (one bank row answering several ERP payments) ---
+    # A customer with one GST registration settles many invoices in a single transfer, so the
+    # credit equals a SET of payments rather than any one of them. match_ids holds the whole set;
+    # match_id stays populated with the first for anything that still reads a single link.
+    match_ids: List[str] = Field(default_factory=list)
+    match_codes: List[str] = Field(default_factory=list)
+    settlement_total: float = 0      # what the matched set adds up to
+    short_by: float = 0              # settlement_total - bank amount, when the payer deducted
+    short_reason: str = ""           # "TDS 194Q @0.1%" | "rounding" | "" when unexplained
     party_id: str = ""
     party_type: str = ""             # customer | supplier
     party_name: str = ""
@@ -4239,7 +4248,8 @@ def _bank_days_apart(a: str, b: str) -> Optional[int]:
         return None
 
 
-async def _bank_candidates(txn: Dict[str, Any]) -> List[Dict[str, Any]]:
+async def _bank_candidates(txn: Dict[str, Any],
+                           pool: Optional[Dict[str, List[Dict[str, Any]]]] = None) -> List[Dict[str, Any]]:
     """Every ERP entry that could be this bank row, scored. Highest first.
 
     Amount must be exact; direction must agree; the date must be within the window. Everything
@@ -4270,12 +4280,19 @@ async def _bank_candidates(txn: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     out = []
     for kind, coll, amt_field in sources:
-        q = {"date": {"$gte": lo, "$lte": hi},
-             "$or": [{"bank_txn_id": {"$exists": False}}, {"bank_txn_id": ""}]}
-        try:
-            rows = await coll.find(q, {"_id": 0}).to_list(500)
-        except Exception:
-            rows = []
+        if pool is not None:
+            # Bulk path: the caller fetched every unreconciled entry for the statement's period
+            # once. 266 rows x 3 collections was 700-odd sequential round trips to Atlas, which is
+            # where the match run spent its minutes — the queries were never the slow part, the
+            # latency was.
+            rows = [r for r in pool.get(kind, ()) if lo <= str(r.get("date") or "") <= hi]
+        else:
+            q = {"date": {"$gte": lo, "$lte": hi},
+                 "$or": [{"bank_txn_id": {"$exists": False}}, {"bank_txn_id": ""}]}
+            try:
+                rows = await coll.find(q, {"_id": 0}).to_list(500)
+            except Exception:
+                rows = []
         for r in rows:
             val = round(float(r.get(amt_field) or r.get("amount") or 0), 2)
             if val != amount:
@@ -4305,6 +4322,198 @@ async def _bank_candidates(txn: Dict[str, Any]) -> List[Dict[str, Any]]:
     return out[:5]
 
 
+# --- settlements: one bank row answering several ERP payments -------------------------------
+#
+# A customer with one GST registration pays many invoices in a single transfer, so the credit
+# matches a SET of payments and no single one of them. Two things make that set hard to find:
+#
+#   1. The same company is several party records. ASTRAL is seven masters, one per state GSTIN
+#      (Santej 24AABCA2951N1ZO, Hosur 33..., Indore 23...), all sharing PAN AABCA2951N. Matching
+#      on the name fails outright — the master reads "ASTRAL LIMITED (Dholka)" while the bank
+#      truncates to "ASTRAL LIMITE", and neither is a prefix of the other once the branch suffix
+#      survives normalisation. The PAN inside the GSTIN is the real identity, so group on that.
+#   2. The payer deducts tax at source. Observed on this account: a credit of 1,35,845 against
+#      payments of 1,35,960 — short by 115, which is 0.0847%. That is not a fuzzy amount, it is
+#      0.1% (194Q) levied on the taxable value while the payment record carries the GST-inclusive
+#      figure: 0.001 / 1.18 = 0.000847. Deducting without explaining it would be a fuzzy match;
+#      naming the section and the rupees is a reconciliation.
+#
+# The SUM is still exact. Tolerance exists only for accumulated paise and for a deduction this
+# code can name. Anything short by an amount it cannot explain is reported, never quietly matched.
+
+_BANK_SETTLE_WINDOW_DAYS = 10    # a lump settlement spans invoices; wider than a single match
+_BANK_SETTLE_MAX_ITEMS = 12      # beyond this the subsets stop being evidence and start being noise
+_BANK_SETTLE_MAX_POOL = 18       # 2**18 bounded worst case, and pruning cuts it far below
+_BANK_SETTLE_MAX_NODES = 20000   # hard ceiling on the search; past this the row stays suspense
+
+# section -> rate on the TAXABLE value. The payment record holds the gross, so the shortfall is
+# rate / (1 + gst). Both are tried against the GST rates Indian invoices actually carry.
+_BANK_TDS_RATES = [("194Q", 0.001), ("194C", 0.01), ("194C", 0.02), ("194H", 0.05), ("194J", 0.10)]
+_BANK_GST_RATES = [0.18, 0.28, 0.12, 0.05, 0.0]
+
+
+def _bank_pan(gstin: str) -> str:
+    """The PAN inside a GSTIN — characters 3-12. One company, however many state registrations."""
+    g = (gstin or "").strip().upper()
+    return g[2:12] if len(g) >= 12 and g[2:12].isalnum() else ""
+
+
+def _bank_explain_short(total: float, bank: float, n: int) -> Optional[str]:
+    """Name the deduction, or return None. Never invents a reason to force a match."""
+    gap = round(total - bank, 2)
+    if gap < 0:
+        return None                                   # paid MORE than invoiced is not a deduction
+    if gap <= 1.0 + 0.05 * n:
+        return "rounding" if gap else ""
+    for section, rate in _BANK_TDS_RATES:
+        for gst in _BANK_GST_RATES:
+            if abs(gap - total * rate / (1 + gst)) <= max(2.0, total * 0.00002):
+                pct = f"{rate * 100:g}%"
+                return f"TDS {section} @{pct} = {gap:.2f}"
+    return None
+
+
+def _bank_settlement(amount: float, cands: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Smallest set of this party's payments that adds up to the bank row, deduction explained.
+
+    Prefers fewer records, then the smaller unexplained remainder — an accountant checking four
+    invoices against one credit is doing real work; checking eleven is being handed a puzzle.
+    """
+    if len(cands) < 2:
+        return None
+    cands = sorted(cands, key=lambda c: -c["amount"])[:_BANK_SETTLE_MAX_POOL]
+    target = round(amount, 2)
+    best: Optional[Dict[str, Any]] = None
+    ceiling = target * 1.12 + 2        # no plausible deduction exceeds this
+    # A hard node budget. The pathological case is many similar small amounts with no reachable
+    # total: nothing prunes, and 2**18 branches cost a fifth of a second per row, which across a
+    # statement is half a minute spent proving a negative. Giving up returns the row to the human
+    # as suspense, which is where an unexplainable row belongs anyway.
+    budget = [_BANK_SETTLE_MAX_NODES]
+
+    def walk(i: int, total: float, picked: List[Dict[str, Any]]) -> None:
+        nonlocal best
+        budget[0] -= 1
+        if budget[0] <= 0:
+            return
+        if len(picked) >= 2:
+            why = _bank_explain_short(total, target, len(picked))
+            if why is not None and (best is None or len(picked) < best["count"]):
+                best = {"items": list(picked), "count": len(picked),
+                        "total": round(total, 2), "short_by": round(total - target, 2),
+                        "reason": why}
+        if i >= len(cands) or total > ceiling or len(picked) >= _BANK_SETTLE_MAX_ITEMS:
+            return
+        if best is not None and len(picked) + 1 >= best["count"]:
+            return                      # cannot beat what we have; stop widening this branch
+        picked.append(cands[i])
+        walk(i + 1, total + cands[i]["amount"], picked)
+        picked.pop()
+        walk(i + 1, total, picked)
+
+    walk(0, 0.0, [])
+    return best
+
+
+def _bank_settlement_for(txn: Dict[str, Any], pool: Dict[str, List[Dict[str, Any]]],
+                         party_of: Dict[str, str]) -> Optional[Dict[str, Any]]:
+    """A settlement proposal for this bank row, or None. Returns a patch for the txn document."""
+    credit = float(txn.get("credit") or 0)
+    debit = float(txn.get("debit") or 0)
+    amount = round(credit or debit, 2)
+    who = txn.get("counterparty") or ""
+    if amount <= 0 or not who:
+        return None
+    kind = "payment_in" if credit > 0 else "payment_out"
+    d0 = txn.get("date") or ""
+    try:
+        base = datetime.strptime(d0, "%Y-%m-%d")
+    except Exception:
+        return None
+    lo = (base - timedelta(days=_BANK_SETTLE_WINDOW_DAYS)).strftime("%Y-%m-%d")
+    hi = (base + timedelta(days=_BANK_SETTLE_WINDOW_DAYS)).strftime("%Y-%m-%d")
+
+    # Which party group is this row? Resolve the bank's truncated name against the masters ONCE,
+    # then collect every payment belonging to any record in the same group — that is what lets
+    # one credit answer invoices raised on ASTRAL Santej and ASTRAL Dholka together.
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for r in pool.get(kind, ()):
+        d = str(r.get("date") or "")
+        if not (lo <= d <= hi):
+            continue
+        pname = r.get("party_name") or ""
+        if not _bank_match_party(who, {_bank_name_key(pname)}):
+            continue
+        g = party_of.get(r.get("party_id") or "") or _bank_name_key(pname)
+        groups.setdefault(g, []).append({
+            "id": r.get("id"), "code": r.get("code") or "", "date": d,
+            "amount": round(float(r.get("amount") or 0), 2),
+            "party_id": r.get("party_id") or "", "party_name": pname,
+        })
+    if not groups:
+        return None
+
+    best = None
+    for g, items in groups.items():
+        s = _bank_settlement(amount, items)
+        if s and (best is None or s["count"] < best["count"]):
+            best = s
+    if not best:
+        return None
+
+    items = sorted(best["items"], key=lambda c: c["date"])
+    codes = [c["code"] for c in items if c["code"]]
+    names = {c["party_name"] for c in items if c["party_name"]}
+    why = [f"{best['count']} payments totalling {best['total']:.2f}"]
+    if len(names) > 1:
+        why.append(f"across {len(names)} locations of the same GST/PAN group")
+    if best["reason"] == "rounding":
+        why.append(f"rounding {best['short_by']:.2f}")
+    elif best["reason"]:
+        why.append(best["reason"])
+    why.append(f"within {_BANK_SETTLE_WINDOW_DAYS} days")
+    # A named deduction is still a deduction: confidence sits below an exact single match so the
+    # accountant looks at it rather than waving it through.
+    conf = 88 if best["reason"] in ("", "rounding") else 78
+    return {
+        "status": "suggested", "match_type": kind,
+        "match_id": items[0]["id"], "match_code": codes[0] if codes else "",
+        "match_ids": [c["id"] for c in items], "match_codes": codes,
+        "settlement_total": best["total"], "short_by": best["short_by"],
+        "short_reason": best["reason"],
+        "match_confidence": conf, "match_reason": "; ".join(why),
+        "party_id": items[0]["party_id"], "party_name": items[0]["party_name"],
+        "party_type": "customer" if kind == "payment_in" else "supplier",
+    }
+
+
+async def _bank_fetch_pool(lo: str, hi: str) -> Dict[str, List[Dict[str, Any]]]:
+    """Every unreconciled entry in the period, fetched once for the whole statement."""
+    q = {"date": {"$gte": lo, "$lte": hi},
+         "$or": [{"bank_txn_id": {"$exists": False}}, {"bank_txn_id": ""}]}
+    pin, pout, exp = await asyncio.gather(
+        db.payments_in.find(q, {"_id": 0}).to_list(20000),
+        db.payments_out.find(q, {"_id": 0}).to_list(20000),
+        db.expenses.find(q, {"_id": 0}).to_list(20000),
+    )
+    return {"payment_in": pin, "payment_out": pout, "expense": exp}
+
+
+async def _bank_party_index() -> Dict[str, str]:
+    """party_id -> group key. PAN where there is a GSTIN, else the normalised name."""
+    idx: Dict[str, str] = {}
+    cus, sup = await asyncio.gather(
+        db.customers.find({}, {"_id": 0, "id": 1, "name": 1, "gstin": 1}).to_list(20000),
+        db.suppliers.find({}, {"_id": 0, "id": 1, "name": 1, "gstin": 1}).to_list(20000),
+    )
+    for p in list(cus) + list(sup):
+        pid = p.get("id") or ""
+        if not pid:
+            continue
+        idx[pid] = _bank_pan(p.get("gstin") or "") or _bank_name_key(p.get("name") or "")
+    return idx
+
+
 @api.post("/bank-statements/{sid}/match")
 async def match_bank_statement(sid: str,
                                user=Depends(require_roles("admin", "accountant"))):
@@ -4314,7 +4523,16 @@ async def match_bank_statement(sid: str,
         raise HTTPException(404, "Statement not found")
     txns = await db.bank_txns.find({"statement_id": sid}, {"_id": 0}).to_list(20000)
     rules = {r["key"]: r for r in await db.bank_rules.find({}, {"_id": 0}).to_list(5000)}
-    counts = {"suggested": 0, "suspense": 0, "approved": 0, "ignored": 0}
+    counts = {"suggested": 0, "suspense": 0, "approved": 0, "ignored": 0, "settlement": 0}
+    # One fetch for the whole statement rather than three per row.
+    dates = sorted(str(t.get("date") or "") for t in txns if t.get("date"))
+    pool: Dict[str, List[Dict[str, Any]]] = {"payment_in": [], "payment_out": [], "expense": []}
+    party_of: Dict[str, str] = {}
+    if dates:
+        span = max(_BANK_MATCH_WINDOW_DAYS, _BANK_SETTLE_WINDOW_DAYS)
+        lo = (datetime.strptime(dates[0], "%Y-%m-%d") - timedelta(days=span)).strftime("%Y-%m-%d")
+        hi = (datetime.strptime(dates[-1], "%Y-%m-%d") + timedelta(days=span)).strftime("%Y-%m-%d")
+        pool, party_of = await asyncio.gather(_bank_fetch_pool(lo, hi), _bank_party_index())
     for t in txns:
         if t.get("status") == "approved":
             counts["approved"] += 1
@@ -4324,13 +4542,26 @@ async def match_bank_statement(sid: str,
             counts["ignored"] += 1
             continue
         patch: Dict[str, Any] = {"match_type": "", "match_id": "", "match_code": "",
-                                 "match_confidence": 0, "match_reason": ""}
+                                 "match_confidence": 0, "match_reason": "",
+                                 "match_ids": [], "match_codes": [],
+                                 "settlement_total": 0, "short_by": 0, "short_reason": ""}
         # A remembered rule fills in WHO before we look for the entry.
         rule = rules.get(_bank_name_key(t.get("counterparty") or ""))
         if rule:
             patch.update({"party_id": rule.get("party_id", ""), "party_type": rule.get("party_type", ""),
                           "party_name": rule.get("party_name", "")})
-        cands = await _bank_candidates(t)
+        cands = await _bank_candidates(t, pool)
+        if not cands:
+            # No single entry at this amount — try a settlement: several of THIS party's payments
+            # adding up to the row. Only ever offered when the party is identified, so a sum is
+            # never assembled out of unrelated records that happen to total the right figure.
+            settle = _bank_settlement_for(t, pool, party_of)
+            if settle:
+                patch.update(settle)
+                counts["suggested"] += 1
+                counts["settlement"] += 1
+                await db.bank_txns.update_one({"id": t["id"]}, {"$set": patch})
+                continue
         if cands:
             best = cands[0]
             patch.update({"status": "suggested", "match_type": best["match_type"],
@@ -4374,6 +4605,7 @@ class BankApproveIn(BaseModel):
     model_config = ConfigDict(extra="ignore")
     match_type: str = ""             # payment_in | payment_out | expense
     match_id: str = ""
+    match_ids: List[str] = Field(default_factory=list)   # a settlement: approve the whole set
     party_id: str = ""
     party_type: str = ""
     party_name: str = ""
@@ -4392,17 +4624,29 @@ async def approve_bank_match(sid: str, tid: str, body: BankApproveIn,
     coll = _bank_match_coll(mtype)
     if coll is None or not mid:
         raise HTTPException(400, "Pick which entry this row belongs to.")
-    rec = await coll.find_one({"id": mid}, {"_id": 0})
-    if not rec:
+    # A settlement approves as one unit: every payment in the set is stamped, or none is. Half a
+    # settlement on the books is worse than none, because the remainder looks like an open item.
+    mids = list(body.match_ids or t.get("match_ids") or [])
+    if not mids:
+        mids = [mid]
+    if mid not in mids:
+        mids.insert(0, mid)
+    recs = await coll.find({"id": {"$in": mids}}, {"_id": 0}).to_list(len(mids) + 1)
+    if len(recs) != len(mids):
         raise HTTPException(404, "That entry no longer exists.")
-    claimed = (rec.get("bank_txn_id") or "").strip()
-    if claimed and claimed != tid:
-        raise HTTPException(409, "That entry is already reconciled against another bank row. "
-                                 "Unlink it there first — one payment cannot answer two rows.")
-    await coll.update_one({"id": mid}, {"$set": {"bank_txn_id": tid, "reconciled_on": t.get("date", "")}})
+    for r in recs:
+        claimed = (r.get("bank_txn_id") or "").strip()
+        if claimed and claimed != tid:
+            raise HTTPException(409, f"{r.get('code') or 'That entry'} is already reconciled "
+                                     "against another bank row. Unlink it there first — one "
+                                     "payment cannot answer two rows.")
+    rec = next((r for r in recs if r.get("id") == mid), recs[0])
+    await coll.update_many({"id": {"$in": mids}},
+                           {"$set": {"bank_txn_id": tid, "reconciled_on": t.get("date", "")}})
     pname = body.party_name or rec.get("party_name") or rec.get("vendor") or t.get("party_name") or ""
     await db.bank_txns.update_one({"id": tid}, {"$set": {
         "status": "approved", "match_type": mtype, "match_id": mid,
+        "match_ids": mids, "match_codes": [r.get("code") or "" for r in recs],
         "match_code": rec.get("code") or "",
         "party_id": body.party_id or rec.get("party_id") or "",
         "party_type": body.party_type or ("customer" if mtype == "payment_in" else "supplier"),
@@ -4435,10 +4679,15 @@ async def unlink_bank_match(sid: str, tid: str,
     if not t:
         raise HTTPException(404, "Transaction not found")
     coll = _bank_match_coll(t.get("match_type"))
-    if coll is not None and t.get("match_id"):
-        await coll.update_one({"id": t["match_id"]}, {"$set": {"bank_txn_id": ""}})
+    # Release every record the row claimed, not just the first — a settlement that unlinks
+    # partially would strand the rest as reconciled against a row that no longer points at them.
+    mids = [m for m in (list(t.get("match_ids") or []) + [t.get("match_id") or ""]) if m]
+    if coll is not None and mids:
+        await coll.update_many({"id": {"$in": list(set(mids))}}, {"$set": {"bank_txn_id": ""}})
     await db.bank_txns.update_one({"id": tid}, {"$set": {
         "status": "unmatched", "match_type": "", "match_id": "", "match_code": "",
+        "match_ids": [], "match_codes": [], "settlement_total": 0,
+        "short_by": 0, "short_reason": "",
         "match_confidence": 0, "match_reason": "", "approved_by": "", "approved_at": "",
     }})
     return {"ok": True}
