@@ -3721,8 +3721,16 @@ _BANK_NAME_NOISE = re.compile(r"\b(PVT|PRIVATE|LTD|LIMITED|LLP|INC|CO|COMPANY|AN
 
 
 def _bank_name_key(n: str) -> str:
-    """Normalise a party name for matching — banks truncate and punctuate inconsistently."""
-    n = _BANK_NAME_NOISE.sub(" ", (n or "").upper())
+    """Normalise a party name for matching — banks truncate and punctuate inconsistently.
+
+    Bracketed text goes first. A master is kept per GST registration, so the same customer is
+    several records distinguished by a branch suffix — "ASTRAL LIMITED (Dholka)". Keeping that
+    suffix normalises to ASTRALDHOLKA while the bank's truncation gives ASTRALLIMITE, and neither
+    is a prefix of the other, so the real customer on the account never matched at all. The
+    location belongs to the record, not to the identity; PAN tells the plants apart later.
+    """
+    n = re.sub(r"\([^)]*\)|\[[^\]]*\]", " ", (n or "").upper())
+    n = _BANK_NAME_NOISE.sub(" ", n)
     return re.sub(r"[^A-Z0-9]", "", n)
 
 
@@ -4524,6 +4532,7 @@ async def match_bank_statement(sid: str,
     txns = await db.bank_txns.find({"statement_id": sid}, {"_id": 0}).to_list(20000)
     rules = {r["key"]: r for r in await db.bank_rules.find({}, {"_id": 0}).to_list(5000)}
     counts = {"suggested": 0, "suspense": 0, "approved": 0, "ignored": 0, "settlement": 0}
+    ops: List[UpdateOne] = []
     # One fetch for the whole statement rather than three per row.
     dates = sorted(str(t.get("date") or "") for t in txns if t.get("date"))
     pool: Dict[str, List[Dict[str, Any]]] = {"payment_in": [], "payment_out": [], "expense": []}
@@ -4538,7 +4547,7 @@ async def match_bank_statement(sid: str,
             counts["approved"] += 1
             continue
         if t.get("category") == "Transfers (self)":
-            await db.bank_txns.update_one({"id": t["id"]}, {"$set": {"status": "ignored"}})
+            ops.append(UpdateOne({"id": t["id"]}, {"$set": {"status": "ignored"}}))
             counts["ignored"] += 1
             continue
         patch: Dict[str, Any] = {"match_type": "", "match_id": "", "match_code": "",
@@ -4560,7 +4569,7 @@ async def match_bank_statement(sid: str,
                 patch.update(settle)
                 counts["suggested"] += 1
                 counts["settlement"] += 1
-                await db.bank_txns.update_one({"id": t["id"]}, {"$set": patch})
+                ops.append(UpdateOne({"id": t["id"]}, {"$set": patch}))
                 continue
         if cands:
             best = cands[0]
@@ -4575,7 +4584,11 @@ async def match_bank_statement(sid: str,
         else:
             patch["status"] = "suspense"
             counts["suspense"] += 1
-        await db.bank_txns.update_one({"id": t["id"]}, {"$set": patch})
+        ops.append(UpdateOne({"id": t["id"]}, {"$set": patch}))
+    # One round trip for the writes too. 266 separate update_one calls at Atlas latency was the
+    # rest of the minute — the reads were only half the problem.
+    if ops:
+        await db.bank_txns.bulk_write(ops, ordered=False)
     return {"ok": True, "counts": counts, "total": len(txns)}
 
 
