@@ -543,9 +543,27 @@ function ReconcileView({ id, onBack }) {
                       <>
                         <div className="text-[12px]">
                           <span className="uppercase text-[10px] text-slate-400 mr-1">{(t.match_type || "").replace("_", " ")}</span>
-                          <strong>{t.match_code || t.match_id.slice(0, 8)}</strong>
+                          {(t.match_ids || []).length > 1 ? (
+                            <strong>{t.match_ids.length} payments</strong>
+                          ) : (
+                            <strong>{t.match_code || t.match_id.slice(0, 8)}</strong>
+                          )}
                           {t.party_name ? ` · ${t.party_name}` : ""}
                         </div>
+                        {/* A settlement is approved as a unit, so show what the unit is made of and
+                            what was deducted — an accountant should never have to take the sum on
+                            trust. The codes are listed because that is what they tick off. */}
+                        {(t.match_ids || []).length > 1 && (
+                          <div className="text-[11px] text-slate-500">
+                            {(t.match_codes || []).filter(Boolean).join(", ")}
+                            {t.settlement_total ? ` = ${inr(t.settlement_total)}` : ""}
+                            {t.short_by > 0 && (
+                              <span className={t.short_reason ? "text-amber-700" : "text-red-600"}>
+                                {" "}− {inr(t.short_by)} {t.short_reason || "unexplained"}
+                              </span>
+                            )}
+                          </div>
+                        )}
                         <div className="text-[11px] text-slate-400">
                           {t.match_confidence ? `${t.match_confidence}% — ` : ""}{t.match_reason}
                         </div>
