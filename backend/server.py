@@ -3996,7 +3996,10 @@ async def create_bank_statement(body: BankStatementCommitIn,
     """Commit a previewed statement. Rows are stored as-is — the user has seen them."""
     if not body.rows:
         raise HTTPException(400, "No rows to save.")
-    acct = await db.accounts.find_one({"id": body.account_id}, {"_id": 0, "name": 1})
+    # fin_accounts, NOT accounts: that is the collection /accounts lists and writes to. Querying a
+    # collection that does not exist returns None rather than erroring, so this reported "pick a
+    # bank account" for an account the dropdown had just supplied from that very list.
+    acct = await db.fin_accounts.find_one({"id": body.account_id}, {"_id": 0, "name": 1})
     if not acct:
         raise HTTPException(400, "Pick which bank account this statement belongs to.")
     rows = sorted(body.rows, key=lambda r: str(r.get("date") or ""))
