@@ -4684,6 +4684,137 @@ async def approve_bank_match(sid: str, tid: str, body: BankApproveIn,
     return {"ok": True, "rule_saved": saved_rule, "remaining": left}
 
 
+class BankCreateEntryIn(BaseModel):
+    """Create the missing ERP entry FROM a bank row, then link the two in one step."""
+    model_config = ConfigDict(extra="ignore")
+    kind: Literal["expense", "payment_in", "payment_out", "loan_repayment"] = "expense"
+    party_id: str = ""
+    party_name: str = ""               # free text is fine for an expense vendor
+    category: str = ""                 # expense category; defaults to the row's own
+    description: str = ""
+    notes: str = ""
+    save_rule: bool = True
+    tids: List[str] = Field(default_factory=list)   # bulk: do the same for these rows too
+
+
+def _bank_entry_doc(kind: str, t: Dict[str, Any], body: "BankCreateEntryIn",
+                    code: str, user: Dict[str, Any]) -> tuple:
+    """Build the ERP document for one bank row. Returns (collection, doc)."""
+    amount = round(float(t.get("debit") or 0) or float(t.get("credit") or 0), 2)
+    date = t.get("date") or ""
+    who = body.party_name or t.get("party_name") or t.get("counterparty") or ""
+    narration = (t.get("description") or "")[:300]
+    note = body.notes or f"Created from bank statement row {t.get('id', '')[:8]}: {narration}"
+    if kind in ("expense", "loan_repayment"):
+        # No loan module exists, so a repayment is an expense under its own category. That keeps
+        # the cash flow honest today; it does NOT split principal from interest, and it does not
+        # amortise anything. Named here so nobody later mistakes it for loan accounting.
+        cat = body.category or ("Loan & Interest" if kind == "loan_repayment"
+                                else (t.get("category") or "general"))
+        return db.expenses, Expense(
+            date=date, category=cat, description=body.description or narration or who,
+            vendor=who, amount=amount, gst_rate=0, gst_amount=0, total=amount,
+            payment_mode="bank", notes=note,
+        ).model_dump()
+    model = PaymentIn if kind == "payment_in" else PaymentOut
+    return (db.payments_in if kind == "payment_in" else db.payments_out), model(
+        code=code, party_id=body.party_id or t.get("party_id") or "", party_name=who,
+        date=date, amount=amount, payment_type="Bank Transfer",
+        ref_no=(t.get("ref") or "")[:40], bank_name=t.get("account_name") or "",
+        notes=note,
+    ).model_dump()
+
+
+@api.post("/bank-statements/{sid}/transactions/{tid}/create-entry")
+async def create_entry_from_bank_txn(sid: str, tid: str, body: BankCreateEntryIn,
+                                     user=Depends(require_roles("admin", "accountant"))):
+    """Create the missing entry for a suspense row — and for its siblings, if asked.
+
+    Suspense does not mean "no match found", it means "this never got written down". Approving
+    cannot help, because there is nothing to approve. This writes the entry the bank row implies
+    and links the two atomically, so the row leaves the queue in the state it should have been in
+    all along. It is the one place in this feature that creates a ledger record, which is why it
+    is admin/accountant only and why every document it writes says where it came from.
+    """
+    tids = [tid] + [x for x in (body.tids or []) if x and x != tid]
+    rows = await db.bank_txns.find({"id": {"$in": tids}, "statement_id": sid}, {"_id": 0}).to_list(500)
+    if not rows:
+        raise HTTPException(404, "Transaction not found")
+    found = {r["id"] for r in rows}
+    missing = [x for x in tids if x not in found]
+    if missing:
+        raise HTTPException(404, f"{len(missing)} of those rows are not on this statement.")
+    already = [r for r in rows if r.get("status") == "approved"]
+    if already:
+        raise HTTPException(409, f"{len(already)} of those rows are already linked. Unlink them first.")
+
+    kind = body.kind
+    # Validate EVERY row before writing ANY of them. These are ledger records: a bulk run that
+    # fails halfway would leave real entries created for the first few rows and nothing linking
+    # the rest, which is the kind of mess that is far harder to find than an outright refusal.
+    for t in rows:
+        amount = round(float(t.get("debit") or 0) or float(t.get("credit") or 0), 2)
+        if amount <= 0:
+            raise HTTPException(400, "A row with no amount cannot become an entry.")
+        # A credit is money IN: it can only ever be a receipt, never an expense. Getting this
+        # wrong would post a payment on the wrong side of the books, so it is checked, not trusted.
+        if float(t.get("credit") or 0) > 0 and kind in ("expense", "loan_repayment", "payment_out"):
+            raise HTTPException(400, f"{t.get('date')} {amount} is money received — "
+                                     "record it as a receipt, not a payment or expense.")
+        if float(t.get("debit") or 0) > 0 and kind == "payment_in":
+            raise HTTPException(400, f"{t.get('date')} {amount} is money paid out — "
+                                     "record it as a payment or expense, not a receipt.")
+
+    created, ops, rule_key = [], [], ""
+    for t in rows:
+        amount = round(float(t.get("debit") or 0) or float(t.get("credit") or 0), 2)
+        code = ""
+        if kind == "payment_in":
+            code = await gen_code("PMT-IN", "payment_in")
+        elif kind == "payment_out":
+            code = await gen_code("PMT-OUT", "payment_out")
+        coll, doc = _bank_entry_doc(kind, t, body, code, user)
+        doc["bank_txn_id"] = t["id"]
+        doc["reconciled_on"] = t.get("date", "")
+        await coll.insert_one(doc)
+        mtype = "expense" if kind in ("expense", "loan_repayment") else kind
+        ops.append(UpdateOne({"id": t["id"]}, {"$set": {
+            "status": "approved", "match_type": mtype, "match_id": doc["id"],
+            "match_ids": [doc["id"]], "match_codes": [doc.get("code") or ""],
+            "match_code": doc.get("code") or "",
+            "match_confidence": 100,
+            "match_reason": f"entry created from this row ({kind.replace('_', ' ')})",
+            "party_id": body.party_id or t.get("party_id") or "",
+            "party_name": body.party_name or t.get("party_name") or t.get("counterparty") or "",
+            "party_type": "customer" if kind == "payment_in" else "supplier",
+            "approved_by": user.get("name") or user.get("email") or "", "approved_at": now_iso(),
+        }}))
+        created.append({"id": doc["id"], "code": doc.get("code") or "", "amount": amount,
+                        "date": t.get("date")})
+        rule_key = rule_key or _bank_name_key(t.get("counterparty") or "")
+    if ops:
+        await db.bank_txns.bulk_write(ops, ordered=False)
+    saved_rule = False
+    name = body.party_name or (rows[0].get("counterparty") or "")
+    if body.save_rule and rule_key and len(rule_key) >= 5 and name:
+        await db.bank_rules.update_one({"key": rule_key}, {
+            "$set": {"party_id": body.party_id or "", "party_type": "customer" if kind == "payment_in" else "supplier",
+                     "party_name": name, "sample_narration": (rows[0].get("description") or "")[:140],
+                     "category": body.category or rows[0].get("category") or ""},
+            "$setOnInsert": {"id": new_id(), "key": rule_key, "created_at": now_iso(),
+                             "created_by": user.get("name") or user.get("email") or ""},
+            "$inc": {"hits": len(rows)},
+        }, upsert=True)
+        saved_rule = True
+    await write_audit(user.get("name", ""), "bank_entries_created", "bank_statement", sid,
+                      {"kind": kind, "rows": len(rows),
+                       "total": round(sum(c["amount"] for c in created), 2)})
+    left = await db.bank_txns.count_documents(
+        {"statement_id": sid, "status": {"$in": ["suggested", "suspense", "unmatched"]}})
+    return {"ok": True, "kind": kind, "created": created, "count": len(created),
+            "rule_saved": saved_rule, "remaining": left}
+
+
 @api.post("/bank-statements/{sid}/transactions/{tid}/unlink")
 async def unlink_bank_match(sid: str, tid: str,
                             user=Depends(require_roles("admin", "accountant"))):
