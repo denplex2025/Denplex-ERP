@@ -3453,6 +3453,10 @@ class BankStatementParseIn(BaseModel):
     column_map: Optional[Dict[str, str]] = None
     opening_balance: Optional[float] = None
     closing_balance: Optional[float] = None
+    # The date the opening balance is AS OF, so successive uploads chain. The route has always
+    # read this; the field was missing here, and extra="ignore" swallowed what the UI sent, so
+    # every parse of a well-formed file died on AttributeError before it could return.
+    opening_date: str = ""
 
 
 class BankStatementCommitIn(BaseModel):
