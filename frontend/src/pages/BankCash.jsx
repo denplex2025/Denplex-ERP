@@ -503,8 +503,22 @@ function ReconcileView({ id, onBack }) {
   };
 
   const act = async (t, what) => {
+    // Unlinking a row whose entry this screen CREATED deletes that entry — it only ever existed
+    // because of the bank row. Say so before doing it, rather than reporting it afterwards.
+    if (what === "unlink" && t.match_reason?.startsWith("entry created from this row")) {
+      const n = (t.match_ids || []).length || 1;
+      if (!window.confirm(
+        `Unlinking will also delete the ${n === 1 ? "entry" : `${n} entries`} this screen created `
+        + `for ${t.counterparty || "this row"} (${inr(t.debit || t.credit)}).\n\n`
+        + `The bank row goes back to Suspense. Continue?`)) return;
+    }
     setBusy(true);
-    try { await api.post(`/bank-statements/${id}/transactions/${t.id}/${what}`); await load(); }
+    try {
+      const r = await api.post(`/bank-statements/${id}/transactions/${t.id}/${what}`);
+      const gone = r?.data?.deleted_entries || [];
+      if (gone.length) toast.success(`Unlinked — ${gone.length} created entr${gone.length === 1 ? "y was" : "ies were"} removed`);
+      await load();
+    }
     catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
     setBusy(false);
   };
